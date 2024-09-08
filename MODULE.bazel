@@ -2,12 +2,6 @@
 
 module(name = "build-server")
 
-# Dependencies from the host
-
-local_deps = use_extension("//build/extensions:local_deps.bzl", "local_deps")
-local_deps.symlink_all()
-use_repo(local_deps, "local")
-
 # Dependencies from the local registry
 
 bazel_dep(name = "google_apis_bazel", version = "0.0.1")
