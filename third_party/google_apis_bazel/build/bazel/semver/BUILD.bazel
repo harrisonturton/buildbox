@@ -1,0 +1,9 @@
+proto_library(
+    name = "semver_proto",
+    srcs = ["semver.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@google_apis_core//google/rpc:status_proto",
+        "@google_apis_proto//google/protobuf:timestamp_proto",
+    ],
+)

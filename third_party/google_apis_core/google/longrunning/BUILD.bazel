@@ -1,0 +1,18 @@
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "operations_proto",
+    srcs = ["operations.proto"],
+    deps = [
+        "//google/api:annotations_proto",
+        "//google/api:client_proto",
+        "//google/rpc:status_proto",
+        "@google_apis_proto//google/protobuf:any_proto",
+        "@google_apis_proto//google/protobuf:descriptor_proto",
+        "@google_apis_proto//google/protobuf:duration_proto",
+        "@google_apis_proto//google/protobuf:empty_proto",
+    ],
+)

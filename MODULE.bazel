@@ -1,0 +1,85 @@
+"""Build server"""
+
+module(name = "build-server")
+
+# Dependencies from the host
+
+local_deps = use_extension("//build/extensions:local_deps.bzl", "local_deps")
+local_deps.symlink_all()
+use_repo(local_deps, "local")
+
+# Dependencies from the local registry
+
+bazel_dep(name = "google_apis_bazel", version = "0.0.1")
+bazel_dep(name = "google_apis_core", version = "0.0.1")
+bazel_dep(name = "google_apis_proto", version = "0.0.1")
+
+# Dependencies from the Bazel Central registry
+
+bazel_dep(name = "apple_support", version = "1.16.0")
+bazel_dep(name = "rules_proto", version = "6.0.2")
+bazel_dep(name = "rules_rust", version = "0.49.3")
+bazel_dep(name = "toolchains_protoc", version = "0.3.1")
+
+# Rust dependencies and proto configuration
+
+register_toolchains("//build/toolchains/prost:prost_toolchain")
+
+crate = use_extension(
+    "@rules_rust//crate_universe:extension.bzl",
+    "crate",
+)
+
+crate.spec(
+    package = "tokio",
+    version = "1",
+    features = ["full"],
+)
+
+crate.spec(
+    package = "prost",
+    version = "0.13",
+)
+
+crate.spec(
+    default_features = False,
+    package = "prost-types",
+    version = "0.13",
+)
+
+crate.spec(
+    features = ["transport"],
+    package = "tonic",
+    version = "0.12",
+)
+
+crate.spec(
+    package = "tonic-build",
+    version = "0.12",
+)
+
+crate.spec(
+    package = "protoc-gen-prost",
+    version = "0.4",
+)
+
+crate.annotation(
+    crate = "protoc-gen-prost",
+    gen_binaries = ["protoc-gen-prost"],
+)
+
+crate.spec(
+    package = "protoc-gen-tonic",
+    version = "0.4",
+)
+
+crate.annotation(
+    crate = "protoc-gen-tonic",
+    gen_binaries = ["protoc-gen-tonic"],
+)
+
+crate.from_specs(
+    generate_binaries = True,
+)
+
+use_repo(crate, "crates")

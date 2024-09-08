@@ -1,0 +1,8 @@
+build --symlink_prefix=".bazel/bazel-"
+
+# Use local registry for third-party dependencies
+common --registry=file://%workspace%/third_party/registry
+common --registry=https://bcr.bazel.build
+
+# Use protoc from toolchains_protoc to avoid building from source
+build --incompatible_enable_proto_toolchain_resolution

@@ -1,0 +1,19 @@
+proto_library(
+    name = "remote_asset_proto",
+    srcs = ["remote_asset.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//build/bazel/remote/execution/v2:remote_execution_proto",
+        "@google_apis_core//google/api:annotations_proto",
+        "@google_apis_core//google/api:http_proto",
+        "@google_apis_core//google/rpc:status_proto",
+        "@google_apis_proto//google/protobuf:duration_proto",
+        "@google_apis_proto//google/protobuf:timestamp_proto",
+        # rust_proto_library requires transitive dependencies to be included in
+        # the proto_library target. These should be automatically inferred as
+        # transitive sources outputted within the ProtoInfo provider, but they
+        # are not. See https://github.com/bazelbuild/rules_rust/issues/2681
+        "@google_apis_core//google/longrunning:operations_proto",
+        "@google_apis_proto//google/protobuf:empty_proto",
+    ],
+)
