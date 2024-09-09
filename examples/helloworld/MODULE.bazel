@@ -1,0 +1,4 @@
+"""Hello world example for testing RBE"""
+module(name = "helloworld")
+
+bazel_dep(name = "apple_support", version = "1.16.0")
