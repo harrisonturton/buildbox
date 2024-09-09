@@ -1,0 +1,15 @@
+proto_library(
+    name = "buildeventstream_proto",
+    srcs = ["buildeventstream.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/main/protobuf:action_cache_proto",
+        "//src/main/protobuf:command_line_proto",
+        "//src/main/protobuf:failure_details_proto",
+        "//src/main/protobuf:invocation_policy_proto",
+        "//src/main/java/com/google/devtools/build/lib/packages/metrics:package_load_metrics_proto",
+        "@google_apis_proto//google/protobuf:any_proto",
+        "@google_apis_proto//google/protobuf:duration_proto",
+        "@google_apis_proto//google/protobuf:timestamp_proto",
+    ],
+)

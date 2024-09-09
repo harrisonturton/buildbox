@@ -1,0 +1,37 @@
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "action_cache_proto",
+    srcs = ["action_cache.proto"],
+)
+
+proto_library(
+    name = "command_line_proto",
+    srcs = ["command_line.proto"],
+    deps = [":option_filters_proto"],
+)
+
+proto_library(
+    name = "failure_details_proto",
+    srcs = ["failure_details.proto"],
+    deps = ["@google_apis_proto//google/protobuf:descriptor_proto"],
+)
+
+proto_library(
+    name = "invocation_policy_proto",
+    srcs = ["invocation_policy.proto"],
+    deps = [":strategy_policy_proto"],
+)
+
+proto_library(
+    name = "option_filters_proto",
+    srcs = ["option_filters.proto"],
+)
+
+proto_library(
+    name = "strategy_policy_proto",
+    srcs = ["strategy_policy.proto"],
+)

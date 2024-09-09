@@ -1,0 +1,9 @@
+"""Bazel remote execution API proto definitions"""
+
+module(
+  name = "google_apis_rbe",
+  version = "0.0.1",
+)
+
+bazel_dep(name = "google_apis_core", version = "0.0.1")
+bazel_dep(name = "google_apis_proto", version = "0.0.1")
