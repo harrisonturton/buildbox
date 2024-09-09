@@ -1,17 +1,27 @@
 load("@rules_rust//proto/prost:defs.bzl", "rust_prost_library")
 load("@rules_rust//rust:defs.bzl", "rust_binary")
 
-rust_prost_library(
-    name = "remote_asset_rust_proto",
-    proto = "@google_apis_bazel//build/bazel/remote/asset/v1:remote_asset_proto",
-)
-
 rust_binary(
     name = "server",
-    srcs = ["main.rs"],
+    srcs = glob(["**/*.rs"]),
     deps = [
-        ":remote_asset_rust_proto",
+        ":remote_asset_proto",
+        ":remote_execution_proto",
+        "@crates//:clap",
         "@crates//:tokio",
+        "@crates//:tokio-stream",
         "@crates//:tonic",
+        "@crates//:tracing",
+        "@crates//:tracing-subscriber",
     ],
+)
+
+rust_prost_library(
+    name = "remote_asset_proto",
+    proto = "@google_apis_rbe//build/bazel/remote/asset/v1:remote_asset_proto",
+)
+
+rust_prost_library(
+    name = "remote_execution_proto",
+    proto = "@google_apis_rbe//build/bazel/remote/execution/v2:remote_execution_proto",
 )
