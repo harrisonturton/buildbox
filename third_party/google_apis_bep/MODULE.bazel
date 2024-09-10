@@ -1,4 +1,4 @@
-"""Bazel remote execution API proto definitions"""
+"""Build event protocol proto definitions"""
 
 module(
   name = "google_apis_bep",

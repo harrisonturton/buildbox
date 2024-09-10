@@ -1,0 +1,31 @@
+proto_library(
+    name = "build_events_proto",
+    srcs = ["build_events.proto"],
+    deps = [
+        ":build_status_proto",
+        "@google_apis_proto//google/protobuf:any_proto",
+        "@google_apis_proto//google/protobuf:timestamp_proto",
+    ],
+)
+
+proto_library(
+    name = "build_status_proto",
+    srcs = ["build_status.proto"],
+    deps = [
+        "@google_apis_proto//google/protobuf:any_proto",
+        "@google_apis_proto//google/protobuf:wrappers_proto",
+    ],
+)
+
+proto_library(
+    name = "publish_build_event_proto",
+    srcs = ["publish_build_event.proto"],
+    deps = [
+        ":build_events_proto",
+        "@google_apis_core//google/api:annotations_proto",
+        "@google_apis_core//google/api:client_proto",
+        "@google_apis_core//google/api:field_behavior_proto",
+        "@google_apis_proto//google/protobuf:duration_proto",
+        "@google_apis_proto//google/protobuf:empty_proto",
+    ],
+)

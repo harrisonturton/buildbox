@@ -1,4 +1,3 @@
-
 package(
     default_visibility = ["//visibility:public"],
 )
@@ -20,6 +19,12 @@ proto_library(
         "@google_apis_proto//google/protobuf:descriptor_proto",
         "@google_apis_proto//google/protobuf:duration_proto",
     ],
+)
+
+proto_library(
+    name = "field_behavior_proto",
+    srcs = ["field_behavior.proto"],
+    deps = ["@google_apis_proto//google/protobuf:descriptor_proto"],
 )
 
 proto_library(

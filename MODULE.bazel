@@ -5,6 +5,7 @@ module(name = "build-server")
 # Dependencies from the local registry
 
 bazel_dep(name = "google_apis_bep", version = "0.0.1")
+bazel_dep(name = "google_apis_bes", version = "0.0.1")
 bazel_dep(name = "google_apis_core", version = "0.0.1")
 bazel_dep(name = "google_apis_proto", version = "0.0.1")
 bazel_dep(name = "google_apis_rbe", version = "0.0.1")
