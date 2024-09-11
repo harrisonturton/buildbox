@@ -5,6 +5,7 @@ rust_binary(
     name = "server",
     srcs = glob(["**/*.rs"]),
     deps = [
+        ":bytestream_proto",
         ":remote_asset_proto",
         ":remote_execution_proto",
         "@crates//:clap",
@@ -14,6 +15,11 @@ rust_binary(
         "@crates//:tracing",
         "@crates//:tracing-subscriber",
     ],
+)
+
+rust_prost_library(
+    name = "bytestream_proto",
+    proto = "@google_apis_core//google/bytestream:bytestream_proto",
 )
 
 rust_prost_library(

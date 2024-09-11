@@ -10,18 +10,21 @@ pub struct ActionCacheService {}
 impl ActionCache for ActionCacheService {
     async fn get_action_result(
         &self,
-        _req: Request<GetActionResultRequest>,
+        req: Request<GetActionResultRequest>,
     ) -> Result<Response<ActionResult>, Status> {
-        tracing::info!("ActionCache::get_action_result");
-        // Err(Status::internal("not implemented"))
-        Ok(Response::new(ActionResult::default()))
+        let req = req.into_inner();
+        let hash = req.action_digest.unwrap().hash;
+        tracing::info!("ActionCache::get_action_result {hash}");
+        Err(Status::not_found("action not found"))
     }
 
     async fn update_action_result(
         &self,
-        _req: Request<UpdateActionResultRequest>,
+        req: Request<UpdateActionResultRequest>,
     ) -> Result<Response<ActionResult>, Status> {
-        tracing::info!("ActionCache::update_action_result");
+        let req = req.into_inner();
+        let hash = req.action_digest.unwrap().hash;
+        tracing::info!("ActionCache::update_action_result {hash}");
         Ok(Response::new(ActionResult::default()))
     }
 }

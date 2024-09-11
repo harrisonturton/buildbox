@@ -4,6 +4,9 @@ pub use action_cache::ActionCacheService;
 pub mod capabilities;
 pub use capabilities::CapabilitiesService;
 
+pub mod bytestream;
+pub use bytestream::ByteStreamService;
+
 pub mod cas;
 pub use cas::ContentAddressableStorageService;
 

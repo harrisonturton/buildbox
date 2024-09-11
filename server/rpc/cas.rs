@@ -13,25 +13,41 @@ pub struct ContentAddressableStorageService {}
 impl ContentAddressableStorage for ContentAddressableStorageService {
     async fn find_missing_blobs(
         &self,
-        _req: Request<FindMissingBlobsRequest>,
+        req: Request<FindMissingBlobsRequest>,
     ) -> Result<Response<FindMissingBlobsResponse>, Status> {
+        let req = req.into_inner();
         tracing::info!("ContentAddressableStorage::find_missing_blobs");
-        Ok(Response::new(FindMissingBlobsResponse::default()))
+
+        for digest in &req.blob_digests {
+          let hash = &digest.hash;
+          tracing::info!("find blob: {hash}");
+        }
+
+        // let req = req.into_inner();
+        // let hash = req.action_digest.unwrap().hash;
+        // tracing::info!("ActionCache::get_action_result {hash}");
+
+        // Ok(Response::new(FindMissingBlobsResponse::default()))
+        Ok(Response::new(FindMissingBlobsResponse {
+          missing_blob_digests: req.blob_digests,
+        }))
     }
 
     async fn batch_update_blobs(
         &self,
-        _req: Request<BatchUpdateBlobsRequest>,
+        req: Request<BatchUpdateBlobsRequest>,
     ) -> Result<Response<BatchUpdateBlobsResponse>, Status> {
-        tracing::info!("ContentAddressableStorage::batch_update_blobs");
+        let req = req.into_inner();
+        tracing::info!("ContentAddressableStorage::batch_update_blobs {req:?}");
         Ok(Response::new(BatchUpdateBlobsResponse::default()))
     }
 
     async fn batch_read_blobs(
         &self,
-        _req: Request<BatchReadBlobsRequest>,
+        req: Request<BatchReadBlobsRequest>,
     ) -> Result<Response<BatchReadBlobsResponse>, Status> {
-        tracing::info!("ContentAddressableStorage::batch_read_blobs");
+        let req = req.into_inner();
+        tracing::info!("ContentAddressableStorage::batch_read_blobs {req:?}");
         Ok(Response::new(BatchReadBlobsResponse::default()))
     }
 
@@ -39,9 +55,10 @@ impl ContentAddressableStorage for ContentAddressableStorageService {
 
     async fn get_tree(
         &self,
-        _req: Request<GetTreeRequest>,
+        req: Request<GetTreeRequest>,
     ) -> Result<Response<Self::GetTreeStream>, Status> {
-        tracing::info!("ContentAddressableStorage::get_tree");
+        let req = req.into_inner();
+        tracing::info!("ContentAddressableStorage::get_tree {req:?}");
         todo!()
     }
 }

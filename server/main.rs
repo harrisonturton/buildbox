@@ -4,6 +4,8 @@ use crate::proto::remote_execution::CapabilitiesServer;
 use crate::proto::remote_execution::ContentAddressableStorageServer;
 use crate::proto::remote_execution::ExecutionServer;
 
+use bytestream_proto::google::bytestream::byte_stream_server::ByteStreamServer;
+
 use clap::Parser;
 use std::error::Error;
 use std::path::PathBuf;
@@ -46,6 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let execution_service = rpc::ExecutionService::default();
     let action_cache_service = rpc::ActionCacheService::default();
     let cas_service = rpc::ContentAddressableStorageService::default();
+    let bytestream_service = rpc::ByteStreamService::default();
     let capabilities_service = rpc::CapabilitiesService::default();
 
     Server::builder()
@@ -57,6 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .add_service(ExecutionServer::new(execution_service))
         .add_service(ActionCacheServer::new(action_cache_service))
         .add_service(ContentAddressableStorageServer::new(cas_service))
+        .add_service(ByteStreamServer::new(bytestream_service))
         .add_service(CapabilitiesServer::new(capabilities_service))
         .serve(addr)
         .await?;

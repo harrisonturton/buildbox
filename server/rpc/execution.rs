@@ -12,19 +12,21 @@ impl Execution for ExecutionService {
 
     async fn execute(
         &self,
-        _req: Request<ExecuteRequest>,
+        req: Request<ExecuteRequest>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
-        tracing::info!("Execution::execute");
-        todo!()
+        let req = req.into_inner();
+        tracing::info!("Execution::execute {req:?}");
+        Err(Status::internal("not implemented"))
     }
 
     type WaitExecutionStream = ResponseStream<Result<Operation, Status>>;
 
     async fn wait_execution(
         &self,
-        _req: Request<WaitExecutionRequest>,
+        req: Request<WaitExecutionRequest>,
     ) -> Result<Response<Self::WaitExecutionStream>, Status> {
-        tracing::info!("Execution::wait_execution");
-        todo!()
+        let req = req.into_inner();
+        tracing::info!("Execution::wait_execution {req:?}");
+        Err(Status::internal("not implemented"))
     }
 }
