@@ -1,0 +1,5 @@
+proto_library(
+    name = "bytestream_proto",
+    srcs = ["bytestream.proto"],
+    visibility = ["//visibility:public"],
+)
