@@ -1,13 +1,26 @@
 use super::ResponseStream;
-use crate::proto::remote_execution::{
-    BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest,
-    BatchUpdateBlobsResponse, ContentAddressableStorage, FindMissingBlobsRequest,
-    FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
+use crate::{
+    blob::LocalBlobStore,
+    proto::remote_execution::{
+        BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest,
+        BatchUpdateBlobsResponse, ContentAddressableStorage, FindMissingBlobsRequest,
+        FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
+    },
 };
 use tonic::{Request, Response, Status};
 
-#[derive(Default, Debug)]
-pub struct ContentAddressableStorageService {}
+#[derive(Debug)]
+pub struct ContentAddressableStorageService {
+    store: LocalBlobStore,
+}
+
+impl ContentAddressableStorageService {
+    /// Create new instance of [`ContentAddressableStorageService`].
+    #[must_use]
+    pub fn new(store: LocalBlobStore) -> Self {
+        Self { store }
+    }
+}
 
 #[tonic::async_trait]
 impl ContentAddressableStorage for ContentAddressableStorageService {
@@ -16,20 +29,26 @@ impl ContentAddressableStorage for ContentAddressableStorageService {
         req: Request<FindMissingBlobsRequest>,
     ) -> Result<Response<FindMissingBlobsResponse>, Status> {
         let req = req.into_inner();
-        tracing::info!("ContentAddressableStorage::find_missing_blobs");
+        let mut missing = vec![];
 
         for digest in &req.blob_digests {
-          let hash = &digest.hash;
-          tracing::info!("find blob: {hash}");
+            let hash = &digest.hash;
+
+            let exists = match self.store.contains(hash) {
+                Ok(exists) => exists,
+                Err(err) => return Err(Status::internal(err.to_string())),
+            };
+
+            if !exists {
+                tracing::info!("ContentAddressableStorage::find_missing_blobs missing hash={hash}");
+                missing.push(digest.clone());
+            } else {
+                tracing::info!("ContentAddressableStorage::find_missing_blobs found hash={hash}");
+            }
         }
 
-        // let req = req.into_inner();
-        // let hash = req.action_digest.unwrap().hash;
-        // tracing::info!("ActionCache::get_action_result {hash}");
-
-        // Ok(Response::new(FindMissingBlobsResponse::default()))
         Ok(Response::new(FindMissingBlobsResponse {
-          missing_blob_digests: req.blob_digests,
+            missing_blob_digests: missing,
         }))
     }
 
