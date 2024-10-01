@@ -17,12 +17,24 @@ bazel_dep(name = "rules_proto", version = "6.0.2")
 bazel_dep(name = "rules_rust", version = "0.49.3")
 bazel_dep(name = "toolchains_protoc", version = "0.3.1")
 
-rust_analyzer_dependencies = use_repo_rule("@rules_rust//tools/rust_analyzer:deps.bzl", "rust_analyzer_dependencies")
-rust_analyzer_dependencies(
-    name = "deps"
+# Rust toolchain
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.80.0"],
 )
 
-# Rust dependencies
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+# Rust analyzer
+
+rust_analyzer_dependencies = use_repo_rule("@rules_rust//tools/rust_analyzer:deps.bzl", "rust_analyzer_dependencies")
+rust_analyzer_dependencies(name = "deps")
+
+# Rust crates
 
 register_toolchains("//build/toolchains/prost:prost_toolchain")
 
