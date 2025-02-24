@@ -24,7 +24,7 @@ rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 
 rust.toolchain(
     edition = "2021",
-    versions = ["1.80.0"],
+    versions = ["1.84.0"],
 )
 
 use_repo(rust, "rust_toolchains")
@@ -69,6 +69,12 @@ crate.spec(
 crate.spec(
     package = "thiserror",
     version = "1.0",
+)
+
+crate.spec(
+    package = "rusqlite",
+    version = "0.33.0",
+    features = ["bundled", "chrono", "blob"],
 )
 
 # Rust gRPC and proto dependencies
