@@ -1,6 +1,0 @@
-"""Internal reimplementation of the rules_proto library"""
-
-module(
-  name = "rules_proto2",
-  version = "0.0.1",
-)
