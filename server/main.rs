@@ -4,9 +4,9 @@ mod launcher;
 mod proto;
 mod rpc;
 
-use error::Error;
+use error::{Result, Error};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     launcher::main().await
 }

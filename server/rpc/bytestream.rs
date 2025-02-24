@@ -34,8 +34,6 @@ impl ByteStream for ByteStreamService {
     }
 
 
-    // let mut reader = std::io::BufReader::new(&b"foobar"[..]);
-    // store.write("test", reader)?;
     async fn write(
         &self,
         req: Request<Streaming<WriteRequest>>,
