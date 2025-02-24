@@ -1,15 +1,22 @@
-load("@rules_rust//proto/prost:defs.bzl", "rust_prost_library")
 load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 
 rust_binary(
     name = "server",
     srcs = glob(["**/*.rs"]),
     deps = [
+        ":any_proto",
         ":bytestream_proto",
+        ":code_proto",
+        ":operations_proto",
         ":remote_asset_proto",
         ":remote_execution_proto",
+        ":semver_proto",
+        ":status_proto",
         "@crates//:bytes",
         "@crates//:clap",
+        "@crates//:prost",
+        "@crates//:prost-types",
         "@crates//:thiserror",
         "@crates//:tokio",
         "@crates//:tokio-stream",
@@ -32,4 +39,29 @@ rust_prost_library(
 rust_prost_library(
     name = "remote_execution_proto",
     proto = "@google_apis_rbe//build/bazel/remote/execution/v2:remote_execution_proto",
+)
+
+rust_prost_library(
+    name = "semver_proto",
+    proto = "@google_apis_rbe//build/bazel/semver:semver_proto",
+)
+
+rust_prost_library(
+    name = "operations_proto",
+    proto = "@google_apis_core//google/longrunning:operations_proto",
+)
+
+rust_prost_library(
+    name = "status_proto",
+    proto = "@google_apis_core//google/rpc:status_proto",
+)
+
+rust_prost_library(
+    name = "code_proto",
+    proto = "@google_apis_core//google/rpc:code_proto",
+)
+
+rust_prost_library(
+    name = "any_proto",
+    proto = "@google_apis_proto//google/protobuf:any_proto",
 )

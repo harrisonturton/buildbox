@@ -4,5 +4,8 @@ build --symlink_prefix=".bazel/bazel-"
 common --registry=file://%workspace%/third_party/registry
 common --registry=https://bcr.bazel.build
 
+# Required for rules_rust crates
+common --experimental_isolated_extension_usages
+
 # Use protoc from toolchains_protoc to avoid building from source
 build --incompatible_enable_proto_toolchain_resolution

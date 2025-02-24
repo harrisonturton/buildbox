@@ -1,10 +1,11 @@
-load("@rules_rust//proto/prost:defs.bzl", "rust_prost_toolchain")
 load("@rules_rust//rust:defs.bzl", "rust_library_group")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_toolchain")
 
 rust_library_group(
     name = "prost_runtime",
     deps = [
         "@crates//:prost",
+        "@crates//:prost-types",
     ],
 )
 
@@ -18,6 +19,7 @@ rust_library_group(
 
 rust_prost_toolchain(
     name = "prost_toolchain_impl",
+    prost_opts = ["enable_type_names=true"],
     prost_plugin = "@crates//:protoc-gen-prost__protoc-gen-prost",
     prost_runtime = ":prost_runtime",
     prost_types = "@crates//:prost-types",
@@ -28,5 +30,5 @@ rust_prost_toolchain(
 toolchain(
     name = "prost_toolchain",
     toolchain = "prost_toolchain_impl",
-    toolchain_type = "@rules_rust//proto/prost:toolchain_type",
+    toolchain_type = "@rules_rust_prost//:toolchain_type",
 )
