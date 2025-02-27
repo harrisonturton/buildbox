@@ -11,3 +11,10 @@ pub mod remote_execution {
     pub use remote_execution_proto::build::bazel::remote::execution::v2::capabilities_server::*;
     pub use remote_execution_proto::build::bazel::remote::execution::v2::*;
 }
+
+pub mod core {
+    pub use operations_proto::google::longrunning;
+    pub use status_proto::google::rpc;
+}
+
+pub use any_proto::google::protobuf;

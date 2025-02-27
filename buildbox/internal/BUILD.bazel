@@ -1,0 +1,28 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "internal",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/proto:google_apis_core",
+        "//buildbox/proto:google_apis_proto",
+        "//buildbox/proto:google_apis_rbe",
+        "@crates//:rand",
+        "@crates//:base64",
+        "@crates//:bytes",
+        "@crates//:clap",
+        "@crates//:prost",
+        "@crates//:prost-types",
+        "@crates//:ring",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:data-encoding",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+        "@crates//:tracing",
+        "@crates//:tracing-subscriber",
+        "@crates//:serde",
+        "@crates//:toml",
+    ],
+)

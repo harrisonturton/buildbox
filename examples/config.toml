@@ -1,0 +1,4 @@
+cert = "/home/harry/Documents/dev/2025/buildbox/examples/server.crt"
+key = "/home/harry/Documents/dev/2025/buildbox/examples/server.key"
+cachedir = "/home/harry/Documents/dev/2025/buildbox/examples/cache"
+execdir = "/home/harry/Documents/dev/2025/buildbox/examples/exec"

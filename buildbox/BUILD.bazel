@@ -1,16 +1,21 @@
 load("@rules_rust//rust:defs.bzl", "rust_binary")
 
 rust_binary(
-    name = "server",
+    name = "buildbox",
     srcs = glob(["**/*.rs"]),
     deps = [
-        "//:google_apis_core",
-        "//:google_apis_proto",
-        "//:google_apis_rbe",
+        "//buildbox/internal",
+        "//buildbox/rpc",
+        "//buildbox/storage",
+        "//buildbox/proto:google_apis_core",
+        "//buildbox/proto:google_apis_proto",
+        "//buildbox/proto:google_apis_rbe",
+        "@crates//:base64",
         "@crates//:bytes",
         "@crates//:clap",
         "@crates//:prost",
         "@crates//:prost-types",
+        "@crates//:ring",
         "@crates//:thiserror",
         "@crates//:tokio",
         "@crates//:tokio-stream",

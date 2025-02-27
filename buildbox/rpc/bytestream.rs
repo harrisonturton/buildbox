@@ -1,6 +1,13 @@
+//! The [`crate::rpc::bytestream`] RPC service acts like a generic,
+//! content-addressable blob storage server.
+//! 
+//! While not technically a "named" part of the Bazel remote APIs, the other RPC
+//! services assume that a `bytestream` service is available. The bytestream
+//! service is used by the remote execution and caching services to store
+//! inputs, action digests, output artifacts, etc.
+
 use super::ResponseStream;
-use crate::blob::LocalBlobStore;
-use crate::error::Error;
+use internal::{blob::LocalBlobStore, Error};
 use bytestream_proto::google::bytestream::byte_stream_server::ByteStream;
 use bytestream_proto::google::bytestream::{
     QueryWriteStatusRequest, QueryWriteStatusResponse, ReadRequest, ReadResponse, WriteRequest,
@@ -10,6 +17,7 @@ use std::str::FromStr;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
+/// Effectively the read/write input to the CAS for large byte payloads.
 #[derive(Debug)]
 pub struct ByteStreamService {
     store: LocalBlobStore,
@@ -23,7 +31,7 @@ impl ByteStreamService {
     }
 }
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl ByteStream for ByteStreamService {
     type ReadStream = ResponseStream<Result<ReadResponse, Status>>;
 
@@ -106,7 +114,7 @@ impl ResourceName {
     // `resource_name` is `{instance_name}/uploads/{uuid}/blobs/{hash}/{size}`,
     // where `{instance_name}` is optional, and there can be trailing URL
     // components after {size}.
-    pub fn parse(resource_name: &str) -> Result<Self, crate::Error> {
+    pub fn parse(resource_name: &str) -> Result<Self, Error> {
         let parts = resource_name.split("/").collect::<Vec<_>>();
 
         if parts.len() < 5 {
@@ -129,16 +137,3 @@ impl ResourceName {
         })
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     // Note this useful idiom: importing names from outer (for mod tests) scope.
-//     use super::*;
-
-//     #[test]
-//     fn test_resource_name_parse() {
-//         let url =
-//         assert_eq!(add(1, 2), 3);
-//     }
-//
-// }

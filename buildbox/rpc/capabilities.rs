@@ -1,4 +1,4 @@
-use crate::proto::remote_execution::{
+use internal::proto::remote_execution::{
     digest_function, ActionCacheUpdateCapabilities, CacheCapabilities, Capabilities,
     ExecutionCapabilities, GetCapabilitiesRequest, ServerCapabilities,
 };
@@ -8,7 +8,7 @@ use tonic::{Request, Response, Status};
 #[derive(Default, Debug)]
 pub struct CapabilitiesService {}
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl Capabilities for CapabilitiesService {
     async fn get_capabilities(
         &self,

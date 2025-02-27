@@ -1,4 +1,4 @@
-use crate::proto::remote_asset::{
+use internal::proto::remote_asset::{
     Push, PushBlobRequest, PushBlobResponse, PushDirectoryRequest, PushDirectoryResponse,
 };
 use tonic::{Request, Response, Status};
@@ -6,7 +6,7 @@ use tonic::{Request, Response, Status};
 #[derive(Default, Debug)]
 pub struct PushService {}
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl Push for PushService {
     async fn push_blob(
         &self,

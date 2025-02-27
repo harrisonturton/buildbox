@@ -1,4 +1,4 @@
-use crate::proto::remote_asset::{
+use internal::proto::remote_asset::{
     Fetch, FetchBlobRequest, FetchBlobResponse, FetchDirectoryRequest, FetchDirectoryResponse,
 };
 use tonic::{Request, Response, Status};
@@ -6,7 +6,7 @@ use tonic::{Request, Response, Status};
 #[derive(Default, Debug)]
 pub struct FetchService {}
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl Fetch for FetchService {
     async fn fetch_blob(
         &self,

@@ -1,39 +1,24 @@
-use crate::error::{Error, Result};
-use crate::proto::remote_asset::{FetchServer, PushServer};
-use crate::proto::remote_execution::ActionCacheServer;
-use crate::proto::remote_execution::CapabilitiesServer;
-use crate::proto::remote_execution::ContentAddressableStorageServer;
-use crate::proto::remote_execution::ExecutionServer;
-use crate::{blob, rpc};
+use internal::{Error, Result};
+use internal::proto::remote_asset::{FetchServer, PushServer};
+use internal::proto::remote_execution::ActionCacheServer;
+use internal::proto::remote_execution::CapabilitiesServer;
+use internal::proto::remote_execution::ContentAddressableStorageServer;
+use internal::proto::remote_execution::ExecutionServer;
+use internal::blob;
+use internal::exec;
 
 use bytestream_proto::google::bytestream::byte_stream_server::ByteStreamServer;
-use clap::Parser;
 use std::path::PathBuf;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Certificate path.
-    #[arg(value_name = "cert")]
-    cert: PathBuf,
-
-    /// Certificate private key path.
-    #[arg(value_name = "key")]
-    key: PathBuf,
-
-    /// Cache blob storage directory.
-    #[arg(value_name = "cachedir")]
-    cachedir: PathBuf,
+pub struct LaunchConfig {
+    pub cert: PathBuf,
+    pub key: PathBuf,
+    pub cachedir: PathBuf,
+    pub execdir: PathBuf,
 }
 
-pub async fn main() -> Result<()> {
-    let args = Args::parse();
-
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
-
+pub async fn launch(args: LaunchConfig) -> Result<()> {
     let cert = std::fs::read(&args.cert).map_err(Error::io_msg("failed to read certificate"))?;
     let private_key = std::fs::read(&args.key).map_err(Error::io_msg("failed to read key"))?;
 
@@ -43,15 +28,15 @@ pub async fn main() -> Result<()> {
     let addr = "127.0.0.1:50051".parse().unwrap();
     tracing::info!("Starting server on {addr}");
 
-    let store = blob::LocalBlobStore::new(
-        "/home/harry/Documents/dev/2025/build-server/examples/blob".into(),
-    );
-
+    let store = blob::LocalBlobStore::new(args.cachedir.clone().into());
+    let exec = exec::LocalExecService::new(args.execdir.into());
+    let storage = storage::Storage::local(args.cachedir.into());
+    
     let fetch_service = rpc::FetchService::default();
     let push_service = rpc::PushService::default();
-    let execution_service = rpc::ExecutionService::new(store.clone());
-    let action_cache_service = rpc::ActionCacheService::default();
-    let cas_service = rpc::ContentAddressableStorageService::new(store.clone());
+    let execution_service = rpc::ExecutionService::new(store.clone(), exec);
+    let action_cache_service = rpc::ActionCacheService::new(store.clone());
+    let cas_service = rpc::ContentAddressableStorageService::new(store.clone(), storage.clone());
     let bytestream_service = rpc::ByteStreamService::new(store.clone());
     let capabilities_service = rpc::CapabilitiesService::default();
 
