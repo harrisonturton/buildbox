@@ -13,10 +13,10 @@ bazel_dep(name = "google_apis_rbe", version = "0.0.1")
 # Dependencies from the Bazel Central registry
 
 bazel_dep(name = "apple_support", version = "1.17.1")
-bazel_dep(name = "rules_proto", version = "6.0.2")
+bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_rust", version = "0.57.1")
 bazel_dep(name = "rules_rust_prost", version = "0.57.1")
-bazel_dep(name = "toolchains_protoc", version = "0.3.1")
+bazel_dep(name = "toolchains_protoc", version = "0.3.7")
 
 # Rust toolchain
 
