@@ -1,11 +1,11 @@
 use super::{DentryTemplate, DirTemplate, FileTemplate, SandboxTemplate, SymlinkTemplate};
 use crate::{ExecCommand, ExecResult, GeneratedFile};
-use std::os::unix::fs::PermissionsExt;
 use common::{rand, Error, Result};
 use proto::bazel::exec::Digest;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, Cursor, ErrorKind, Write};
 use std::ops::Drop;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use storage::Storage;
@@ -134,9 +134,37 @@ impl SandboxHandle {
     pub fn exec(&self, exec_cmd: &ExecCommand) -> Result<ExecResult> {
         tracing::info!("Sandbox::exec {exec_cmd:?}");
 
+        // These are required environment variables on MacOS. Hardcode them for
+        // testing.
+        let mut envs = exec_cmd.env.clone();
+        envs.insert(
+            "DEVELOPER_DIR".to_string(),
+            "/Library/Developer/CommandLineTools".to_string(),
+        );
+        envs.insert(
+            "SDKROOT".to_string(),
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk".to_string(),
+        );
+
+        // For some reason the wrapped_clang script Bazel uses requires that the
+        // output files are created before they are written to?
+        for rel_path in &exec_cmd.outputs {
+            let path = PathBuf::from(rel_path);
+            let sandbox_path = self.relative_path(&path);
+            tracing::info!("Creating parent directory for: {sandbox_path:?}");
+            if let Some(parent) = sandbox_path.parent() {
+                tracing::info!("actually creating parent");
+                fs::create_dir_all(parent).map_err(|err| {
+                    tracing::error!("failed to create parent: {err:?}");
+                    Error::io(err)
+                })?;
+            }
+        }
+
         let res = Command::new(&exec_cmd.args[0])
             .current_dir(&self.dir)
             .args(&exec_cmd.args[1..])
+            .envs(&envs)
             .output();
 
         let output = res.map_err(|err| {

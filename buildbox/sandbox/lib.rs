@@ -2,13 +2,13 @@ pub mod sandbox;
 
 pub use sandbox::Sandbox;
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 use proto::bazel::exec::Digest;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecCommand {
   pub args: Vec<String>,
-  pub env: Vec<(String, String)>,
+  pub env: HashMap<String, String>,
   pub outputs: Vec<String>,
 }
 

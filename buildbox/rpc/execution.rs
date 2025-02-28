@@ -58,14 +58,21 @@ impl ExecutionService {
             .ok_or_else(|| Error::invalid("missing command digest"))
             .and_then(|digest| read_digest::<Command>(&self.storage, &digest))?;
 
+        tracing::info!("command: {command:?}");
+
         let template = self.build_sandbox_template(&input_root)?;
         let mut sandbox = self.sandbox.spawn(&template)?;
         sandbox.prepare()?;
 
+        let mut env = HashMap::new();
+        for var in &command.environment_variables {
+            env.insert(var.name.clone(), var.value.clone());
+        }
+
         let cmd = ExecCommand {
+            env,
             args: command.arguments,
-            env: vec![],
-            outputs: command.output_paths.clone(),
+            outputs: command.output_files.clone(),
         };
 
         let res = sandbox.exec(&cmd)?;
@@ -107,7 +114,7 @@ impl ExecutionService {
             cached_result: false,
             status: Some(status),
             server_logs: HashMap::new(),
-            message: "success".to_string(),
+            message: "exec response".to_string(),
         };
 
         Ok(res)
