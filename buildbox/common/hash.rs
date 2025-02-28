@@ -1,6 +1,12 @@
 use ring::digest::{Context, Digest, SHA256};
 use std::io::Write;
 
+pub fn sha256(data: &[u8]) -> HashDigest {
+    let mut hasher = Hasher::sha256();
+    hasher.write(data);
+    hasher.finish()
+}
+
 pub struct Hasher {
     ctx: Context,
 }

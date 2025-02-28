@@ -24,13 +24,11 @@ use tokio_stream::Stream;
 pub type ResponseStream<T> = Pin<Box<dyn Stream<Item = T> + Send + 'static>>;
 
 pub fn read_digest<T>(
-    store: &storage::blob::LocalBlobStore,
+    storage: &storage::Storage,
     digest: &proto::bazel::exec::Digest,
 ) -> Result<T, common::Error>
 where
     T: prost::Message + std::default::Default,
 {
-    let mut data = store.read_to_end(&digest.hash)?;
-    let mut bytes = bytes::BytesMut::from(&data[..]);
-    T::decode(&mut bytes).map_err(common::Error::boxed)
+    storage.read_message(digest)
 }

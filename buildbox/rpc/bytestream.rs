@@ -7,38 +7,78 @@
 //! inputs, action digests, output artifacts, etc.
 
 use super::ResponseStream;
-use storage::blob::LocalBlobStore;
 use common::Error;
 use proto::google::bytestream::{
     ByteStream, QueryWriteStatusRequest, QueryWriteStatusResponse, ReadRequest, ReadResponse,
     WriteRequest, WriteResponse,
 };
-use std::str::FromStr;
-use tokio_stream::StreamExt;
+use tokio::sync::mpsc;
+use std::{
+    io::{Cursor, Read},
+    str::FromStr,
+};
+use storage::Storage;
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 /// Effectively the read/write input to the CAS for large byte payloads.
 #[derive(Debug)]
 pub struct ByteStreamService {
-    store: LocalBlobStore,
+    storage: Storage,
 }
 
 impl ByteStreamService {
     /// Create a new [`ByteStreamService`] instance.
     #[must_use]
-    pub fn new(store: LocalBlobStore) -> Self {
-        Self { store }
+    pub fn new(storage: Storage) -> Self {
+        Self { storage }
     }
 }
 
 #[async_trait::async_trait]
 impl ByteStream for ByteStreamService {
-    type ReadStream = ResponseStream<Result<ReadResponse, Status>>;
+    type ReadStream = ReceiverStream<Result<ReadResponse, Status>>;
+
+    // ReadRequest { resource_name: "blobs/eaa7d9cde97fef21303b4e1e18e3e6cb7e68c92313b24bbc0335be9fe37af464/30", read_offset: 0, read_limit: 0 }
 
     async fn read(&self, req: Request<ReadRequest>) -> Result<Response<Self::ReadStream>, Status> {
         let req = req.into_inner();
         tracing::info!("ByteStream::read {req:?}");
-        Err(Status::internal("not implemented"))
+
+        let parts = req.resource_name.split("/").collect::<Vec<&str>>();
+        let hash = &parts[1];
+
+        let mut reader = self
+            .storage
+            .read(hash)
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        let (tx, rx) = mpsc::channel(1024);
+
+        tokio::spawn(async move {
+            loop {
+                let mut data = vec![0; 1024];
+                let read = reader
+                    .read(&mut data)
+                    .map_err(|err| Status::internal("failed to read"))
+                    .unwrap();
+
+                if read == 0 {
+                    break;
+                }
+
+                let res = ReadResponse {
+                    data: data[0..read].to_vec(),
+                };
+
+                tx.send(Ok(res))
+                    .await
+                    .map_err(|err| Status::internal("failed to send execute response"))
+                    .unwrap();
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn write(
@@ -82,10 +122,12 @@ impl ByteStream for ByteStreamService {
 
         tracing::info!("Writing {}", name.hash);
         let mut reader = std::io::Cursor::new(&data);
-        self.store.write(&name.hash, reader).map_err(|err| {
-            tracing::error!("Failed to write file: {err}");
-            Status::internal(err.to_string())
-        })?;
+        self.storage
+            .write_with_name(&name.hash, reader)
+            .map_err(|err| {
+                tracing::error!("Failed to write file: {err}");
+                Status::internal(err.to_string())
+            })?;
 
         Ok(Response::new(WriteResponse {
             committed_size: data.len() as i64,

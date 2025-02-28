@@ -15,6 +15,10 @@ pub struct Config {
 
     /// Execution directory.
     pub execdir: PathBuf,
+
+    /// Whether to retain sandboxes after use
+    #[serde(default)]
+    pub retain_sandboxes: bool,
 }
 
 impl Config {

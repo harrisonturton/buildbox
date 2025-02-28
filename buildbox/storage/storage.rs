@@ -1,14 +1,13 @@
+use crate::tee::TeeWriter;
 use bytes::BytesMut;
 use common::hash::Hasher;
 use common::rand;
-use proto::bazel::exec::Digest;
 use common::{Error, Result};
 use prost::Message;
+use proto::bazel::exec::Digest;
 use std::fs::OpenOptions;
 use std::io::{copy, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::PathBuf;
-
-use crate::tee::TeeWriter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Storage {
@@ -31,13 +30,26 @@ impl Storage {
         }
     }
 
-    /// Read the file identified by the digest.
-    pub fn read(&self, digest: &Digest) -> Result<impl Read> {
-        let path = local_path(&self.dir, &digest.hash);
+    /// Read the file by name.
+    pub fn read(&self, name: &str) -> Result<impl Read> {
+        let path = local_path(&self.dir, &name);
+        tracing::info!("Storage::read path={path:?}");
         let file = OpenOptions::new()
             .read(true)
             .open(path)
             .map_err(Error::io_msg("failed to read digest from storage"))?;
+
+        Ok(BufReader::new(file))
+    }
+
+    /// Read the file identified by the digest.
+    pub fn read_digest(&self, digest: &Digest) -> Result<impl Read> {
+        let path = local_path(&self.dir, &digest.hash);
+        tracing::info!("Storage::read_digest path={path:?}");
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(Error::io_msg("failed to read file from storage"))?;
 
         let metadata = file.metadata().map_err(Error::io)?;
         if metadata.len() != digest.size_bytes as u64 {
@@ -48,9 +60,9 @@ impl Storage {
     }
 
     /// Read the complete content of the file identified by the digest.
-    pub fn read_to_end(&self, digest: &Digest) -> Result<Vec<u8>> {
+    pub fn read_digest_to_end(&self, digest: &Digest) -> Result<Vec<u8>> {
         let mut data = vec![];
-        let mut reader = self.read(digest)?;
+        let mut reader = self.read_digest(digest)?;
         reader.read_to_end(&mut data).map_err(Error::io)?;
         Ok(data)
     }
@@ -61,7 +73,7 @@ impl Storage {
     where
         T: Message + Default,
     {
-        let data = self.read_to_end(digest)?;
+        let data = self.read_digest_to_end(digest)?;
         let data = BytesMut::from(data.as_slice());
         T::decode(data).map_err(Error::boxed)
     }
@@ -95,6 +107,24 @@ impl Storage {
         std::fs::rename(tmp_path, path).map_err(Error::io)?;
 
         Ok(Digest { hash, size_bytes })
+    }
+
+    /// Write to a specific filename.
+    pub fn write_with_name(&self, name: &str, src: impl Read) -> Result<()> {
+        let path = local_path(&self.dir, &name);
+
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&path)
+            .map_err(Error::io)?;
+
+        let mut writer = BufWriter::new(&file);
+        let mut reader = BufReader::new(src);
+        copy(&mut reader, &mut writer).map_err(Error::io)?;
+        writer.flush().map_err(Error::io)?;
+
+        Ok(())
     }
 }
 

@@ -33,19 +33,11 @@ async fn main() -> Result<()> {
     let args = CliArgs::parse();
 
     match args.cmd {
-        Command::Launch(args) => launch(&args).await
+        Command::Launch(args) => launch(&args).await,
     }
 }
 
 async fn launch(args: &LaunchArgs) -> Result<()> {
     let config = Config::load(&args.config)?;
-
-    let launch_config = agent::LaunchConfig {
-        cert: config.cert,
-        key: config.key,
-        cachedir: config.cachedir,
-        execdir: config.execdir
-    };
-
-    agent::launch(launch_config).await
+    agent::launch(&config).await
 }

@@ -1,88 +1,86 @@
-use storage::blob::LocalBlobStore;
-use sandbox::exec::{ExecCommand, LocalExecService, PrepareAction};
-use proto::google::{
-    longrunning::{operation, Operation},
-    rpc,
-};
-use proto::google::protobuf::Any;
-use proto::bazel::exec::{
-    Action, ActionResult, Command, Digest, Directory, DirectoryNode, ExecuteRequest, ExecuteResponse, Execution, FileNode, OutputFile, SymlinkNode, WaitExecutionRequest
-};
-use common::Error;
-
+use super::read_digest;
 use super::ResponseStream;
 use bytes::BytesMut;
+use common::Error;
 use prost::Message;
+use proto::bazel::exec::{
+    Action, ActionResult, Command, Digest, Directory, DirectoryNode, ExecuteRequest,
+    ExecuteResponse, Execution, FileNode, OutputFile, SymlinkNode, WaitExecutionRequest,
+};
+use proto::google::{
+    longrunning::{operation, Operation},
+    protobuf::Any,
+    rpc,
+};
+use sandbox::{
+    DentryTemplate, DirTemplate, ExecCommand, FileTemplate, Sandbox, SandboxTemplate,
+    SymlinkTemplate,
+};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::Read;
 use std::path::PathBuf;
 use std::str::FromStr;
+use storage::Storage;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use super::read_digest;
 
 #[derive(Debug)]
 pub struct ExecutionService {
-    store: LocalBlobStore,
-    exec: LocalExecService,
+    storage: Storage,
+    sandbox: Sandbox,
 }
 
 impl ExecutionService {
     /// Create new [`ExecutionService`] instance.
     #[must_use]
-    pub fn new(store: LocalBlobStore, exec: LocalExecService) -> Self {
-        Self { store, exec }
+    pub fn new(storage: Storage, sandbox: Sandbox) -> Self {
+        Self { storage, sandbox }
     }
 
-    pub async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, Error> {
+    async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, Error> {
         let action = req
             .action_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing action digest"))
-            .and_then(|digest| read_digest::<Action>(&self.store, &digest))?;
+            .and_then(|digest| read_digest::<Action>(&self.storage, &digest))?;
 
         let input_root = action
             .input_root_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing input root"))
-            .and_then(|digest| read_digest::<Directory>(&self.store, &digest))?;
-
-        let prepare_actions = gather_sandbox_actions(&self.store, &input_root)?;
-        let mut sandbox = self.exec.open_sandbox()?;
-        sandbox.prepare(&prepare_actions)?;
+            .and_then(|digest| read_digest::<Directory>(&self.storage, &digest))?;
 
         let command = action
             .command_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing command digest"))
-            .and_then(|digest| read_digest::<Command>(&self.store, &digest))?;
+            .and_then(|digest| read_digest::<Command>(&self.storage, &digest))?;
+
+        let template = self.build_sandbox_template(&input_root)?;
+        let mut sandbox = self.sandbox.spawn(&template)?;
+        sandbox.prepare()?;
 
         let cmd = ExecCommand {
             args: command.arguments,
             env: vec![],
             outputs: command.output_paths.clone(),
         };
-        sandbox.exec(&cmd)?;
 
-        let mut context = ring::digest::Context::new(&ring::digest::SHA256);
-        let digest = context.finish();
-        let hash = data_encoding::HEXLOWER.encode(digest.as_ref());
+        let res = sandbox.exec(&cmd)?;
+        tracing::info!("Sandbox result: {res:?}");
 
-        let mut output_files = vec![];
-        for output_path in &command.output_paths {
-            output_files.push(OutputFile {
-                path: output_path.to_owned(),
-                digest: Some(Digest {
-                    hash: hash.clone(),
-                    size_bytes: 0,
-                }),
+        let output_files = res
+            .outputs
+            .iter()
+            .map(|output| OutputFile {
+                path: output.path.to_string_lossy().to_string(),
+                digest: Some(output.digest.clone()),
                 is_executable: false,
-                contents: vec![],
-                node_properties: None,
-            });
-        }
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
 
         let action_res = ActionResult {
             output_files: output_files,
@@ -90,17 +88,17 @@ impl ExecutionService {
             output_symlinks: vec![],
             output_directories: vec![],
             output_directory_symlinks: vec![],
-            exit_code: 0,
+            exit_code: res.exit_code,
             stdout_raw: vec![],
-            stdout_digest: None,
+            stdout_digest: Some(res.stdout),
             stderr_raw: vec![],
-            stderr_digest: None,
+            stderr_digest: Some(res.stderr),
             execution_metadata: None,
         };
 
         let status = rpc::Status {
             code: 0,
-            message: "error message".to_string(),
+            message: "succcess".to_string(),
             details: vec![],
         };
 
@@ -109,10 +107,74 @@ impl ExecutionService {
             cached_result: false,
             status: Some(status),
             server_logs: HashMap::new(),
-            message: "Optional message".to_string(),
+            message: "success".to_string(),
         };
 
         Ok(res)
+    }
+
+    fn build_sandbox_template(&self, input_root: &Directory) -> Result<SandboxTemplate, Error> {
+        struct DirEntry {
+            path: PathBuf,
+            dir: Directory,
+        };
+
+        let mut next = VecDeque::new();
+        let mut actions = vec![];
+
+        next.push_back(DirEntry {
+            path: PathBuf::new(),
+            dir: input_root.clone(),
+        });
+
+        while let Some(entry) = next.pop_front() {
+            actions.push(DentryTemplate::Dir(DirTemplate {
+                path: entry.path.clone(),
+            }));
+
+            for file in &entry.dir.files {
+                let digest = file
+                    .digest
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid("missing file"))?;
+
+                actions.push(DentryTemplate::File(FileTemplate {
+                    path: self.relative_path(&entry.path, &file.name),
+                    digest: digest.clone(),
+                    executable: file.is_executable,
+                }));
+            }
+
+            for symlink in &entry.dir.symlinks {
+                actions.push(DentryTemplate::Symlink(SymlinkTemplate {
+                    path: self.relative_path(&entry.path, &symlink.name),
+                    target: self.relative_path(&entry.path, &symlink.target),
+                }));
+            }
+
+            for dir_node in &entry.dir.directories {
+                let dir = dir_node
+                    .digest
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid("missing directory"))
+                    .and_then(|digest| read_digest::<Directory>(&self.storage, &digest))?;
+
+                next.push_back(DirEntry {
+                    path: self.relative_path(&entry.path, &dir_node.name),
+                    dir,
+                });
+            }
+        }
+
+        Ok(SandboxTemplate {
+            filesystem: actions,
+        })
+    }
+
+    fn relative_path(&self, root: &PathBuf, child: &str) -> PathBuf {
+        let mut path = root.clone();
+        path.push(child.to_owned());
+        path
     }
 }
 
@@ -143,8 +205,8 @@ impl Execution for ExecutionService {
         };
 
         let op = Operation {
-            // name ending with operations/{unique_id}.
-            name: "exec".to_string(),
+            // TODO: Build directory of operations to allow awaiting them later.
+            name: "operations/fake-id".to_string(),
             metadata: None,
             done: true,
             result: Some(operation::Result::Response(proto_any)),
@@ -152,8 +214,7 @@ impl Execution for ExecutionService {
 
         tx.send(Ok(op))
             .await
-            .map_err(|err| Status::internal("failed to execute"))
-            .unwrap();
+            .map_err(|err| Status::internal("failed to send execute response"))?;
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -166,61 +227,4 @@ impl Execution for ExecutionService {
     ) -> Result<Response<Self::WaitExecutionStream>, Status> {
         todo!()
     }
-}
-
-// Walk the proto-defined file tree and construct a set of copy actions
-// that the exec service will use to populate the sandbox.
-fn gather_sandbox_actions(
-    store: &LocalBlobStore,
-    input_root: &Directory,
-) -> Result<Vec<PrepareAction>, Error> {
-    let mut next_dirs = VecDeque::new();
-    let mut prepare_actions = vec![];
-
-    next_dirs.push_back((PathBuf::new(), input_root.clone()));
-
-    while let Some((path, dir)) = next_dirs.pop_front() {
-        prepare_actions.push(PrepareAction::CreateDir { path: path.clone() });
-
-        for file in &dir.files {
-            let digest = file
-                .digest
-                .as_ref()
-                .ok_or_else(|| Error::invalid("missing file"))?;
-
-            let mut path = path.clone();
-            path.push(file.name.to_owned());
-
-            prepare_actions.push(PrepareAction::CreateFile {
-                path,
-                sha256: digest.hash.to_owned(),
-                executable: file.is_executable,
-            });
-        }
-
-        for symlink in &dir.symlinks {
-            let mut path = path.clone();
-            path.push(symlink.name.to_owned());
-
-            let target = PathBuf::from_str(&symlink.target)
-                .map_err(Error::boxed_msg("could not create path for symlink"))?;
-
-            prepare_actions.push(PrepareAction::CreateSymlink { path, target });
-        }
-
-        for dir_node in &dir.directories {
-            let mut path = path.clone();
-            path.push(dir_node.name.to_owned());
-
-            let dir = dir_node
-                .digest
-                .as_ref()
-                .ok_or_else(|| Error::invalid("missing directory"))
-                .and_then(|digest| read_digest::<Directory>(store, &digest))?;
-
-            next_dirs.push_back((path.clone(), dir.clone()));
-        }
-    }
-
-    Ok(prepare_actions)
 }

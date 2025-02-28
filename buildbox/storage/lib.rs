@@ -1,6 +1,4 @@
-mod local;
+mod storage;
 mod tee;
 
-pub mod blob;
-
-pub use local::Storage;
+pub use storage::Storage;

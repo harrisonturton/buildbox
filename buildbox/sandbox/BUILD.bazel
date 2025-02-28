@@ -6,6 +6,8 @@ rust_library(
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         "//buildbox/common",
+        "//buildbox/proto",
+        "//buildbox/storage",
         "@crates//:tracing",
     ],
 )

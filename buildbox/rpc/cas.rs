@@ -1,6 +1,5 @@
 use super::ResponseStream;
 use storage::Storage;
-use storage::blob::LocalBlobStore;
 use proto::bazel::exec::{
         BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest,
         BatchUpdateBlobsResponse, ContentAddressableStorage, FindMissingBlobsRequest,
@@ -29,15 +28,14 @@ use tonic::{Request, Response, Status};
 /// `ByteStream` API.
 #[derive(Debug)]
 pub struct ContentAddressableStorageService {
-    store: LocalBlobStore,
     storage: Storage,
 }
 
 impl ContentAddressableStorageService {
     /// Create new instance of [`ContentAddressableStorageService`].
     #[must_use]
-    pub fn new(store: LocalBlobStore, storage: Storage) -> Self {
-        Self { store, storage }
+    pub fn new(storage: Storage) -> Self {
+        Self { storage }
     }
 }
 
@@ -57,7 +55,7 @@ impl ContentAddressableStorage for ContentAddressableStorageService {
         for digest in &req.blob_digests {
             let hash = &digest.hash;
 
-            let exists = match self.store.contains(hash) {
+            let exists = match self.storage.contains(&digest) {
                 Ok(exists) => exists,
                 Err(err) => return Err(Status::internal(err.to_string())),
             };
