@@ -1,7 +1,8 @@
 use bytes::BytesMut;
-use internal::hash::Hasher;
-use internal::proto::remote_execution::Digest;
-use internal::{Error, Result};
+use common::hash::Hasher;
+use common::rand;
+use proto::bazel::exec::Digest;
+use common::{Error, Result};
 use prost::Message;
 use std::fs::OpenOptions;
 use std::io::{copy, BufReader, BufWriter, ErrorKind, Read, Write};
@@ -67,7 +68,7 @@ impl Storage {
 
     /// Write content to the storage and return the digest.
     pub fn write(&self, src: impl Read) -> Result<Digest> {
-        let tmp = format!("tmp-{}", internal::rand::string(20));
+        let tmp = format!("tmp-{}", rand::string(20));
         let tmp_path = local_path(&self.dir, &tmp);
 
         let file = OpenOptions::new()

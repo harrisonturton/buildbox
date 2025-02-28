@@ -1,17 +1,17 @@
 //! The [`crate::rpc::bytestream`] RPC service acts like a generic,
 //! content-addressable blob storage server.
-//! 
+//!
 //! While not technically a "named" part of the Bazel remote APIs, the other RPC
 //! services assume that a `bytestream` service is available. The bytestream
 //! service is used by the remote execution and caching services to store
 //! inputs, action digests, output artifacts, etc.
 
 use super::ResponseStream;
-use internal::{blob::LocalBlobStore, Error};
-use bytestream_proto::google::bytestream::byte_stream_server::ByteStream;
-use bytestream_proto::google::bytestream::{
-    QueryWriteStatusRequest, QueryWriteStatusResponse, ReadRequest, ReadResponse, WriteRequest,
-    WriteResponse,
+use storage::blob::LocalBlobStore;
+use common::Error;
+use proto::google::bytestream::{
+    ByteStream, QueryWriteStatusRequest, QueryWriteStatusResponse, ReadRequest, ReadResponse,
+    WriteRequest, WriteResponse,
 };
 use std::str::FromStr;
 use tokio_stream::StreamExt;
@@ -41,7 +41,6 @@ impl ByteStream for ByteStreamService {
         Err(Status::internal("not implemented"))
     }
 
-
     async fn write(
         &self,
         req: Request<Streaming<WriteRequest>>,
@@ -59,7 +58,9 @@ impl ByteStream for ByteStreamService {
                 tracing::info!("ByteStream::write hash={:?}", resource_name.hash);
                 name = Some(resource_name.clone());
 
-                if resource_name.uuid == "hash=d0b06d284064528c34e0177821b739e116582907f4de5e0886cde3476483367a" {
+                if resource_name.uuid
+                    == "hash=d0b06d284064528c34e0177821b739e116582907f4de5e0886cde3476483367a"
+                {
                     tracing::warn!("GOT {req:?}");
                 }
             }
@@ -81,12 +82,10 @@ impl ByteStream for ByteStreamService {
 
         tracing::info!("Writing {}", name.hash);
         let mut reader = std::io::Cursor::new(&data);
-        self.store
-            .write(&name.hash, reader)
-            .map_err(|err| {
-                tracing::error!("Failed to write file: {err}");
-                Status::internal(err.to_string())
-            })?;
+        self.store.write(&name.hash, reader).map_err(|err| {
+            tracing::error!("Failed to write file: {err}");
+            Status::internal(err.to_string())
+        })?;
 
         Ok(Response::new(WriteResponse {
             committed_size: data.len() as i64,

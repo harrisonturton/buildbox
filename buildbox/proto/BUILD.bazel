@@ -1,31 +1,18 @@
-load("@rules_rust//rust:defs.bzl", "rust_library_group")
+load("@rules_rust//rust:defs.bzl", "rust_library")
 load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 
-rust_library_group(
-    name = "google_apis_core",
-    visibility = ["//visibility:public"],
+rust_library(
+    name = "proto",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//buildbox:__subpackages__"],
     deps = [
         ":bytestream_proto",
         ":code_proto",
         ":operations_proto",
         ":status_proto",
-    ],
-)
-
-rust_library_group(
-    name = "google_apis_rbe",
-    visibility = ["//visibility:public"],
-    deps = [
         ":remote_asset_proto",
         ":remote_execution_proto",
         ":semver_proto",
-    ],
-)
-
-rust_library_group(
-    name = "google_apis_proto",
-    visibility = ["//visibility:public"],
-    deps = [
         ":any_proto",
     ],
 )

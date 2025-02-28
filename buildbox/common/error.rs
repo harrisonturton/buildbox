@@ -1,5 +1,4 @@
 use std::fmt;
-use std::fmt::write;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

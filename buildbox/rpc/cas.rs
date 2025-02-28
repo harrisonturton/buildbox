@@ -1,13 +1,11 @@
 use super::ResponseStream;
-use storage::local;
-use internal::{
-    blob::LocalBlobStore,
-    proto::remote_execution::{
+use storage::Storage;
+use storage::blob::LocalBlobStore;
+use proto::bazel::exec::{
         BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest,
         BatchUpdateBlobsResponse, ContentAddressableStorage, FindMissingBlobsRequest,
         FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
-    },
-};
+    };
 use tonic::{Request, Response, Status};
 
 /// The CAS (content-addressable storage) is used to store the inputs to and
@@ -32,13 +30,13 @@ use tonic::{Request, Response, Status};
 #[derive(Debug)]
 pub struct ContentAddressableStorageService {
     store: LocalBlobStore,
-    storage: local::Storage,
+    storage: Storage,
 }
 
 impl ContentAddressableStorageService {
     /// Create new instance of [`ContentAddressableStorageService`].
     #[must_use]
-    pub fn new(store: LocalBlobStore, storage: local::Storage) -> Self {
+    pub fn new(store: LocalBlobStore, storage: Storage) -> Self {
         Self { store, storage }
     }
 }

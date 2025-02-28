@@ -1,13 +1,12 @@
-use internal::{Error, Result};
-use internal::proto::remote_asset::{FetchServer, PushServer};
-use internal::proto::remote_execution::ActionCacheServer;
-use internal::proto::remote_execution::CapabilitiesServer;
-use internal::proto::remote_execution::ContentAddressableStorageServer;
-use internal::proto::remote_execution::ExecutionServer;
-use internal::blob;
-use internal::exec;
-
-use bytestream_proto::google::bytestream::byte_stream_server::ByteStreamServer;
+use common::{Error, Result};
+use sandbox::exec;
+use storage::blob;
+use proto::bazel::asset::{FetchServer, PushServer};
+use proto::bazel::exec::ActionCacheServer;
+use proto::bazel::exec::CapabilitiesServer;
+use proto::bazel::exec::ContentAddressableStorageServer;
+use proto::bazel::exec::ExecutionServer;
+use proto::google::bytestream::ByteStreamServer;
 use std::path::PathBuf;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 

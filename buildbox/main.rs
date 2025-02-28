@@ -1,8 +1,10 @@
-pub use internal::{Error, Result, config::Config};
+pub use common::{Error, Result};
 use clap::{Parser, Subcommand, Args};
 use std::path::PathBuf;
+use config::Config;
 
 mod agent;
+mod config;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]

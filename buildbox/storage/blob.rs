@@ -1,8 +1,7 @@
-use crate::Error;
-use std::fs::{File, OpenOptions};
+use common::Error;
+use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::marker::Unpin;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,7 +19,7 @@ impl LocalBlobStore {
     /// Check that the blob store contains an object.
     pub fn contains(&self, key: &str) -> Result<bool, Error> {
         let path = self.create_path(key);
-        match OpenOptions::new().read(true).open(key) {
+        match OpenOptions::new().read(true).open(path) {
             Ok(_) => Ok(true),
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
             Err(err) => Err(Error::io(err)),

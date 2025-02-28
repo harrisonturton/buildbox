@@ -1,14 +1,14 @@
-use internal::blob::LocalBlobStore;
-use internal::exec::{ExecCommand, LocalExecService, PrepareAction};
-use internal::proto::core::{
+use storage::blob::LocalBlobStore;
+use sandbox::exec::{ExecCommand, LocalExecService, PrepareAction};
+use proto::google::{
     longrunning::{operation, Operation},
     rpc,
 };
-use internal::proto::protobuf::Any;
-use internal::proto::remote_execution::{
+use proto::google::protobuf::Any;
+use proto::bazel::exec::{
     Action, ActionResult, Command, Digest, Directory, DirectoryNode, ExecuteRequest, ExecuteResponse, Execution, FileNode, OutputFile, SymlinkNode, WaitExecutionRequest
 };
-use internal::Error;
+use common::Error;
 
 use super::ResponseStream;
 use bytes::BytesMut;

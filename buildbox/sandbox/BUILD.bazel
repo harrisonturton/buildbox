@@ -5,23 +5,7 @@ rust_library(
     srcs = glob(["**/*.rs"]),
     visibility = ["//buildbox:__subpackages__"],
     deps = [
-        "//buildbox/internal",
-        "//buildbox/proto:google_apis_core",
-        "//buildbox/proto:google_apis_proto",
-        "//buildbox/proto:google_apis_rbe",
-        "@crates//:bytes",
-        "@crates//:prost",
-        "@crates//:prost-types",
-        "@crates//:thiserror",
-        "@crates//:tokio",
-        "@crates//:tokio-stream",
-        "@crates//:data-encoding",
-        "@crates//:tonic",
-        "@crates//:ring",
+        "//buildbox/common",
         "@crates//:tracing",
-        "@crates//:tracing-subscriber",
     ],
-    proc_macro_deps = [
-        "@crates//:async-trait"
-    ]
 )

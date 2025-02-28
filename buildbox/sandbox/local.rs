@@ -1,4 +1,4 @@
-use internal::{rand, Error, Result};
+use common::{rand, Error, Result};
 use std::ops::Drop;
 use std::path::PathBuf;
 

@@ -1,4 +1,4 @@
-use internal::proto::remote_asset::{
+use proto::bazel::asset::{
     Fetch, FetchBlobRequest, FetchBlobResponse, FetchDirectoryRequest, FetchDirectoryResponse,
 };
 use tonic::{Request, Response, Status};

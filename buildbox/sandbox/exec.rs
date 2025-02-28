@@ -1,7 +1,6 @@
 use std::path::PathBuf;
-use crate::Result;
-use rand::{thread_rng, Rng};
-use rand::distr::Alphanumeric;
+use common::Result;
+use common::rand;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalExecService {
@@ -17,7 +16,7 @@ impl LocalExecService {
 
     #[must_use]
     pub fn open_sandbox(&self) -> Result<ExecSandbox> {
-      let id = sandbox_id();
+      let id = rand::string(30);
 
       let mut path = self.dir.clone();
       path.push(id);
@@ -60,12 +59,4 @@ impl ExecSandbox {
     tracing::info!("ExecSandbox::exec {cmd:?}");
     Ok(())
   }
-}
-
-fn sandbox_id() -> String {
-    thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(30)
-        .map(char::from)
-        .collect()
 }

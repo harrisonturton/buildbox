@@ -15,8 +15,7 @@ impl Hasher {
 
     /// Finish the hash operation and consume the hasher.
     pub fn finish(self) -> HashDigest {
-        let digest = self.ctx.finish();
-        HashDigest { digest }
+        HashDigest::new(self.ctx.finish())
     }
 }
 

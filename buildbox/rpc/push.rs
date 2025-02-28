@@ -1,4 +1,4 @@
-use internal::proto::remote_asset::{
+use proto::bazel::asset::{
     Push, PushBlobRequest, PushBlobResponse, PushDirectoryRequest, PushDirectoryResponse,
 };
 use tonic::{Request, Response, Status};

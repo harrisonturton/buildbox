@@ -1,7 +1,6 @@
-use crate::{Error, Result};
+use super::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use toml::Table;
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq)]
 pub struct Config {

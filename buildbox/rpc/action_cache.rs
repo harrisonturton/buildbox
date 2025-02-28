@@ -1,8 +1,9 @@
-use internal::{blob::LocalBlobStore, proto::remote_execution::{
+use storage::blob::LocalBlobStore;
+pub use proto::bazel::exec::{
     Action, ActionCache, ActionResult, Command, Digest, GetActionResultRequest, OutputFile, UpdateActionResultRequest
-}};
+};
 use tonic::{Request, Response, Status};
-use internal::Error;
+use common::Error;
 use super::read_digest;
 
 #[derive(Debug)]
