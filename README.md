@@ -1,23 +1,65 @@
 # `buildbox`
 
-Buildbox is a simple implementation of the Bazel [Remote
-Execution](https://bazel.build/remote/rbe) protocol. It consists of a single
-executable that bundles a server and commandline client.
+Buildbox is an implementation of the Bazel [Remote Execution](https://bazel.build/remote/rbe)
+protocol.
 
-It is intended for personal use. I developed buildbox to achieve easy
+It's designed for near-trivial deployment and maintenance. Getting started is as simple as:
+
+```
+buildbox up
+```
+
+Buildbox is intended for personal use. I developed it to achieve easy
 reproducible/hermetic builds at home, and also to make it easy to develop
 applications that use Linux-based toolchains (e.g. Vivado) from my Macbook.
 
 This may be useful to you if:
 
-* You don't care about scale
 * You want remote execution without the yak shaving
 * You trust your compilation inputs (i.e. don't need to isolate build actions)
 * You're happy with *mostly* hermetic and reproducible
+* You don't care about scale
 
 This is a personal utility that I've made available to the world in case others
 find it useful. I'll gladly accept contributions, but I make no stability,
 support, or response time guarantees.
+
+## Index
+
+1. [How it works](#how-it-works)
+2. [Building](#building)
+3. [Usage](#usage)
+  1. [Server](#server-setup)
+  2. [Client](#client-setup)
+4. [Development](#development)
+  1. [Rust analyzer](#rust-analyzer)
+
+## How it works
+
+There are two main parts to the remote execution protocol:
+
+1. Action caching (i.e. storing the outputs of already-executed actions)
+2. Action execution
+
+Buildbox implements these in the simplest way possible.
+
+Whenever the protocol requests something to be stored, the corresponding blob is
+stored in a single file on-disk, named according to the SHA256 hash of the data.
+
+Whenever an action needs to be executed, buildbox creates a new sandbox
+directory `/sandbox-{id}/` and populates it with the necessary inputs copied
+from the file blobs. The build command is then executed within this directory,
+and the outputs are copied out into content-addressable blobs.
+
+This architecture is simple and *sufficiently* fast. Because there is no action
+isolation, they execute quickly. Because the execroots are populated from files
+already stored on-disk, constructing the trees is also quick enough. There are
+fancier optimisations we could do here (i.e. use FUSE or NFS filesystems to
+project execroot views without copying files) but they'd cause an increase in
+deployment complexity.
+
+The big downside, of course, is that there's no security guardrails. Please only
+use this in very trusted environments.
 
 ## Building
 
@@ -40,7 +82,7 @@ If you don't already have Bazel installed, you probably shouldn't be reading thi
 
 ## Usage
 
-### Server
+### Server setup
 
 > **Note:** Buildbox does not use TLS. This makes it very easy to
 > setup and run, but it's important that the server is not exposed to the
