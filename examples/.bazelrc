@@ -1,7 +1,0 @@
-build --symlink_prefix=".bazel/bazel-"
-build --remote_executor="grpc://localhost:50051"
-#build --remote_executor="localhost:50051"
-#build --tls_certificate="../server.crt"
-#build --tls_client_certificate="../client.crt"
-#build --tls_client_key="../client.key"
-build --remote_retries=0
