@@ -1,3 +1,5 @@
+use super::{bazel, buildbox};
+use common::config::Config;
 use common::{Error, Result};
 use proto::bazel::asset::{FetchServer, PushServer};
 use proto::bazel::exec::ActionCacheServer;
@@ -6,18 +8,13 @@ use proto::bazel::exec::ContentAddressableStorageServer;
 use proto::bazel::exec::ExecutionServer;
 use proto::buildbox::BuildboxServer;
 use proto::google::bytestream::ByteStreamServer;
-use tonic::transport::{Identity, Server, ServerTlsConfig};
-use common::config::Config;
-use super::{bazel, buildbox};
+use tonic::transport::Server;
 
 pub async fn launch(config: &Config) -> Result<()> {
-    let cert = std::fs::read(&config.cert).map_err(Error::io_msg("failed to read certificate"))?;
-    let private_key = std::fs::read(&config.key).map_err(Error::io_msg("failed to read key"))?;
-
-    let identity = Identity::from_pem(&cert, &private_key);
-    let tls = ServerTlsConfig::new().identity(identity);
-
-    let addr = config.addr.parse().map_err(Error::boxed_msg("invalid address"))?;
+    let addr = config
+        .addr
+        .parse()
+        .map_err(Error::boxed_msg("invalid address"))?;
     tracing::info!("Starting server on {addr}");
 
     let storage = storage::Storage::local(config.cachedir.clone().into());

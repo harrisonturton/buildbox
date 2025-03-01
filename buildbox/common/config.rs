@@ -9,12 +9,6 @@ pub struct Config {
     /// Address for the server to listen on.
     pub addr: String,
 
-    /// Path to the certificate public key.
-    pub cert: PathBuf,
-
-    /// Certificate private key path.
-    pub key: PathBuf,
-
     /// Cache blob storage directory.
     pub cachedir: PathBuf,
 
