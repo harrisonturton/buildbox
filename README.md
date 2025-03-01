@@ -1,8 +1,5 @@
 # `buildbox`
 
-> While this is a fully-functional remote execution server, it's still firmly
-> in development. It is ready for personal, non-production use only.
-
 Buildbox is a simple implementation of the Bazel [Remote
 Execution](https://bazel.build/remote/rbe) protocol. It consists of a single
 executable that bundles a server and commandline client.
@@ -18,47 +15,66 @@ This may be useful to you if:
 * You trust your compilation inputs (i.e. don't need to isolate build actions)
 * You're happy with *mostly* hermetic and reproducible
 
+This is a personal utility that I've made available to the world in case others
+find it useful. I'll gladly accept contributions, but I make no stability,
+support, or response time guarantees.
+
+## Building
+
+If you already have Bazel, building `buildbox` is easy:
+
+```
+git clone git@github.com:harrisonturton/buildbox.git
+cd buildbox
+bazel build //buildbox
+```
+
+This will produce the `buildbox` binary at:
+
+```
+$(bazel info bazel-bin)/buildbox/buildbox
+```
+
+If you don't already have Bazel installed, you probably shouldn't be reading this `README`.
+
+
 ## Usage
 
-### Server setup
+### Server
 
 > **Note:** Buildbox does not use TLS. This makes it very easy to
 > setup and run, but it's important that the server is not exposed to the
 > internet. I recommend exposing it to your local network over something like
 > [Tailscale](https://tailscale.com).
 
-To run buildbox, you'll need a small configuration file, `buildbox.toml`. This
-is where you can configure a lot of behaviour, but the most important part is
-identifying the *storage directory* and *sandbox directory*.
-
-The storage directory will contain the files used to implement the content
-addressible storage service required by the remote execution protocol. The
-sandbox directory is where buildbox will construct the filetrees to execute
-build actions and extract their outputs.
-
-A possible `buildbox.toml` could be:
-
-```
-addr     = "[::1]:50051"
-cachedir = "~/.buildbox/storage"
-execdir  = "~/.buildbox/sandbox"
-```
-
-This tells the `buildbox` gRPC server to listen on `:50051`, and to store files
-and create sandboxes within the `.buildbox` folder in your home directory. You
-might like to put this file at `~/.buildbox/buildbox.toml`.
-
-To start the server, if you're currently in the directory containing the
-`buildbox.toml`, you can run:
+Starting the buildbox server is easy:
 
 ```
 buildbox up
 ```
 
-But if your configuration file is placed somewhere else, you can specify the path with:
+By default, this will listen on `localhost:50051` and create a `~/.buildbox`
+directory to store compilation artifacts and directories for executing actions.
+
+If you'd rather put these files somewhere else, you can configure this behaviour
+using a small configuration file. The configuration file is canonically called
+`buildbox.toml` (but can be anything) and the most important directives are the
+*storage directory* and the *sandbox directory*.
 
 ```
 buildbox up --config <config file path>
+```
+
+The storage directory will contain cached build-time artifacts. The sandbox
+directory will contain subdirectories that create the environments required to
+execute build actions and extract their outputs.
+
+A possible `buildbox.toml` could be:
+
+```
+addr        = "[::1]:50051"
+storage_dir = "~/.my-custom-buildbox-dir/storage"
+sandbox_dir = "~/.my-custom-buildbox-dir/sandbox"
 ```
 
 ## Client setup
@@ -67,7 +83,7 @@ To use that server with Bazel, you can configure the connection in your
 `.bazelrc` like so:
 
 ```
->build --remote_executor="grpc://localhost:50051"
+build --remote_executor="grpc://localhost:50051"
 ```
 
 And that's it! Your Bazel builds will now be passed to the buildbox server. You'll need to make sure that your toolchains work with the server's environment, but once you've done that, it should "just work".

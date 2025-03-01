@@ -8,10 +8,6 @@ const DEFAULT_SERVER_ADDR: &'static str = "http://[::1]:50051";
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct CliArgs {
-    /// Path to the configuration file.
-    #[arg(short, long)]
-    pub config: Option<PathBuf>,
-
     /// Subcommand to execute
     #[command(subcommand)]
     pub cmd: Command,
@@ -20,13 +16,20 @@ struct CliArgs {
 #[derive(Subcommand)]
 pub enum Command {
     /// Launch the build agent.
-    Up,
+    Up(UpArgs),
     /// List the sandboxes
     #[clap(name = "sandboxes")]
     ListSandboxes(SandboxesArgs),
     /// List the blobs
     #[clap(name = "blobs")]
     ListBlobs(BlobsArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct UpArgs {
+    /// Path to the configuration file.
+    #[arg(short, long)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -45,10 +48,10 @@ pub struct BlobsArgs {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
 
-    let args = CliArgs::parse();
+    let cli_args = CliArgs::parse();
 
-    match args.cmd {
-        Command::Up => {
+    match cli_args.cmd {
+        Command::Up(args) => {
             let config = Config::load(args.config.as_ref())?;
             up(&config).await
         }

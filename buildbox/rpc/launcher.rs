@@ -17,9 +17,9 @@ pub async fn launch(config: &Config) -> Result<()> {
         .map_err(Error::boxed_msg("invalid address"))?;
     tracing::info!("Starting server on {addr}");
 
-    let storage = storage::Storage::local(config.cachedir.clone().into());
+    let storage = storage::Storage::local(config.storage_dir.clone().into());
     let sandbox = sandbox::Sandbox::new(
-        config.execdir.clone().into(),
+        config.sandbox_dir.clone().into(),
         storage.clone(),
         config.retain_sandboxes,
     );

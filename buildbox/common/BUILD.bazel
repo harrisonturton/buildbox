@@ -12,5 +12,6 @@ rust_library(
         "@crates//:serde",
         "@crates//:toml",
         "@crates//:shellexpand",
+        "@crates//:tracing",
     ],
 )
