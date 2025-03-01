@@ -24,16 +24,6 @@ This is a personal utility that I've made available to the world in case others
 find it useful. I'll gladly accept contributions, but I make no stability,
 support, or response time guarantees.
 
-## Index
-
-1. [How it works](#how-it-works)
-2. [Building](#building)
-3. [Usage](#usage)
-  1. [Server](#server-setup)
-  2. [Client](#client-setup)
-4. [Development](#development)
-  1. [Rust analyzer](#rust-analyzer)
-
 ## How it works
 
 There are two main parts to the remote execution protocol:
@@ -59,7 +49,7 @@ project execroot views without copying files) but they'd cause an increase in
 deployment complexity.
 
 The big downside, of course, is that there's no security guardrails. Please only
-use this in very trusted environments.
+use this in trusted environments.
 
 ## Building
 
