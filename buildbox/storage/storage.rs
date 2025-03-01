@@ -126,6 +126,19 @@ impl Storage {
 
         Ok(())
     }
+
+    pub fn list(&self) -> Result<Vec<String>> {
+        let mut names = vec![];
+
+        let entries = std::fs::read_dir(&self.dir).map_err(Error::io)?;
+        for entry in entries {
+            let entry = entry.map_err(Error::io)?;
+            let path = entry.path();
+            names.push(path.file_name().unwrap().to_string_lossy().to_string());
+        } 
+
+        Ok(names)
+    }
 }
 
 fn local_path(dir: &PathBuf, name: &str) -> PathBuf {

@@ -30,3 +30,9 @@ pub mod google {
         pub use bytestream_proto::google::bytestream::byte_stream_server::*;
     }
 }
+
+pub mod buildbox {
+    pub use buildbox_proto::buildbox::*;
+    pub use buildbox_proto::buildbox::buildbox_server::*;
+    pub use buildbox_proto::buildbox::buildbox_client::*;
+}

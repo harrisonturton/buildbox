@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package buildbox;
+
+service Buildbox {
+  rpc FindBlobs(FindBlobsRequest) returns (FindBlobsResponse) {}
+  rpc FindSandboxes(FindSandboxesRequest) returns (FindSandboxesResponse) {}
+}
+
+message FindBlobsRequest {
+  // Empty
+}
+
+message FindBlobsResponse {
+  // All the items currently stored.
+  repeated string blobs = 1;
+}
+
+message FindSandboxesRequest {
+  // empty
+}
+
+message FindSandboxesResponse {
+  // All the sandboxes currently stored.
+  repeated string sandboxes = 1;
+}

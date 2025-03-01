@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_library_group")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
+
+rust_library_group(
+    name = "buildbox",
+    deps = [":buildbox_proto_rs"],
+    visibility = ["//:__subpackages__"],
+)
+
+rust_prost_library(
+    name = "buildbox_proto_rs",
+    proto = ":buildbox_proto",
+)
+
+proto_library(
+  name = "buildbox_proto",
+  srcs = ["buildbox.proto"],
+)

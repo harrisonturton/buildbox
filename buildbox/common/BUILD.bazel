@@ -9,5 +9,7 @@ rust_library(
         "@crates//:data-encoding",
         "@crates//:rand",
         "@crates//:ring",
+        "@crates//:serde",
+        "@crates//:toml",
     ],
 )
