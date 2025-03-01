@@ -10,10 +10,10 @@ pub struct Config {
     pub addr: String,
 
     /// Cache blob storage directory.
-    pub cachedir: PathBuf,
+    pub cachedir: String,
 
     /// Execution directory.
-    pub execdir: PathBuf,
+    pub execdir: String,
 
     /// Whether to retain sandboxes after use
     #[serde(default)]
@@ -25,6 +25,13 @@ impl Config {
         let default_path = PathBuf::from(DEFAULT_CONFIG_FILE_NAME);
         let path = path_override.unwrap_or(&default_path);
         let content = std::fs::read_to_string(path).map_err(Error::io)?;
-        toml::from_str(&content).map_err(Error::boxed)
+
+        let mut config: Config = toml::from_str(&content).map_err(Error::boxed)?;
+
+        // Expands the "~" shell alias for the $HOME directory.
+        config.cachedir = shellexpand::tilde(&config.cachedir).to_string();
+        config.execdir = shellexpand::tilde(&config.execdir).to_string();
+
+        Ok(config)
     }
 }

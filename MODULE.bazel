@@ -107,6 +107,11 @@ crate.spec(
     version = "2.8",
 )
 
+crate.spec(
+    package = "shellexpand",
+    version = "3.1",
+)
+
 # Rust gRPC and proto dependencies
 
 crate.spec(

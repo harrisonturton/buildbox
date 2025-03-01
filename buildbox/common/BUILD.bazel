@@ -11,5 +11,6 @@ rust_library(
         "@crates//:ring",
         "@crates//:serde",
         "@crates//:toml",
+        "@crates//:shellexpand",
     ],
 )
