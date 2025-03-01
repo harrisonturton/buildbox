@@ -1,0 +1,4 @@
+addr     = "[::1]:50051"
+cachedir = "~/.buildbox/storage"
+execdir  = "~/.buildbox/sandbox"
+retain_sandboxes = true
