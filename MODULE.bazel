@@ -64,6 +64,7 @@ crate.spec(
 crate.spec(
     package = "tracing-subscriber",
     version = "0.3",
+    features = ["env-filter"],
 )
 
 crate.spec(

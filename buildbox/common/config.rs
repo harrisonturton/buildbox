@@ -25,7 +25,7 @@ impl Config {
         let default_path = PathBuf::from(DEFAULT_CONFIG_FILE_NAME);
         let path = path_override.unwrap_or(&default_path);
 
-        let config = if path.exists() {
+        let mut config = if path.exists() {
             Self::load_from_path(path)?
         } else {
             Self::create_default()
@@ -34,6 +34,8 @@ impl Config {
         // Expands the "~" shell alias for the $HOME directory.
         let storage_dir = shellexpand::tilde(&config.storage_dir).to_string();
         let sandbox_dir = shellexpand::tilde(&config.sandbox_dir).to_string();
+        config.storage_dir = storage_dir.clone();
+        config.sandbox_dir = sandbox_dir.clone();
 
         // Create the directories if they don't already exist.
         std::fs::create_dir_all(&storage_dir).map_err(Error::io)?;
