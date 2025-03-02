@@ -5,9 +5,9 @@ rust_binary(
     srcs = glob(["**/*.rs"]),
     deps = [
         "//buildbox/common",
+        "//buildbox/executor",
         "//buildbox/proto",
         "//buildbox/rpc",
-        "//buildbox/sandbox",
         "//buildbox/storage",
         "@crates//:clap",
         "@crates//:tokio",

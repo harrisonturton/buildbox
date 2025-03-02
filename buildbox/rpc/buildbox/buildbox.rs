@@ -1,25 +1,38 @@
 use common::Error;
+use executor::{Executor, SandboxHandle};
 use proto::buildbox::{
     Buildbox, FindBlobsRequest, FindBlobsResponse, FindSandboxesRequest, FindSandboxesResponse,
 };
-use sandbox::Sandbox;
-use storage::Storage;
+use storage::FileStore;
+use storage::Store;
 use tonic::{Request, Response, Status};
 
 #[derive(Debug)]
-pub struct BuildboxService {
-    storage: Storage,
-    sandbox: Sandbox,
+pub struct BuildboxService<S, E>
+where
+    S: Store + 'static,
+    E: Executor + 'static,
+{
+    storage: S,
+    executor: E,
 }
 
-impl BuildboxService {
-    pub fn new(storage: Storage, sandbox: Sandbox) -> Self {
-        Self { storage, sandbox }
+impl<S, E> BuildboxService<S, E>
+where
+    S: Store + 'static,
+    E: Executor + 'static,
+{
+    pub fn new(storage: S, executor: E) -> Self {
+        Self { storage, executor }
     }
 }
 
 #[async_trait::async_trait]
-impl Buildbox for BuildboxService {
+impl<S, E> Buildbox for BuildboxService<S, E>
+where
+    S: Store + 'static,
+    E: Executor + 'static,
+{
     async fn find_blobs(
         &self,
         req: Request<FindBlobsRequest>,

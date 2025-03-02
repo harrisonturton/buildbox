@@ -1,25 +1,34 @@
-use storage::Storage;
-pub use proto::bazel::exec::{
-    Action, ActionCache, ActionResult, Command, Digest, GetActionResultRequest, OutputFile, UpdateActionResultRequest
-};
-use tonic::{Request, Response, Status};
+use super::read_digest2;
 use common::Error;
-use super::read_digest;
+pub use proto::bazel::exec::{
+    Action, ActionCache, ActionResult, Command, Digest, GetActionResultRequest, OutputFile,
+    UpdateActionResultRequest,
+};
+use storage::{FileStore, Store};
+use tonic::{Request, Response, Status};
 
 #[derive(Debug)]
-pub struct ActionCacheService {
-    store: Storage,
+pub struct ActionCacheService<S>
+where
+    S: Store + 'static,
+{
+    store: S,
 }
 
-impl ActionCacheService {
-    pub fn new(store: Storage) -> Self {
+impl<S> ActionCacheService<S>
+where
+    S: Store + 'static,
+{
+    pub fn new(store: S) -> Self {
         Self { store }
     }
 }
 
 #[async_trait::async_trait]
-impl ActionCache for ActionCacheService {
-
+impl<S> ActionCache for ActionCacheService<S>
+where
+    S: Store + 'static,
+{
     async fn get_action_result(
         &self,
         req: Request<GetActionResultRequest>,

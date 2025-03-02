@@ -17,20 +17,21 @@ use std::{
     io::{Cursor, Read},
     str::FromStr,
 };
-use storage::Storage;
+use storage::FileStore;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
+use storage::Store;
 
 /// Effectively the read/write input to the CAS for large byte payloads.
 #[derive(Debug)]
 pub struct ByteStreamService {
-    storage: Storage,
+    storage: FileStore,
 }
 
 impl ByteStreamService {
     /// Create a new [`ByteStreamService`] instance.
     #[must_use]
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(storage: FileStore) -> Self {
         Self { storage }
     }
 }
@@ -38,8 +39,6 @@ impl ByteStreamService {
 #[async_trait::async_trait]
 impl ByteStream for ByteStreamService {
     type ReadStream = ReceiverStream<Result<ReadResponse, Status>>;
-
-    // ReadRequest { resource_name: "blobs/eaa7d9cde97fef21303b4e1e18e3e6cb7e68c92313b24bbc0335be9fe37af464/30", read_offset: 0, read_limit: 0 }
 
     async fn read(&self, req: Request<ReadRequest>) -> Result<Response<Self::ReadStream>, Status> {
         let req = req.into_inner();

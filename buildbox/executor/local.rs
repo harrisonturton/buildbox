@@ -1,4 +1,5 @@
-use super::{DentryTemplate, DirTemplate, FileTemplate, SandboxTemplate, SymlinkTemplate};
+use super::{Executor, SandboxHandle};
+use crate::{DentryTemplate, DirTemplate, FileTemplate, SandboxTemplate, SymlinkTemplate};
 use crate::{ExecCommand, ExecResult, GeneratedFile};
 use common::{rand, Error, Result};
 use proto::bazel::exec::Digest;
@@ -8,7 +9,7 @@ use std::ops::Drop;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use storage::Storage;
+use storage::Store;
 
 /// Executes build actions within local directories.
 ///
@@ -16,37 +17,20 @@ use storage::Storage;
 /// runs within a temporary directory. This means the entire host environment
 /// will be made available to whatever command is executed.
 #[derive(Debug, Clone)]
-pub struct Sandbox {
+pub struct LocalExecutor<S: Store> {
     dir: PathBuf,
-    storage: Storage,
+    storage: S,
     retain: bool,
 }
 
-impl Sandbox {
-    /// Create a [`Sandbox`] instance for local execution.
-    pub fn new(dir: PathBuf, storage: Storage, retain: bool) -> Self {
+impl<S: Store> LocalExecutor<S> {
+    /// Create a [`Executor`] instance for local execution.
+    pub fn new(dir: PathBuf, storage: S, retain: bool) -> Self {
         Self {
             dir,
             storage,
             retain,
         }
-    }
-
-    /// Construct a new action execution environment.
-    pub fn spawn(&self, template: &SandboxTemplate) -> Result<SandboxHandle> {
-        let id = self.generate_id();
-        let path = self.local_path(&id);
-        tracing::info!("Creating sandbox at: {path:?}");
-
-        std::fs::create_dir(&path).map_err(Error::io)?;
-        tracing::info!("Created dir: {path:?}");
-
-        Ok(SandboxHandle {
-            dir: path,
-            storage: self.storage.clone(),
-            template: template.clone(),
-            retain: self.retain,
-        })
     }
 
     fn generate_id(&self) -> String {
@@ -60,37 +44,37 @@ impl Sandbox {
     }
 }
 
+impl<S: Store> Executor for LocalExecutor<S> {
+    type Handle = LocalSandbox<S>;
+
+    /// Construct a new action execution environment.
+    fn spawn(&self, template: &SandboxTemplate) -> Result<Self::Handle> {
+        let id = self.generate_id();
+        let path = self.local_path(&id);
+        tracing::info!("Creating sandbox at: {path:?}");
+
+        std::fs::create_dir(&path).map_err(Error::io)?;
+        tracing::info!("Created dir: {path:?}");
+
+        Ok(LocalSandbox {
+            dir: path,
+            storage: self.storage.clone(),
+            template: template.clone(),
+            retain: self.retain,
+        })
+    }
+}
+
 /// A handle to the constructed action execution environment.
 #[derive(Debug)]
-pub struct SandboxHandle {
+pub struct LocalSandbox<S: Store> {
     dir: PathBuf,
-    storage: Storage,
+    storage: S,
     template: SandboxTemplate,
     retain: bool,
 }
 
-impl SandboxHandle {
-    /// Prepare the sandbox according to the template it was created with.
-    pub fn prepare(&self) -> Result<()> {
-        tracing::info!("Sandbox::prepare {:?}", self.template);
-
-        for template in &self.template.filesystem {
-            tracing::info!("preparing: {template:?}");
-            let res = match template {
-                DentryTemplate::File(file) => self.prepare_file(&file),
-                DentryTemplate::Symlink(symlink) => self.prepare_symlink(&symlink),
-                DentryTemplate::Dir(dir) => self.prepare_dir(&dir),
-            };
-
-            if let Err(err) = res {
-                tracing::error!("failed to prepare template: {err:?}");
-                return Err(err);
-            }
-        }
-
-        Ok(())
-    }
-
+impl<S: Store> LocalSandbox<S> {
     fn prepare_file(&self, tpl: &FileTemplate) -> Result<()> {
         let path = self.relative_path(&tpl.path);
         tracing::info!("Preparing file: {path:?}");
@@ -130,8 +114,37 @@ impl SandboxHandle {
         fs::create_dir(path).map_err(Error::io)
     }
 
+    fn relative_path(&self, path: &PathBuf) -> PathBuf {
+        let mut rel = self.dir.clone();
+        rel.push(path);
+        rel
+    }
+}
+
+impl<S: Store> SandboxHandle for LocalSandbox<S> {
+    /// Prepare the sandbox according to the template it was created with.
+    fn prepare(&self) -> Result<()> {
+        tracing::info!("Sandbox::prepare {:?}", self.template);
+
+        for template in &self.template.filesystem {
+            tracing::info!("preparing: {template:?}");
+            let res = match template {
+                DentryTemplate::File(file) => self.prepare_file(&file),
+                DentryTemplate::Symlink(symlink) => self.prepare_symlink(&symlink),
+                DentryTemplate::Dir(dir) => self.prepare_dir(&dir),
+            };
+
+            if let Err(err) = res {
+                tracing::error!("failed to prepare template: {err:?}");
+                return Err(err);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Execute the given command.
-    pub fn exec(&self, exec_cmd: &ExecCommand) -> Result<ExecResult> {
+    fn exec(&self, exec_cmd: &ExecCommand) -> Result<ExecResult> {
         tracing::info!("Sandbox::exec {exec_cmd:?}");
 
         // These are required environment variables on MacOS. Hardcode them for
@@ -212,15 +225,9 @@ impl SandboxHandle {
             stderr,
         })
     }
-
-    fn relative_path(&self, path: &PathBuf) -> PathBuf {
-        let mut rel = self.dir.clone();
-        rel.push(path);
-        rel
-    }
 }
 
-impl Drop for SandboxHandle {
+impl<S :Store> Drop for LocalSandbox<S> {
     fn drop(&mut self) {
         if self.retain {
             return;

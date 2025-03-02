@@ -3,25 +3,23 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 rust_library(
     name = "rpc",
     srcs = glob(["**/*.rs"]),
+    proc_macro_deps = ["@crates//:async-trait"],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         "//buildbox/common",
+        "//buildbox/executor",
         "//buildbox/proto",
-        "//buildbox/sandbox",
         "//buildbox/storage",
         "@crates//:bytes",
+        "@crates//:data-encoding",
         "@crates//:prost",
         "@crates//:prost-types",
+        "@crates//:ring",
         "@crates//:thiserror",
         "@crates//:tokio",
         "@crates//:tokio-stream",
-        "@crates//:data-encoding",
         "@crates//:tonic",
-        "@crates//:ring",
         "@crates//:tracing",
         "@crates//:tracing-subscriber",
     ],
-    proc_macro_deps = [
-        "@crates//:async-trait"
-    ]
 )

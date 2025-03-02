@@ -1,11 +1,12 @@
 use super::ResponseStream;
-use storage::Storage;
+use storage::FileStore;
 use proto::bazel::exec::{
         BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest,
         BatchUpdateBlobsResponse, ContentAddressableStorage, FindMissingBlobsRequest,
         FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
     };
 use tonic::{Request, Response, Status};
+use storage::Store;
 
 /// The CAS (content-addressable storage) is used to store the inputs to and
 /// outputs from the execution service. Each piece of content is addressed by
@@ -28,13 +29,13 @@ use tonic::{Request, Response, Status};
 /// `ByteStream` API.
 #[derive(Debug)]
 pub struct ContentAddressableStorageService {
-    storage: Storage,
+    storage: FileStore,
 }
 
 impl ContentAddressableStorageService {
     /// Create new instance of [`ContentAddressableStorageService`].
     #[must_use]
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(storage: FileStore) -> Self {
         Self { storage }
     }
 }

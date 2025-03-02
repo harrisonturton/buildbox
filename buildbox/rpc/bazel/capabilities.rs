@@ -4,6 +4,7 @@ use proto::bazel::exec::{
 };
 use proto::bazel::semver::SemVer;
 use tonic::{Request, Response, Status};
+use storage::Store;
 
 #[derive(Default, Debug)]
 pub struct CapabilitiesService {}

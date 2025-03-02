@@ -1,4 +1,5 @@
 use crate::tee::TeeWriter;
+use crate::Store;
 use bytes::BytesMut;
 use common::hash::Hasher;
 use common::rand;
@@ -10,18 +11,20 @@ use std::io::{copy, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Storage {
+pub struct FileStore {
     dir: PathBuf,
 }
 
-impl Storage {
+impl FileStore {
     /// Create a new [`Storage`] instance that uses the local disk.
     pub fn local(dir: PathBuf) -> Self {
         Self { dir }
     }
+}
 
+impl Store for FileStore {
     /// Check that the storage contains this digest.
-    pub fn contains(&self, digest: &Digest) -> Result<bool> {
+    fn contains(&self, digest: &Digest) -> Result<bool> {
         let path = local_path(&self.dir, &digest.hash);
         match OpenOptions::new().read(true).open(path) {
             Ok(_) => Ok(true),
@@ -31,7 +34,7 @@ impl Storage {
     }
 
     /// Read the file by name.
-    pub fn read(&self, name: &str) -> Result<impl Read> {
+    fn read(&self, name: &str) -> Result<impl Read + 'static> {
         let path = local_path(&self.dir, &name);
         tracing::info!("Storage::read path={path:?}");
         let file = OpenOptions::new()
@@ -43,7 +46,7 @@ impl Storage {
     }
 
     /// Read the file identified by the digest.
-    pub fn read_digest(&self, digest: &Digest) -> Result<impl Read> {
+    fn read_digest(&self, digest: &Digest) -> Result<impl Read + 'static> {
         let path = local_path(&self.dir, &digest.hash);
         tracing::info!("Storage::read_digest path={path:?}");
         let file = OpenOptions::new()
@@ -60,7 +63,7 @@ impl Storage {
     }
 
     /// Read the complete content of the file identified by the digest.
-    pub fn read_digest_to_end(&self, digest: &Digest) -> Result<Vec<u8>> {
+    fn read_digest_to_end(&self, digest: &Digest) -> Result<Vec<u8>> {
         let mut data = vec![];
         let mut reader = self.read_digest(digest)?;
         reader.read_to_end(&mut data).map_err(Error::io)?;
@@ -69,7 +72,7 @@ impl Storage {
 
     /// Read the complete content of the file identified by the digest and attempt
     /// to convert it to the corresponding proto message.
-    pub fn read_message<T>(&self, digest: &Digest) -> Result<T>
+    fn read_message<T>(&self, digest: &Digest) -> Result<T>
     where
         T: Message + Default,
     {
@@ -79,7 +82,7 @@ impl Storage {
     }
 
     /// Write content to the storage and return the digest.
-    pub fn write(&self, src: impl Read) -> Result<Digest> {
+    fn write(&self, src: impl Read) -> Result<Digest> {
         let tmp = format!("tmp-{}", rand::string(20));
         let tmp_path = local_path(&self.dir, &tmp);
 
@@ -110,7 +113,7 @@ impl Storage {
     }
 
     /// Write to a specific filename.
-    pub fn write_with_name(&self, name: &str, src: impl Read) -> Result<()> {
+    fn write_with_name(&self, name: &str, src: impl Read) -> Result<()> {
         let path = local_path(&self.dir, &name);
 
         let file = OpenOptions::new()
@@ -127,7 +130,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn list(&self) -> Result<Vec<String>> {
+    fn list(&self) -> Result<Vec<String>> {
         let mut names = vec![];
 
         let entries = std::fs::read_dir(&self.dir).map_err(Error::io)?;
@@ -135,7 +138,7 @@ impl Storage {
             let entry = entry.map_err(Error::io)?;
             let path = entry.path();
             names.push(path.file_name().unwrap().to_string_lossy().to_string());
-        } 
+        }
 
         Ok(names)
     }

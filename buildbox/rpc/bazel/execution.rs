@@ -1,7 +1,11 @@
-use super::read_digest;
+use super::read_digest2;
 use super::ResponseStream;
 use bytes::BytesMut;
 use common::Error;
+use executor::{
+    DentryTemplate, DirTemplate, ExecCommand, Executor, SandboxHandle, FileTemplate, SandboxTemplate,
+    SymlinkTemplate,
+};
 use prost::Message;
 use proto::bazel::exec::{
     Action, ActionResult, Command, Digest, Directory, DirectoryNode, ExecuteRequest,
@@ -12,31 +16,36 @@ use proto::google::{
     protobuf::Any,
     rpc,
 };
-use sandbox::{
-    DentryTemplate, DirTemplate, ExecCommand, FileTemplate, Sandbox, SandboxTemplate,
-    SymlinkTemplate,
-};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::Read;
 use std::path::PathBuf;
 use std::str::FromStr;
-use storage::Storage;
+use storage::FileStore;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+use storage::Store;
 
 #[derive(Debug)]
-pub struct ExecutionService {
-    storage: Storage,
-    sandbox: Sandbox,
+pub struct ExecutionService<S, E>
+where
+    S: Store,
+    E: Executor,
+{
+    storage: S,
+    executor: E,
 }
 
-impl ExecutionService {
+impl<S, E> ExecutionService<S, E>
+where
+    S: Store + 'static,
+    E: Executor + 'static,
+{
     /// Create new [`ExecutionService`] instance.
     #[must_use]
-    pub fn new(storage: Storage, sandbox: Sandbox) -> Self {
-        Self { storage, sandbox }
+    pub fn new(storage: S, executor: E) -> Self {
+        Self { storage, executor }
     }
 
     async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, Error> {
@@ -44,24 +53,24 @@ impl ExecutionService {
             .action_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing action digest"))
-            .and_then(|digest| read_digest::<Action>(&self.storage, &digest))?;
+            .and_then(|digest| read_digest2::<Action, S>(&self.storage, &digest))?;
 
         let input_root = action
             .input_root_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing input root"))
-            .and_then(|digest| read_digest::<Directory>(&self.storage, &digest))?;
+            .and_then(|digest| read_digest2::<Directory, S>(&self.storage, &digest))?;
 
         let command = action
             .command_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing command digest"))
-            .and_then(|digest| read_digest::<Command>(&self.storage, &digest))?;
+            .and_then(|digest| read_digest2::<Command, S>(&self.storage, &digest))?;
 
         tracing::info!("command: {command:?}");
 
         let template = self.build_sandbox_template(&input_root)?;
-        let mut sandbox = self.sandbox.spawn(&template)?;
+        let mut sandbox = self.executor.spawn(&template)?;
         sandbox.prepare()?;
 
         let mut env = HashMap::new();
@@ -164,7 +173,7 @@ impl ExecutionService {
                     .digest
                     .as_ref()
                     .ok_or_else(|| Error::invalid("missing directory"))
-                    .and_then(|digest| read_digest::<Directory>(&self.storage, &digest))?;
+                    .and_then(|digest| read_digest2::<Directory, S>(&self.storage, &digest))?;
 
                 next.push_back(DirEntry {
                     path: self.relative_path(&entry.path, &dir_node.name),
@@ -186,7 +195,11 @@ impl ExecutionService {
 }
 
 #[async_trait::async_trait]
-impl Execution for ExecutionService {
+impl<S, E> Execution for ExecutionService<S, E>
+where
+    S: Store + 'static,
+    E: Executor + 'static,
+{
     type ExecuteStream = ReceiverStream<Result<Operation, Status>>;
 
     async fn execute(

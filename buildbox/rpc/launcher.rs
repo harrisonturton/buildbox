@@ -9,6 +9,8 @@ use proto::bazel::exec::ExecutionServer;
 use proto::buildbox::BuildboxServer;
 use proto::google::bytestream::ByteStreamServer;
 use tonic::transport::Server;
+use storage::FileStore;
+use executor::LocalExecutor;
 
 pub async fn launch(config: &Config) -> Result<()> {
     let addr = config
@@ -17,8 +19,8 @@ pub async fn launch(config: &Config) -> Result<()> {
         .map_err(Error::boxed_msg("invalid address"))?;
     tracing::info!("Starting server on {addr}");
 
-    let storage = storage::Storage::local(config.storage_dir.clone().into());
-    let sandbox = sandbox::Sandbox::new(
+    let storage = FileStore::local(config.storage_dir.clone().into());
+    let executor = LocalExecutor::new(
         config.sandbox_dir.clone().into(),
         storage.clone(),
         config.retain_sandboxes,
@@ -26,13 +28,13 @@ pub async fn launch(config: &Config) -> Result<()> {
 
     let fetch_service = bazel::FetchService::default();
     let push_service = bazel::PushService::default();
-    let execution_service = bazel::ExecutionService::new(storage.clone(), sandbox.clone());
+    let execution_service = bazel::ExecutionService::new(storage.clone(), executor.clone());
     let action_cache_service = bazel::ActionCacheService::new(storage.clone());
     let cas_service = bazel::ContentAddressableStorageService::new(storage.clone());
     let bytestream_service = bazel::ByteStreamService::new(storage.clone());
     let capabilities_service = bazel::CapabilitiesService::default();
 
-    let buildbox_service = buildbox::BuildboxService::new(storage.clone(), sandbox.clone());
+    let buildbox_service = buildbox::BuildboxService::new(storage.clone(), executor.clone());
 
     Server::builder()
         .trace_fn(|_| tracing::info_span!("buildbox"))
