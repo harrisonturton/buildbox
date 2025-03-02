@@ -1,6 +1,6 @@
 use super::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::{ffi::c_char, path::PathBuf};
+use std::path::PathBuf;
 
 const DEFAULT_CONFIG_FILE_NAME: &'static str = "buildbox.toml";
 

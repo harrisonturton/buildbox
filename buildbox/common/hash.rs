@@ -1,9 +1,9 @@
-use ring::digest::{Context, Digest, SHA256};
+use ring::digest::{Context, SHA256};
 use std::io::Write;
 
-pub fn sha256(data: &[u8]) -> HashDigest {
+pub fn sha256(data: &[u8]) -> Digest {
     let mut hasher = Hasher::sha256();
-    hasher.write(data);
+    hasher.write(data).expect("failed to write to SHA256 hasher");
     hasher.finish()
 }
 
@@ -20,8 +20,9 @@ impl Hasher {
     }
 
     /// Finish the hash operation and consume the hasher.
-    pub fn finish(self) -> HashDigest {
-        HashDigest::new(self.ctx.finish())
+    pub fn finish(self) -> Digest {
+        let digest = self.ctx.finish();
+        Digest::sha256(digest.as_ref())
     }
 }
 
@@ -37,19 +38,21 @@ impl Write for Hasher {
 }
 
 #[derive(Debug)]
-pub struct HashDigest {
-    digest: Digest,
+pub enum Digest {
+    Sha256(String),
 }
 
-impl HashDigest {
-    /// Construct a new [`HashDigest`].
-    fn new(digest: Digest) -> Self {
-        Self { digest }
+impl Digest {
+    pub fn sha256(digest: &[u8]) -> Self {
+        let base64 = data_encoding::HEXLOWER.encode(digest);
+        Self::Sha256(base64)
     }
+}
 
-    /// Get the digest as a lowercase base64 string.
-    pub fn base64(&self) -> String {
-        let data = self.digest.as_ref();
-        data_encoding::HEXLOWER.encode(data)
+impl ToString for Digest {
+    fn to_string(&self) -> String {
+        match self {
+            Digest::Sha256(sha256) => sha256.to_owned(),
+        }
     }
 }

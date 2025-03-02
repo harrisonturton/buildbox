@@ -12,32 +12,37 @@ use proto::google::bytestream::{
     ByteStream, QueryWriteStatusRequest, QueryWriteStatusResponse, ReadRequest, ReadResponse,
     WriteRequest, WriteResponse,
 };
-use tokio::sync::mpsc;
 use std::{
-    io::{Cursor, Read},
+    io::{Cursor, Read, Write},
     str::FromStr,
 };
-use storage::FileStore;
+use storage::{Store, WriteHandle};
+use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
-use storage::Store;
 
 /// Effectively the read/write input to the CAS for large byte payloads.
 #[derive(Debug)]
-pub struct ByteStreamService {
-    storage: FileStore,
+pub struct ByteStreamService<S> {
+    store: S,
 }
 
-impl ByteStreamService {
+impl<S> ByteStreamService<S>
+where
+    S: Store + 'static,
+{
     /// Create a new [`ByteStreamService`] instance.
     #[must_use]
-    pub fn new(storage: FileStore) -> Self {
-        Self { storage }
+    pub fn new(store: S) -> Self {
+        Self { store }
     }
 }
 
 #[async_trait::async_trait]
-impl ByteStream for ByteStreamService {
+impl<S> ByteStream for ByteStreamService<S>
+where
+    S: Store + 'static,
+{
     type ReadStream = ReceiverStream<Result<ReadResponse, Status>>;
 
     async fn read(&self, req: Request<ReadRequest>) -> Result<Response<Self::ReadStream>, Status> {
@@ -48,7 +53,7 @@ impl ByteStream for ByteStreamService {
         let hash = &parts[1];
 
         let mut reader = self
-            .storage
+            .store
             .read(hash)
             .map_err(|err| Status::internal(err.to_string()))?;
 
@@ -120,13 +125,23 @@ impl ByteStream for ByteStreamService {
         }
 
         tracing::info!("Writing {}", name.hash);
+
         let mut reader = std::io::Cursor::new(&data);
-        self.storage
-            .write_with_name(&name.hash, reader)
-            .map_err(|err| {
-                tracing::error!("Failed to write file: {err}");
-                Status::internal(err.to_string())
-            })?;
+
+        let mut writer = self.store.write().map_err(|err| {
+            tracing::error!("Failed to open file for writing: {err}");
+            Status::internal(err.to_string())
+        })?;
+
+        std::io::copy(&mut reader, &mut writer).map_err(|err| {
+            tracing::error!("Failed to write file: {err}");
+            Status::internal(err.to_string())
+        })?;
+
+        writer.seal(&name.hash).map_err(|err| {
+            tracing::error!("Failed to seal file after writing: {err}");
+            Status::internal(err.to_string())
+        })?;
 
         Ok(Response::new(WriteResponse {
             committed_size: data.len() as i64,

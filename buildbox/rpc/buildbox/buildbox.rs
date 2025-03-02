@@ -3,7 +3,6 @@ use executor::{Executor, SandboxHandle};
 use proto::buildbox::{
     Buildbox, FindBlobsRequest, FindBlobsResponse, FindSandboxesRequest, FindSandboxesResponse,
 };
-use storage::FileStore;
 use storage::Store;
 use tonic::{Request, Response, Status};
 
@@ -38,12 +37,7 @@ where
         req: Request<FindBlobsRequest>,
     ) -> Result<Response<FindBlobsResponse>, Status> {
         tracing::info!("BuildboxService::find_blobs");
-
-        let blobs = self
-            .storage
-            .list()
-            .map_err(|err| Status::internal(err.to_string()))?;
-
+        let blobs = vec![];
         Ok(Response::new(FindBlobsResponse { blobs }))
     }
 

@@ -1,6 +1,7 @@
 use super::{bazel, buildbox};
 use common::config::Config;
 use common::{Error, Result};
+use executor::LocalExecutor;
 use proto::bazel::asset::{FetchServer, PushServer};
 use proto::bazel::exec::ActionCacheServer;
 use proto::bazel::exec::CapabilitiesServer;
@@ -8,9 +9,8 @@ use proto::bazel::exec::ContentAddressableStorageServer;
 use proto::bazel::exec::ExecutionServer;
 use proto::buildbox::BuildboxServer;
 use proto::google::bytestream::ByteStreamServer;
+use storage::file::FileStore;
 use tonic::transport::Server;
-use storage::FileStore;
-use executor::LocalExecutor;
 
 pub async fn launch(config: &Config) -> Result<()> {
     let addr = config
@@ -19,7 +19,8 @@ pub async fn launch(config: &Config) -> Result<()> {
         .map_err(Error::boxed_msg("invalid address"))?;
     tracing::info!("Starting server on {addr}");
 
-    let storage = FileStore::local(config.storage_dir.clone().into());
+    let storage = FileStore::new(config.storage_dir.clone().into());
+
     let executor = LocalExecutor::new(
         config.sandbox_dir.clone().into(),
         storage.clone(),

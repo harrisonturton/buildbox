@@ -5,6 +5,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub enum Error {
     Runtime(String),
+    NotFound(String),
     InvalidArgument(String),
     Io(Option<String>, std::io::Error),
     Boxed(Option<String>, Box<dyn std::error::Error>),
@@ -14,6 +15,11 @@ impl Error {
     #[must_use]
     pub fn runtime(msg: &str) -> Error {
         Error::Runtime(msg.to_string())
+    }
+
+    #[must_use]
+    pub fn not_found(msg: &str) -> Error {
+        Error::NotFound(msg.to_string())
     }
 
     #[must_use]
@@ -48,6 +54,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Runtime(msg) => write!(f, "runtime error: {msg}"),
+            Error::NotFound(msg) => write!(f, "not found: {msg}"),
             Error::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
             Error::Io(msg, err) => write!(f, "io error: {}{err}", format_msg(msg)),
             Error::Boxed(msg, err) => write!(f, "boxed error: {}{err}", format_msg(msg)),

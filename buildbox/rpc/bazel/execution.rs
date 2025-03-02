@@ -1,4 +1,3 @@
-use super::read_digest2;
 use super::ResponseStream;
 use bytes::BytesMut;
 use common::Error;
@@ -21,19 +20,14 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::path::PathBuf;
 use std::str::FromStr;
-use storage::FileStore;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use storage::Store;
+use storage::{Store, ProtoStoreExt};
 
 #[derive(Debug)]
-pub struct ExecutionService<S, E>
-where
-    S: Store,
-    E: Executor,
-{
-    storage: S,
+pub struct ExecutionService<S, E> {
+    store: S,
     executor: E,
 }
 
@@ -44,8 +38,8 @@ where
 {
     /// Create new [`ExecutionService`] instance.
     #[must_use]
-    pub fn new(storage: S, executor: E) -> Self {
-        Self { storage, executor }
+    pub fn new(store: S, executor: E) -> Self {
+        Self { store, executor }
     }
 
     async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, Error> {
@@ -53,19 +47,19 @@ where
             .action_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing action digest"))
-            .and_then(|digest| read_digest2::<Action, S>(&self.storage, &digest))?;
+            .and_then(|digest| self.store.read_message::<Action>(&digest))?;
 
         let input_root = action
             .input_root_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing input root"))
-            .and_then(|digest| read_digest2::<Directory, S>(&self.storage, &digest))?;
+            .and_then(|digest| self.store.read_message::<Directory>(&digest))?;
 
         let command = action
             .command_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing command digest"))
-            .and_then(|digest| read_digest2::<Command, S>(&self.storage, &digest))?;
+            .and_then(|digest| self.store.read_message::<Command>(&digest))?;
 
         tracing::info!("command: {command:?}");
 
@@ -173,7 +167,7 @@ where
                     .digest
                     .as_ref()
                     .ok_or_else(|| Error::invalid("missing directory"))
-                    .and_then(|digest| read_digest2::<Directory, S>(&self.storage, &digest))?;
+                    .and_then(|digest| self.store.read_message::<Directory>(&digest))?;
 
                 next.push_back(DirEntry {
                     path: self.relative_path(&entry.path, &dir_node.name),

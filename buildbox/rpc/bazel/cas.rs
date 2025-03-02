@@ -1,47 +1,52 @@
 use super::ResponseStream;
-use storage::FileStore;
 use proto::bazel::exec::{
-        BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest,
-        BatchUpdateBlobsResponse, ContentAddressableStorage, FindMissingBlobsRequest,
-        FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
-    };
-use tonic::{Request, Response, Status};
+    BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest,
+    BatchUpdateBlobsResponse, ContentAddressableStorage, FindMissingBlobsRequest,
+    FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
+};
 use storage::Store;
+use tonic::{Request, Response, Status};
 
 /// The CAS (content-addressable storage) is used to store the inputs to and
 /// outputs from the execution service. Each piece of content is addressed by
 /// the digest of its binary data.
-/// 
+///
 /// Most of the binary data stored in the CAS is opaque to the execution engine,
 /// and is only used as a communication medium. In order to build an `Action`,
 /// however, the client will need to also upload  the `Command` and input root
 /// `Directory` for the `Action`.
-/// 
+///
 /// The `Command` and `Directory` messages must be marshalled to wire format and
 /// then uploaded under the hash as with any other piece of content. In
 /// practice, the input root directory is likely to refer to other directories
 /// in it's hierarchy, which must also each by uploaded on their own.
-/// 
+///
 /// For small uploads the client should group them together and call
 /// `batchUpdateBlobs`.
-/// 
+///
 /// For larger uploads, the client must use the `Write` method of the
 /// `ByteStream` API.
 #[derive(Debug)]
-pub struct ContentAddressableStorageService {
-    storage: FileStore,
+pub struct ContentAddressableStorageService<S> {
+    storage: S,
 }
 
-impl ContentAddressableStorageService {
+impl<S> ContentAddressableStorageService<S>
+where
+    S: Store + 'static,
+{
     /// Create new instance of [`ContentAddressableStorageService`].
     #[must_use]
-    pub fn new(storage: FileStore) -> Self {
+    pub fn new(storage: S) -> Self {
         Self { storage }
     }
 }
 
 #[async_trait::async_trait]
-impl ContentAddressableStorage for ContentAddressableStorageService {
+impl<S> ContentAddressableStorage for ContentAddressableStorageService<S>
+where
+    S: Store + 'static,
+{
     /// Determine whether a blob is in the CAS.
     ///
     /// Clients can use this API before uploading blobs to determine which ones
@@ -56,7 +61,7 @@ impl ContentAddressableStorage for ContentAddressableStorageService {
         for digest in &req.blob_digests {
             let hash = &digest.hash;
 
-            let exists = match self.storage.contains(&digest) {
+            let exists = match self.storage.contains(&hash) {
                 Ok(exists) => exists,
                 Err(err) => return Err(Status::internal(err.to_string())),
             };

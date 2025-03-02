@@ -9,7 +9,7 @@ use std::ops::Drop;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use storage::Store;
+use storage::{Store, ProtoStoreExt};
 
 /// Executes build actions within local directories.
 ///
@@ -202,20 +202,20 @@ impl<S: Store> SandboxHandle for LocalSandbox<S> {
 
             outputs.push(GeneratedFile {
                 path: PathBuf::from(&rel_path),
-                digest: self.storage.write(file)?,
+                digest: self.storage.write_digest(file)?,
             });
         }
 
         let stdout = {
             let cursor = Cursor::new(&output.stdout);
             let mut reader = BufReader::new(cursor);
-            self.storage.write(reader)
+            self.storage.write_digest(reader)
         }?;
 
         let stderr = {
             let cursor = Cursor::new(&output.stderr);
             let mut reader = BufReader::new(cursor);
-            self.storage.write(reader)
+            self.storage.write_digest(reader)
         }?;
 
         Ok(ExecResult {
