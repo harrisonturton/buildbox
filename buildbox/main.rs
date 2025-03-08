@@ -68,9 +68,10 @@ async fn main() -> ExitCode {
 
 fn init_tracing_or_die() {
     let env_filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
+        .with_default_directive(LevelFilter::DEBUG.into())
         .with_env_var("LOG_LEVEL")
-        .from_env_lossy();
+        // h2 and tonic are very noisy; suppress by default.
+        .parse_lossy("trace,h2=info,tonic=info");
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())

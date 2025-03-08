@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "executor",
@@ -10,4 +10,10 @@ rust_library(
         "//buildbox/storage",
         "@crates//:tracing",
     ],
+)
+
+rust_test(
+    name = "tests",
+    crate = ":executor",
+    deps = ["@crates//:tempdir"],
 )

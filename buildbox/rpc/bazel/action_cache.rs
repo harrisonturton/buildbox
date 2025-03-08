@@ -34,7 +34,7 @@ where
     ) -> Result<Response<ActionResult>, Status> {
         let req = req.into_inner();
         let hash = req.action_digest.clone().unwrap().hash;
-        tracing::info!("ActionCache::get_action_result {req:?}");
+        tracing::trace!("get_action_result hash={hash}");
         Err(Status::not_found("action not found"))
     }
 
@@ -44,7 +44,7 @@ where
     ) -> Result<Response<ActionResult>, Status> {
         let req = req.into_inner();
         let hash = req.action_digest.unwrap().hash;
-        tracing::info!("ActionCache::update_action_result {hash}");
+        tracing::trace!("update_action_result hash={hash}");
         Ok(Response::new(ActionResult::default()))
     }
 }

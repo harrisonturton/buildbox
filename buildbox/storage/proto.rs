@@ -1,13 +1,13 @@
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 use common::hash::Hasher;
-use proto::bazel::exec::Digest;
 use common::{Error, Result};
 use prost::Message;
+use proto::bazel::exec::Digest;
 use std::default::Default;
 use std::io::{BufReader, Read, Write};
 
-use crate::{Store, WriteHandle};
 use crate::tee::TeeWriter;
+use crate::{Store, WriteHandle};
 
 /// Convenience extensions for using the store as content-addressable storage
 /// for serialized proto messages.
@@ -20,6 +20,11 @@ pub trait ProtoStoreExt {
     where
         T: Message + Default;
 
+    // Write a proto message.
+    fn write_message<T>(&self, message: &T) -> Result<Digest>
+    where
+        T: Message + Default;
+
     /// Write bytes to a file identified by a [`Digest`] hash.
     fn write_digest(&self, src: impl Read) -> Result<Digest>;
 }
@@ -27,6 +32,15 @@ pub trait ProtoStoreExt {
 impl<S: Store> ProtoStoreExt for S {
     fn read_digest(&self, digest: &Digest) -> Result<impl Read> {
         self.read(&digest.hash)
+    }
+
+    fn write_message<T>(&self, message: &T) -> Result<Digest>
+    where
+        T: Message + Default,
+    {
+        let data = message.encode_to_vec();
+        let mut reader = data.reader();
+        self.write_digest(&mut reader)
     }
 
     fn read_message<T>(&self, digest: &Digest) -> Result<T>
@@ -53,6 +67,9 @@ impl<S: Store> ProtoStoreExt for S {
         let hash = hasher.finish().to_string();
         writer.seal(&hash)?;
 
-        Ok(Digest { hash, size_bytes: size_bytes as i64 })
+        Ok(Digest {
+            hash,
+            size_bytes: size_bytes as i64,
+        })
     }
 }

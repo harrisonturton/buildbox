@@ -23,7 +23,8 @@ pub trait SandboxHandle: Sync + Send {
 pub struct ExecCommand {
   pub args: Vec<String>,
   pub env: HashMap<String, String>,
-  pub outputs: Vec<String>,
+  pub output_files: Vec<String>,
+  pub output_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,13 +57,21 @@ pub struct ExecResult {
     pub exit_code: i32,
     pub stdout: Digest,
     pub stderr: Digest,
-    pub outputs: Vec<GeneratedFile>,
+    pub output_files: Vec<OutputFile>,
+    pub output_dirs: Vec<proto::bazel::exec::OutputDirectory>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GeneratedFile {
+pub struct OutputFile {
     pub path: PathBuf,
     pub digest: Digest,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputDir {
+    pub path: PathBuf,
+    pub files: Vec<OutputFile>,
+    pub dirs: Vec<OutputDir>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

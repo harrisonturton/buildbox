@@ -24,7 +24,10 @@ rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 
 rust.toolchain(
     edition = "2021",
-    versions = ["1.84.0"],
+    versions = [
+        "1.84.0",
+        "nightly/2025-01-01",
+    ],
 )
 
 use_repo(rust, "rust_toolchains")
@@ -59,6 +62,7 @@ crate.spec(
 crate.spec(
     package = "tracing",
     version = "0.1",
+    features = ["attributes"],
 )
 
 crate.spec(
@@ -111,6 +115,11 @@ crate.spec(
 crate.spec(
     package = "shellexpand",
     version = "3.1",
+)
+
+crate.spec(
+    package = "tempdir",
+    version = "0.3",
 )
 
 # Rust gRPC and proto dependencies

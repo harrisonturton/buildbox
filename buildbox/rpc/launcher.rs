@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::{bazel, buildbox};
 use common::config::Config;
 use common::{Error, Result};
@@ -20,6 +22,12 @@ pub async fn launch(config: &Config) -> Result<()> {
     tracing::info!("Starting server on {addr}");
 
     let storage = FileStore::new(config.storage_dir.clone().into());
+
+    // let basepath = PathBuf::from("/Users/harrison/Desktop/output");
+    // let relpath = PathBuf::from("/Users/harrison/Desktop/output/a/b/dir");
+    // let out = executor::tree::build_tree(&storage, &basepath, &relpath).unwrap();
+    // println!("{out:?}");
+    // panic!("failed");
 
     let executor = LocalExecutor::new(
         config.sandbox_dir.clone().into(),

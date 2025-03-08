@@ -2,8 +2,8 @@ use super::ResponseStream;
 use bytes::BytesMut;
 use common::Error;
 use executor::{
-    DentryTemplate, DirTemplate, ExecCommand, Executor, SandboxHandle, FileTemplate, SandboxTemplate,
-    SymlinkTemplate,
+    DentryTemplate, DirTemplate, ExecCommand, Executor, FileTemplate, SandboxHandle,
+    SandboxTemplate, SymlinkTemplate,
 };
 use prost::Message;
 use proto::bazel::exec::{
@@ -20,10 +20,10 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::path::PathBuf;
 use std::str::FromStr;
+use storage::{ProtoStoreExt, Store};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use storage::{Store, ProtoStoreExt};
 
 #[derive(Debug)]
 pub struct ExecutionService<S, E> {
@@ -49,11 +49,15 @@ where
             .ok_or_else(|| Error::invalid("missing action digest"))
             .and_then(|digest| self.store.read_message::<Action>(&digest))?;
 
+        tracing::trace!("{action:?}");
+
         let input_root = action
             .input_root_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing input root"))
             .and_then(|digest| self.store.read_message::<Directory>(&digest))?;
+
+        tracing::trace!("{input_root:?}");
 
         let command = action
             .command_digest
@@ -61,7 +65,9 @@ where
             .ok_or_else(|| Error::invalid("missing command digest"))
             .and_then(|digest| self.store.read_message::<Command>(&digest))?;
 
-        tracing::info!("command: {command:?}");
+        tracing::trace!("{command:?}");
+
+        tracing::info!("OUTPUTS directories={:?} output_paths={:?} output_files={:?}", &command.output_directories, &command.output_paths, &command.output_files);
 
         let template = self.build_sandbox_template(&input_root)?;
         let mut sandbox = self.executor.spawn(&template)?;
@@ -72,17 +78,31 @@ where
             env.insert(var.name.clone(), var.value.clone());
         }
 
+        tracing::info!("workdir {:?}", command.working_directory);
+
         let cmd = ExecCommand {
             env,
-            args: command.arguments,
-            outputs: command.output_files.clone(),
+            args: command.arguments.clone(),
+            output_files: command.output_files.clone(),
+            output_dirs: command.output_directories.clone(),
         };
 
         let res = sandbox.exec(&cmd)?;
-        tracing::info!("Sandbox result: {res:?}");
+        tracing::info!(
+            "sandbox command finished with exit_code={} output_files={} output_dirs={}",
+            res.exit_code,
+            res.output_files.len(),
+            res.output_dirs.len()
+        );
+
+        if res.exit_code == 1 {
+            tracing::error!("failed input root: {input_root:?}");
+            tracing::error!("failed command: {command:?}");
+            tracing::error!("failed sandbox template: {template:?}");
+        }
 
         let output_files = res
-            .outputs
+            .output_files
             .iter()
             .map(|output| OutputFile {
                 path: output.path.to_string_lossy().to_string(),
@@ -96,7 +116,7 @@ where
             output_files: output_files,
             output_file_symlinks: vec![],
             output_symlinks: vec![],
-            output_directories: vec![],
+            output_directories: res.output_dirs,
             output_directory_symlinks: vec![],
             exit_code: res.exit_code,
             stdout_raw: vec![],
@@ -148,6 +168,8 @@ where
                     .as_ref()
                     .ok_or_else(|| Error::invalid("missing file"))?;
 
+                tracing::info!("FILE: {:?}", &file.name);
+
                 actions.push(DentryTemplate::File(FileTemplate {
                     path: self.relative_path(&entry.path, &file.name),
                     digest: digest.clone(),
@@ -156,6 +178,7 @@ where
             }
 
             for symlink in &entry.dir.symlinks {
+                tracing::info!("SYMLINK: {:?}", &symlink.name);
                 actions.push(DentryTemplate::Symlink(SymlinkTemplate {
                     path: self.relative_path(&entry.path, &symlink.name),
                     target: self.relative_path(&entry.path, &symlink.target),
@@ -163,11 +186,15 @@ where
             }
 
             for dir_node in &entry.dir.directories {
+                tracing::info!("DIR: {:?}", &dir_node.name);
+
                 let dir = dir_node
                     .digest
                     .as_ref()
                     .ok_or_else(|| Error::invalid("missing directory"))
                     .and_then(|digest| self.store.read_message::<Directory>(&digest))?;
+
+                tracing::info!("{dir:?}");
 
                 next.push_back(DirEntry {
                     path: self.relative_path(&entry.path, &dir_node.name),
@@ -200,7 +227,6 @@ where
         &self,
         req: Request<ExecuteRequest>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
-        tracing::info!("Execution::execute {req:?}");
         let req = req.into_inner();
 
         let (tx, rx) = mpsc::channel(1);
@@ -239,6 +265,7 @@ where
         &self,
         req: tonic::Request<WaitExecutionRequest>,
     ) -> Result<Response<Self::WaitExecutionStream>, Status> {
-        todo!()
+        tracing::error!("unimplemented endpoint wait_execution invoked, stopping");
+        std::process::exit(1)
     }
 }

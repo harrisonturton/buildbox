@@ -47,7 +47,7 @@ where
 
     async fn read(&self, req: Request<ReadRequest>) -> Result<Response<Self::ReadStream>, Status> {
         let req = req.into_inner();
-        tracing::info!("ByteStream::read {req:?}");
+        tracing::trace!("bytestream read resource={}", req.resource_name);
 
         let parts = req.resource_name.split("/").collect::<Vec<&str>>();
         let hash = &parts[1];
@@ -94,8 +94,14 @@ where
         let mut name = None;
         let mut data: Vec<u8> = vec![];
         let mut received = 0;
+        let mut first = true;
 
         while let Some(Ok(req)) = stream.next().await {
+            if first {
+                tracing::trace!("bytestream write resource={}", &req.resource_name);
+                first = false;
+            }
+
             if &req.resource_name != "" {
                 let resource_name = ResourceName::parse(&req.resource_name)
                     .map_err(|err| Status::invalid_argument(err.to_string()))?;

@@ -1,15 +1,17 @@
 use super::{Executor, SandboxHandle};
 use crate::{DentryTemplate, DirTemplate, FileTemplate, SandboxTemplate, SymlinkTemplate};
-use crate::{ExecCommand, ExecResult, GeneratedFile};
+use crate::{ExecCommand, ExecResult, OutputDir, OutputFile};
 use common::{rand, Error, Result};
-use proto::bazel::exec::Digest;
+use proto::bazel::exec::{Digest, OutputDirectory, Tree};
+use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, Cursor, ErrorKind, Write};
 use std::ops::Drop;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use storage::{Store, ProtoStoreExt};
+use std::thread::current;
+use storage::{ProtoStoreExt, Store};
 
 /// Executes build actions within local directories.
 ///
@@ -51,10 +53,9 @@ impl<S: Store> Executor for LocalExecutor<S> {
     fn spawn(&self, template: &SandboxTemplate) -> Result<Self::Handle> {
         let id = self.generate_id();
         let path = self.local_path(&id);
-        tracing::info!("Creating sandbox at: {path:?}");
 
         std::fs::create_dir(&path).map_err(Error::io)?;
-        tracing::info!("Created dir: {path:?}");
+        tracing::trace!("sandbox directory: {path:?}");
 
         Ok(LocalSandbox {
             dir: path,
@@ -76,8 +77,7 @@ pub struct LocalSandbox<S: Store> {
 
 impl<S: Store> LocalSandbox<S> {
     fn prepare_file(&self, tpl: &FileTemplate) -> Result<()> {
-        let path = self.relative_path(&tpl.path);
-        tracing::info!("Preparing file: {path:?}");
+        let path = self.absolute_path(&tpl.path);
 
         let mut file = OpenOptions::new()
             .write(true)
@@ -100,13 +100,13 @@ impl<S: Store> LocalSandbox<S> {
 
     fn prepare_symlink(&self, symlink: &SymlinkTemplate) -> Result<()> {
         use std::os::unix::fs;
-        let from = self.relative_path(&symlink.path);
-        let to = self.relative_path(&symlink.target);
+        let from = self.absolute_path(&symlink.path);
+        let to = self.absolute_path(&symlink.target);
         fs::symlink(from, to).map_err(Error::io)
     }
 
     fn prepare_dir(&self, dir: &DirTemplate) -> Result<()> {
-        let path = self.relative_path(&dir.path);
+        let path = self.absolute_path(&dir.path);
         if path.exists() {
             return Ok(());
         }
@@ -114,20 +114,30 @@ impl<S: Store> LocalSandbox<S> {
         fs::create_dir(path).map_err(Error::io)
     }
 
-    fn relative_path(&self, path: &PathBuf) -> PathBuf {
+    fn absolute_path(&self, path: &PathBuf) -> PathBuf {
         let mut rel = self.dir.clone();
         rel.push(path);
         rel
+    }
+
+    fn gather_output_directory(&self, cmd: &ExecCommand, path: &str) -> Result<Tree> {
+        let rel_path = PathBuf::from(path);
+        let abs_path = self.absolute_path(&rel_path);
+
+        if !abs_path.exists() {
+            return Err(Error::not_found("output directory not found"));
+        }
+
+        super::tree::build_tree(&self.storage, &self.dir, &rel_path)
     }
 }
 
 impl<S: Store> SandboxHandle for LocalSandbox<S> {
     /// Prepare the sandbox according to the template it was created with.
     fn prepare(&self) -> Result<()> {
-        tracing::info!("Sandbox::prepare {:?}", self.template);
+        tracing::trace!("preparing sandbox in dir={:?}", self.dir);
 
         for template in &self.template.filesystem {
-            tracing::info!("preparing: {template:?}");
             let res = match template {
                 DentryTemplate::File(file) => self.prepare_file(&file),
                 DentryTemplate::Symlink(symlink) => self.prepare_symlink(&symlink),
@@ -145,11 +155,15 @@ impl<S: Store> SandboxHandle for LocalSandbox<S> {
 
     /// Execute the given command.
     fn exec(&self, exec_cmd: &ExecCommand) -> Result<ExecResult> {
-        tracing::info!("Sandbox::exec {exec_cmd:?}");
+        tracing::trace!("sandbox executing command \"{}\"", exec_cmd.args.join(" "));
 
         // These are required environment variables on MacOS. Hardcode them for
         // testing.
         let mut envs = exec_cmd.env.clone();
+
+        let path = std::env::var("PATH").unwrap();
+        let new_path = format!("{path}:/opt/homebrew/opt/llvm/bin");
+
         envs.insert(
             "DEVELOPER_DIR".to_string(),
             "/Library/Developer/CommandLineTools".to_string(),
@@ -158,15 +172,14 @@ impl<S: Store> SandboxHandle for LocalSandbox<S> {
             "SDKROOT".to_string(),
             "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk".to_string(),
         );
+        envs.insert("PATH".to_string(), path);
 
         // For some reason the wrapped_clang script Bazel uses requires that the
         // output files are created before they are written to?
-        for rel_path in &exec_cmd.outputs {
+        for rel_path in &exec_cmd.output_files {
             let path = PathBuf::from(rel_path);
-            let sandbox_path = self.relative_path(&path);
-            tracing::info!("Creating parent directory for: {sandbox_path:?}");
+            let sandbox_path = self.absolute_path(&path);
             if let Some(parent) = sandbox_path.parent() {
-                tracing::info!("actually creating parent");
                 fs::create_dir_all(parent).map_err(|err| {
                     tracing::error!("failed to create parent: {err:?}");
                     Error::io(err)
@@ -188,9 +201,9 @@ impl<S: Store> SandboxHandle for LocalSandbox<S> {
         let exit_code = output.status.code().unwrap_or(-1);
         tracing::info!("command finished with exit code {exit_code}");
 
-        let mut outputs = vec![];
-        for rel_path in &exec_cmd.outputs {
-            let path = self.relative_path(&PathBuf::from(&rel_path));
+        let mut output_files = vec![];
+        for rel_path in &exec_cmd.output_files {
+            let path = self.absolute_path(&PathBuf::from(&rel_path));
             if !path.exists() {
                 continue;
             }
@@ -200,10 +213,30 @@ impl<S: Store> SandboxHandle for LocalSandbox<S> {
                 .open(path)
                 .map_err(Error::io)?;
 
-            outputs.push(GeneratedFile {
+            output_files.push(OutputFile {
                 path: PathBuf::from(&rel_path),
                 digest: self.storage.write_digest(file)?,
             });
+        }
+
+        let mut output_dirs = vec![];
+        for path in &exec_cmd.output_dirs {
+            let tree = match self.gather_output_directory(&exec_cmd, &path) {
+                Ok(tree) => tree,
+                Err(Error::NotFound(_)) => continue,
+                Err(err) => return Err(err),
+            };
+
+            let digest = self.storage.write_message(&tree)?;
+            output_dirs.push(OutputDirectory {
+                path: path.to_owned(),
+                tree_digest: Some(digest),
+            });
+        }
+
+        if exit_code == 1 {
+            tracing::error!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+            tracing::error!("stderr: {}", String::from_utf8_lossy(&output.stderr));
         }
 
         let stdout = {
@@ -220,14 +253,15 @@ impl<S: Store> SandboxHandle for LocalSandbox<S> {
 
         Ok(ExecResult {
             exit_code,
-            outputs,
+            output_files,
+            output_dirs,
             stdout,
             stderr,
         })
     }
 }
 
-impl<S :Store> Drop for LocalSandbox<S> {
+impl<S: Store> Drop for LocalSandbox<S> {
     fn drop(&mut self) {
         if self.retain {
             return;

@@ -66,18 +66,12 @@ where
                 Err(err) => return Err(Status::internal(err.to_string())),
             };
 
-            // Empty file digest
-            if hash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
-                continue;
-            }
-
             if !exists {
-                tracing::info!("ContentAddressableStorage::find_missing_blobs missing hash={hash}");
                 missing.push(digest.clone());
-            } else {
-                tracing::info!("ContentAddressableStorage::find_missing_blobs found hash={hash}");
             }
         }
+
+        tracing::info!("found {}/{} blobs already stored in the cas", missing.len(), req.blob_digests.len());
 
         Ok(Response::new(FindMissingBlobsResponse {
             missing_blob_digests: missing,
@@ -89,8 +83,8 @@ where
         req: Request<BatchUpdateBlobsRequest>,
     ) -> Result<Response<BatchUpdateBlobsResponse>, Status> {
         let req = req.into_inner();
-        tracing::info!("ContentAddressableStorage::batch_update_blobs {req:?}");
-        Ok(Response::new(BatchUpdateBlobsResponse::default()))
+        tracing::error!("unimplemented endpoint batch_update_blobs invoked, stopping");
+        std::process::exit(1)
     }
 
     async fn batch_read_blobs(
@@ -98,8 +92,8 @@ where
         req: Request<BatchReadBlobsRequest>,
     ) -> Result<Response<BatchReadBlobsResponse>, Status> {
         let req = req.into_inner();
-        tracing::info!("ContentAddressableStorage::batch_read_blobs {req:?}");
-        Ok(Response::new(BatchReadBlobsResponse::default()))
+        tracing::error!("unimplemented endpoint batch_read_blobs invoked, stopping");
+        std::process::exit(1)
     }
 
     type GetTreeStream = ResponseStream<Result<GetTreeResponse, Status>>;
@@ -109,7 +103,7 @@ where
         req: Request<GetTreeRequest>,
     ) -> Result<Response<Self::GetTreeStream>, Status> {
         let req = req.into_inner();
-        tracing::info!("ContentAddressableStorage::get_tree {req:?}");
-        todo!()
+        tracing::error!("unimplemented endpoint get_tree invoked, stopping");
+        std::process::exit(1)
     }
 }

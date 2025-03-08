@@ -50,7 +50,6 @@ impl Store for FileStore {
     fn write(&self) -> Result<Self::WriteHandle> {
         let temp_name = format!("tmp-{}", rand::string(20));
         let path = self.local_path(&temp_name);
-        println!("path: {path:?}");
 
         let file = OpenOptions::new()
             .create(true)

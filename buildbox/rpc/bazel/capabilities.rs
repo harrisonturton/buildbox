@@ -14,7 +14,8 @@ impl Capabilities for CapabilitiesService {
         &self,
         _req: Request<GetCapabilitiesRequest>,
     ) -> Result<Response<ServerCapabilities>, Status> {
-        tracing::info!("Capabilities::get_capabilities");
+        tracing::trace!("get_capabilities");
+
         let cap = ServerCapabilities {
             cache_capabilities: Some(CacheCapabilities {
                 digest_function: vec![digest_function::Value::Sha256.into()],

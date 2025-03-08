@@ -40,8 +40,8 @@ impl Config {
         // Create the directories if they don't already exist.
         std::fs::create_dir_all(&storage_dir).map_err(Error::io)?;
         std::fs::create_dir_all(&sandbox_dir).map_err(Error::io)?;
-        tracing::info!("Using storage directory: {storage_dir}");
-        tracing::info!("Using sandbox directory: {sandbox_dir}");
+        tracing::trace!("Using storage directory: {storage_dir}");
+        tracing::trace!("Using sandbox directory: {sandbox_dir}");
 
         Ok(config)
     }
