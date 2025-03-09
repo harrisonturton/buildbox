@@ -107,12 +107,6 @@ where
                     .map_err(|err| Status::invalid_argument(err.to_string()))?;
                 tracing::info!("ByteStream::write hash={:?}", resource_name.hash);
                 name = Some(resource_name.clone());
-
-                if resource_name.uuid
-                    == "hash=d0b06d284064528c34e0177821b739e116582907f4de5e0886cde3476483367a"
-                {
-                    tracing::warn!("GOT {req:?}");
-                }
             }
 
             data.extend(req.data.iter());

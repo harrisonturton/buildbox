@@ -80,10 +80,12 @@ fn build_dir<S: Store>(
     basepath: &PathBuf,
     dir: &PathBuf,
 ) -> Result<(Directory, Vec<Directory>)> {
+    tracing::info!("build_dir basepath={basepath:?} dir={dir:?}");
+
     let dir_path = basepath.join(&dir);
     let entries = fs::read_dir(&dir_path).unwrap();
 
-    let mut dir = Directory {
+    let mut root = Directory {
         files: vec![],
         directories: vec![],
         symlinks: vec![],
@@ -108,10 +110,11 @@ fn build_dir<S: Store>(
 
             children.push(dir.clone());
             children.append(&mut dir_children);
-            dir.directories.push(DirectoryNode {
+            root.directories.push(DirectoryNode {
                 name: dir_name,
                 digest: Some(dir_digest),
             });
+            continue;
         }
 
         let mut file = OpenOptions::new()
@@ -129,7 +132,7 @@ fn build_dir<S: Store>(
             .to_string_lossy()
             .to_string();
 
-        dir.files.push(FileNode {
+        root.files.push(FileNode {
             name: file_name,
             digest: Some(file_digest),
             is_executable: true,
@@ -137,7 +140,9 @@ fn build_dir<S: Store>(
         });
     }
 
-    Ok((dir, children))
+    tracing::info!("OUTPUT FOR {dir_path:?} IS {root:#?} AND {children:#?}");
+
+    Ok((root, children))
 }
 
 

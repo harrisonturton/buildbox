@@ -32,19 +32,25 @@ where
         &self,
         req: Request<GetActionResultRequest>,
     ) -> Result<Response<ActionResult>, Status> {
-        let req = req.into_inner();
-        let hash = req.action_digest.clone().unwrap().hash;
-        tracing::trace!("get_action_result hash={hash}");
+        // let req = req.into_inner();
+        // let hash = req.action_digest.clone().unwrap().hash;
+        // tracing::trace!("get_action_result hash={hash}");
         Err(Status::not_found("action not found"))
+
+        // tracing::error!("unimplemented endpoint get_action_result invoked, stopping");
+        // std::process::exit(1)
     }
 
     async fn update_action_result(
         &self,
         req: Request<UpdateActionResultRequest>,
     ) -> Result<Response<ActionResult>, Status> {
-        let req = req.into_inner();
-        let hash = req.action_digest.unwrap().hash;
-        tracing::trace!("update_action_result hash={hash}");
-        Ok(Response::new(ActionResult::default()))
+        Err(Status::unimplemented("update_action_result not implemented"))
+        // let req = req.into_inner();
+        // let hash = req.action_digest.unwrap().hash;
+        // tracing::trace!("update_action_result hash={hash}");
+        // Ok(Response::new(ActionResult::default()))
+        // tracing::error!("unimplemented endpoint update_action_result invoked, stopping");
+        // std::process::exit(1)
     }
 }

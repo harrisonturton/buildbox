@@ -1,11 +1,11 @@
 use clap::{Args, Parser, Subcommand};
 use common::{config::Config, Error, Result};
-use proto::buildbox::{BuildboxClient, FindSandboxesRequest, FindBlobsRequest};
+use proto::buildbox::{BuildboxClient, FindBlobsRequest, FindSandboxesRequest};
 use std::process::ExitCode;
 use std::{path::PathBuf, str::FromStr};
-use tracing_subscriber::{EnvFilter, filter::LevelFilter, layer::SubscriberExt};
-use tracing_subscriber::util::SubscriberInitExt;
 use tonic::{transport::Endpoint, Request};
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, EnvFilter};
 
 const DEFAULT_SERVER_ADDR: &'static str = "http://[::1]:50051";
 
@@ -27,6 +27,9 @@ pub enum Command {
     /// List the blobs
     #[clap(name = "blobs")]
     ListBlobs(ListBlobsCmd),
+    /// Cleanup sandbox and storage directories
+    #[clap(name = "clean")]
+    Clean,
 }
 
 #[derive(Args, Debug)]
@@ -51,11 +54,12 @@ pub struct ListBlobsCmd {
 #[tokio::main]
 async fn main() -> ExitCode {
     init_tracing_or_die();
-    
+
     let res = match CliArgs::parse().cmd {
         Command::Up(cmd) => up(&cmd).await,
         Command::ListSandboxes(cmd) => list_sandboxes(&cmd).await,
         Command::ListBlobs(cmd) => list_blobs(&cmd).await,
+        Command::Clean => clean().await,
     };
 
     if let Err(err) = res {
@@ -74,7 +78,7 @@ fn init_tracing_or_die() {
         .parse_lossy("trace,h2=info,tonic=info");
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_ansi(true))
         .with(env_filter)
         .init();
 }
@@ -85,7 +89,6 @@ async fn up(cmd: &UpCmd) -> Result<()> {
 }
 
 async fn list_sandboxes(args: &ListSandboxesCmd) -> Result<()> {
-
     let endpoint = {
         let addr = args.addr.clone().unwrap_or(DEFAULT_SERVER_ADDR.to_string());
         Endpoint::from_str(&addr).map_err(Error::boxed_msg("invalid address"))
@@ -125,6 +128,22 @@ async fn list_blobs(args: &ListBlobsCmd) -> Result<()> {
     for blob in &res.into_inner().blobs {
         println!("{blob}");
     }
+
+    Ok(())
+}
+
+async fn clean() -> Result<()> {
+    let config = Config::load(None)?;
+    let storage_dir = PathBuf::from(config.storage_dir);
+    let sandbox_dir = PathBuf::from(config.sandbox_dir);
+
+    tracing::info!("Clearing and recreating {sandbox_dir:?}");
+    std::fs::remove_dir_all(&sandbox_dir).map_err(Error::io)?;
+    std::fs::create_dir(&sandbox_dir).map_err(Error::io)?;
+
+    tracing::info!("Clearing and recreating {storage_dir:?}");
+    std::fs::remove_dir_all(&storage_dir).map_err(Error::io)?;
+    std::fs::create_dir(&storage_dir).map_err(Error::io)?;
 
     Ok(())
 }

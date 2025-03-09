@@ -135,8 +135,6 @@ impl<S: Store> LocalSandbox<S> {
 impl<S: Store> SandboxHandle for LocalSandbox<S> {
     /// Prepare the sandbox according to the template it was created with.
     fn prepare(&self) -> Result<()> {
-        tracing::trace!("preparing sandbox in dir={:?}", self.dir);
-
         for template in &self.template.filesystem {
             let res = match template {
                 DentryTemplate::File(file) => self.prepare_file(&file),
@@ -198,8 +196,8 @@ impl<S: Store> SandboxHandle for LocalSandbox<S> {
             Error::io(err)
         })?;
 
-        let exit_code = output.status.code().unwrap_or(-1);
-        tracing::info!("command finished with exit code {exit_code}");
+        let exit_code = output.status.code().unwrap_or(1);
+        tracing::info!("command finished with exit code {:?}", output.status.code());
 
         let mut output_files = vec![];
         for rel_path in &exec_cmd.output_files {

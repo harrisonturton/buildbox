@@ -12,15 +12,19 @@ impl Push for PushService {
         &self,
         _req: Request<PushBlobRequest>,
     ) -> Result<Response<PushBlobResponse>, Status> {
-        tracing::info!("PushService::push_blob");
-        Ok(Response::new(PushBlobResponse::default()))
+        // tracing::info!("PushService::push_blob");
+        // Ok(Response::new(PushBlobResponse::default()))
+        tracing::error!("unimplemented endpoint push_blob invoked, stopping");
+        std::process::exit(1)
     }
 
     async fn push_directory(
         &self,
         _req: Request<PushDirectoryRequest>,
     ) -> Result<Response<PushDirectoryResponse>, Status> {
-        tracing::info!("PushService::push_directory");
-        Ok(Response::new(PushDirectoryResponse::default()))
+        // tracing::info!("PushService::push_directory");
+        // Ok(Response::new(PushDirectoryResponse::default()))
+        tracing::error!("unimplemented endpoint push_directory invoked, stopping");
+        std::process::exit(1)
     }
 }

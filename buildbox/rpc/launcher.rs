@@ -26,7 +26,7 @@ pub async fn launch(config: &Config) -> Result<()> {
     // let basepath = PathBuf::from("/Users/harrison/Desktop/output");
     // let relpath = PathBuf::from("/Users/harrison/Desktop/output/a/b/dir");
     // let out = executor::tree::build_tree(&storage, &basepath, &relpath).unwrap();
-    // println!("{out:?}");
+    // println!("{out:#?}");
     // panic!("failed");
 
     let executor = LocalExecutor::new(

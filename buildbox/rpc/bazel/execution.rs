@@ -8,7 +8,8 @@ use executor::{
 use prost::Message;
 use proto::bazel::exec::{
     Action, ActionResult, Command, Digest, Directory, DirectoryNode, ExecuteRequest,
-    ExecuteResponse, Execution, FileNode, OutputFile, SymlinkNode, WaitExecutionRequest,
+    ExecuteResponse, ExecutedActionMetadata, Execution, FileNode, OutputFile, SymlinkNode,
+    WaitExecutionRequest,
 };
 use proto::google::{
     longrunning::{operation, Operation},
@@ -43,13 +44,15 @@ where
     }
 
     async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, Error> {
+        tracing::trace!("{req:#?}");
+
         let action = req
             .action_digest
             .as_ref()
             .ok_or_else(|| Error::invalid("missing action digest"))
             .and_then(|digest| self.store.read_message::<Action>(&digest))?;
 
-        tracing::trace!("{action:?}");
+        tracing::trace!("{action:#?}");
 
         let input_root = action
             .input_root_digest
@@ -57,7 +60,7 @@ where
             .ok_or_else(|| Error::invalid("missing input root"))
             .and_then(|digest| self.store.read_message::<Directory>(&digest))?;
 
-        tracing::trace!("{input_root:?}");
+        tracing::trace!("{input_root:#?}");
 
         let command = action
             .command_digest
@@ -65,9 +68,7 @@ where
             .ok_or_else(|| Error::invalid("missing command digest"))
             .and_then(|digest| self.store.read_message::<Command>(&digest))?;
 
-        tracing::trace!("{command:?}");
-
-        tracing::info!("OUTPUTS directories={:?} output_paths={:?} output_files={:?}", &command.output_directories, &command.output_paths, &command.output_files);
+        tracing::error!("COMMAND: {command:#?}");
 
         let template = self.build_sandbox_template(&input_root)?;
         let mut sandbox = self.executor.spawn(&template)?;
@@ -80,6 +81,12 @@ where
 
         tracing::info!("workdir {:?}", command.working_directory);
 
+        // output_paths is only implemented from v2.1
+        if !command.output_paths.is_empty() {
+            tracing::error!("received command with populated output_paths");
+            std::process::exit(1);
+        }
+
         let cmd = ExecCommand {
             env,
             args: command.arguments.clone(),
@@ -88,17 +95,15 @@ where
         };
 
         let res = sandbox.exec(&cmd)?;
-        tracing::info!(
-            "sandbox command finished with exit_code={} output_files={} output_dirs={}",
-            res.exit_code,
-            res.output_files.len(),
-            res.output_dirs.len()
-        );
+
+        tracing::info!("sandbox command finished with exit_code={}", res.exit_code);
+        tracing::info!("found outputs files in sandbox: {:?}", res.output_files);
+        tracing::info!("found outputs dirs in sandbox: {:?}", res.output_dirs);
 
         if res.exit_code == 1 {
             tracing::error!("failed input root: {input_root:?}");
-            tracing::error!("failed command: {command:?}");
-            tracing::error!("failed sandbox template: {template:?}");
+            // tracing::error!("failed sandbox template: {template:#?}");
+            tracing::error!("failed command: {command:#?}");
         }
 
         let output_files = res
@@ -107,7 +112,7 @@ where
             .map(|output| OutputFile {
                 path: output.path.to_string_lossy().to_string(),
                 digest: Some(output.digest.clone()),
-                is_executable: false,
+                is_executable: true,
                 ..Default::default()
             })
             .collect::<Vec<_>>();
@@ -123,8 +128,13 @@ where
             stdout_digest: Some(res.stdout),
             stderr_raw: vec![],
             stderr_digest: Some(res.stderr),
-            execution_metadata: None,
+            execution_metadata: Some(ExecutedActionMetadata {
+                worker: "buildbox".to_string(),
+                ..Default::default()
+            }),
         };
+
+        tracing::info!("action result: {action_res:#?}");
 
         let status = rpc::Status {
             code: 0,
@@ -168,7 +178,7 @@ where
                     .as_ref()
                     .ok_or_else(|| Error::invalid("missing file"))?;
 
-                tracing::info!("FILE: {:?}", &file.name);
+                // tracing::info!("FILE: {:?}", &file.name);
 
                 actions.push(DentryTemplate::File(FileTemplate {
                     path: self.relative_path(&entry.path, &file.name),
@@ -178,7 +188,7 @@ where
             }
 
             for symlink in &entry.dir.symlinks {
-                tracing::info!("SYMLINK: {:?}", &symlink.name);
+                // tracing::info!("SYMLINK: {:?}", &symlink.name);
                 actions.push(DentryTemplate::Symlink(SymlinkTemplate {
                     path: self.relative_path(&entry.path, &symlink.name),
                     target: self.relative_path(&entry.path, &symlink.target),
@@ -186,7 +196,7 @@ where
             }
 
             for dir_node in &entry.dir.directories {
-                tracing::info!("DIR: {:?}", &dir_node.name);
+                // tracing::info!("DIR: {:?}", &dir_node.name);
 
                 let dir = dir_node
                     .digest
@@ -194,7 +204,7 @@ where
                     .ok_or_else(|| Error::invalid("missing directory"))
                     .and_then(|digest| self.store.read_message::<Directory>(&digest))?;
 
-                tracing::info!("{dir:?}");
+                // tracing::info!("{dir:?}");
 
                 next.push_back(DirEntry {
                     path: self.relative_path(&entry.path, &dir_node.name),
@@ -246,7 +256,7 @@ where
 
         let op = Operation {
             // TODO: Build directory of operations to allow awaiting them later.
-            name: "operations/fake-id".to_string(),
+            name: "operations/new-id".to_string(),
             metadata: None,
             done: true,
             result: Some(operation::Result::Response(proto_any)),

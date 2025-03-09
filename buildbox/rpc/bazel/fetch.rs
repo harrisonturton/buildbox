@@ -12,15 +12,19 @@ impl Fetch for FetchService {
         &self,
         _req: Request<FetchBlobRequest>,
     ) -> Result<Response<FetchBlobResponse>, Status> {
-        tracing::info!("FetchService::fetch_blob");
-        Ok(Response::new(FetchBlobResponse::default()))
+        // tracing::info!("FetchService::fetch_blob");
+        // Ok(Response::new(FetchBlobResponse::default()))
+        tracing::error!("unimplemented endpoint fetch_blob invoked, stopping");
+        std::process::exit(1)
     }
 
     async fn fetch_directory(
         &self,
         _req: Request<FetchDirectoryRequest>,
     ) -> Result<Response<FetchDirectoryResponse>, Status> {
-        tracing::info!("FetchService::fetch_directory");
-        Ok(Response::new(FetchDirectoryResponse::default()))
+        // tracing::info!("FetchService::fetch_directory");
+        // Ok(Response::new(FetchDirectoryResponse::default()))
+        tracing::error!("unimplemented endpoint fetch_directory invoked, stopping");
+        std::process::exit(1)
     }
 }
