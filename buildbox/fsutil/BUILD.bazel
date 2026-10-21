@@ -1,0 +1,14 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "fsutil",
+    srcs = ["fsutil.rs"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = ["@crates//:tokio"],
+)
+
+rust_test(
+    name = "fsutil_test",
+    crate = ":fsutil",
+    deps = ["@crates//:tempfile"],
+)

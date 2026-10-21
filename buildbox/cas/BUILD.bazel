@@ -43,6 +43,7 @@ rust_library(
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         ":cas",
+        "//buildbox/fsutil",
         "@crates//:tempfile",
         "@crates//:tokio",
     ],

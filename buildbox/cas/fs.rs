@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use cas::{BlobReader, BlobWriter, Cas, CasError, Digest, Hasher, Usage};
-use std::fs::{File, Permissions, TryLockError};
+use fsutil::run_blocking;
+use std::fs::{File, Permissions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -55,14 +56,13 @@ impl FsCas {
 
 fn open_blocking(dir: &Path) -> Result<FsCas, CasError> {
     create_dir_all(dir)?;
-    let lock = lock_dir(dir)?;
+    let lock = fsutil::lock_dir(dir).map_err(|error| io_error("failed to lock", dir, error))?;
 
     let blobs = dir.join("blobs");
     create_dir_all(&blobs)?;
 
     let tmp = dir.join("tmp");
-    remove_dir_all_if_exists(&tmp)?;
-    create_dir_all(&tmp)?;
+    fsutil::reset_dir(&tmp).map_err(|error| io_error("failed to reset", &tmp, error))?;
 
     let dirs = Dirs {
         blobs,
@@ -75,20 +75,6 @@ fn open_blocking(dir: &Path) -> Result<FsCas, CasError> {
 
     store_empty_blob(&cas)?;
     Ok(cas)
-}
-
-fn lock_dir(dir: &Path) -> Result<File, CasError> {
-    let path = dir.join("lock");
-    let file = File::create(&path).map_err(|error| io_error("failed to create", &path, error))?;
-
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => {
-            let error = std::io::Error::new(ErrorKind::WouldBlock, "in use by another process");
-            Err(io_error("failed to lock", &path, error))
-        }
-        Err(TryLockError::Error(error)) => Err(io_error("failed to lock", &path, error)),
-    }
 }
 
 /// Clients may reference the empty blob without uploading it.
@@ -286,29 +272,8 @@ fn create_dir_all(path: &Path) -> Result<(), CasError> {
     std::fs::create_dir_all(path).map_err(|error| io_error("failed to create", path, error))
 }
 
-fn remove_dir_all_if_exists(path: &Path) -> Result<(), CasError> {
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io_error("failed to remove", path, error)),
-    }
-}
-
 fn io_error(action: &str, path: &Path, error: std::io::Error) -> CasError {
     CasError::io(format!("{action} {}", path.display()), error)
-}
-
-/// Run blocking filesystem work off the async runtime.
-async fn run_blocking<T, F>(f: F) -> Result<T, CasError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, CasError> + Send + 'static,
-{
-    match tokio::task::spawn_blocking(f).await {
-        Ok(result) => result,
-        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-        Err(error) => Err(CasError::io("blocking task was cancelled", std::io::Error::other(error))),
-    }
 }
 
 #[cfg(test)]
