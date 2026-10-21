@@ -35,6 +35,11 @@ crate.spec(
 )
 
 crate.spec(
+    package = "libc",
+    version = "0.2",
+)
+
+crate.spec(
     package = "ring",
     version = "0.17",
 )

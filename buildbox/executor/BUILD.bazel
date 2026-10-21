@@ -33,6 +33,7 @@ rust_library(
         "//buildbox/cas",
         "//buildbox/fsutil",
         "//third_party/remoteapis:remote_execution_rust_proto",
+        "@crates//:libc",
         "@crates//:prost",
         "@crates//:tempfile",
         "@crates//:tokio",

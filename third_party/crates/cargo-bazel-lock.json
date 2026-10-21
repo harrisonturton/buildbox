@@ -4,7 +4,7 @@
     "protoc-gen-prost 0.4.0",
     "protoc-gen-tonic 0.4.1"
   ],
-  "checksum": "c96d0c0bcef586c5ee1acc38c3c3db4ba3c27a52adbc5ca6b9dcf8c365ad2de1",
+  "checksum": "6ca4f330c0f55778f2b73b53b535c3a414b7f135472b3b95cfc5611cd4725184",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -1216,6 +1216,10 @@
           {
             "id": "data-encoding 2.11.1",
             "target": "data_encoding"
+          },
+          {
+            "id": "libc 0.2.191",
+            "target": "libc"
           },
           {
             "id": "prost 0.13.5",
@@ -7652,6 +7656,7 @@
     "bytes 1.12.1",
     "clap 4.6.7",
     "data-encoding 2.11.1",
+    "libc 0.2.191",
     "prost 0.13.5",
     "prost-types 0.13.5",
     "protoc-gen-prost 0.4.0",

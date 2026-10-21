@@ -253,6 +253,7 @@ dependencies = [
  "bytes",
  "clap",
  "data-encoding",
+ "libc",
  "prost",
  "prost-types",
  "protoc-gen-prost",
