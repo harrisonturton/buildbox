@@ -1,0 +1,21 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "config",
+    srcs = ["config.rs"],
+    visibility = [
+        "//buildbox/cli:__pkg__",
+        "//buildbox/server:__pkg__",
+    ],
+    deps = [
+        "@crates//:serde",
+        "@crates//:thiserror",
+        "@crates//:toml",
+    ],
+)
+
+rust_test(
+    name = "config_test",
+    crate = ":config",
+    deps = ["@crates//:tempfile"],
+)
