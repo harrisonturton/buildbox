@@ -1,0 +1,75 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "actioncache",
+    srcs = ["action_cache.rs"],
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/cas",
+        "//third_party/remoteapis:remote_execution_rust_proto",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_library(
+    name = "fs",
+    srcs = ["fs.rs"],
+    crate_name = "actioncache_fs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        ":actioncache",
+        "//buildbox/cas",
+        "//buildbox/fsutil",
+        "//third_party/remoteapis:remote_execution_rust_proto",
+        "@crates//:prost",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "fs_test",
+    crate = ":fs",
+    deps = [":conformance"],
+)
+
+rust_library(
+    name = "mem",
+    srcs = ["mem.rs"],
+    crate_name = "actioncache_mem",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        ":actioncache",
+        "//buildbox/cas",
+        "//third_party/remoteapis:remote_execution_rust_proto",
+        "@crates//:prost",
+    ],
+)
+
+rust_test(
+    name = "mem_test",
+    crate = ":mem",
+    deps = [
+        ":conformance",
+        "@crates//:tokio",
+    ],
+)
+
+rust_library(
+    name = "conformance",
+    testonly = True,
+    srcs = ["conformance.rs"],
+    crate_name = "actioncache_conformance",
+    deps = [
+        ":actioncache",
+        "//buildbox/cas",
+        "//third_party/remoteapis:remote_execution_rust_proto",
+        "@crates//:tempfile",
+    ],
+)
