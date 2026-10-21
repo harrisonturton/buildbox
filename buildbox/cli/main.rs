@@ -9,7 +9,9 @@ mod status;
 mod up;
 
 use clap::{Parser, Subcommand};
+use std::error::Error;
 use std::process::ExitCode;
+use std::time::Duration;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -38,17 +40,23 @@ enum Command {
     Actions(actions::ActionsArgs),
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    init_logging();
+/// How long to wait, on exit, for blocking work such as a large file copy,
+/// which can't be cancelled.
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn main() -> ExitCode {
+    init_logging();
     let cli = Cli::parse();
-    let result = match cli.command {
-        Command::Up(args) => up::run(args).await,
-        Command::Config(args) => show_config::run(args),
-        Command::Status(args) => status::run(args).await,
-        Command::Actions(args) => actions::run(args).await,
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("error: failed to start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
     };
+    let result = runtime.block_on(run(cli.command));
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -56,6 +64,15 @@ async fn main() -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+async fn run(command: Command) -> Result<(), Box<dyn Error>> {
+    match command {
+        Command::Up(args) => up::run(args).await,
+        Command::Config(args) => show_config::run(args),
+        Command::Status(args) => status::run(args).await,
+        Command::Actions(args) => actions::run(args).await,
     }
 }
 

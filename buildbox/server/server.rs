@@ -19,8 +19,14 @@ use scheduler::Scheduler;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::oneshot;
 use tonic::transport::Server;
+
+/// How long requests may keep running after the server is asked to stop,
+/// before they are stopped too.
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -41,6 +47,11 @@ pub enum ServerError {
 }
 
 /// Run the server until it receives SIGINT or SIGTERM.
+///
+/// On a signal the server stops accepting requests and gives running ones
+/// [`SHUTDOWN_GRACE_PERIOD`] to finish. Requests still running after that,
+/// and the actions they started, are stopped when the async runtime shuts
+/// down.
 pub async fn run(config: &Config) -> Result<(), ServerError> {
     let cas: Arc<dyn Cas> = Arc::new(open_cas(config).await?);
     let action_cache: Arc<dyn ActionCache> = Arc::new(open_action_cache(config).await?);
@@ -63,7 +74,8 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     tracing::info!("listening on {}", config.listen);
     tracing::info!("running up to {} actions at once", config.max_concurrent_actions);
 
-    Server::builder()
+    let (stop, stopped) = oneshot::channel::<()>();
+    let serve = Server::builder()
         .add_service(
             ExecutionServer::new(execution_service)
                 .max_decoding_message_size(MAX_MESSAGE_SIZE_BYTES)
@@ -86,15 +98,32 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
         )
         .add_service(CapabilitiesServer::new(capabilities_service))
         .add_service(AdminServer::new(admin_service))
-        .serve_with_shutdown(config.listen, shutdown_signal())
-        .await
-        .map_err(|error| ServerError::Serve {
-            addr: config.listen,
-            error,
-        })?;
+        .serve_with_shutdown(config.listen, async {
+            let _ = stopped.await;
+        });
+    tokio::pin!(serve);
+
+    tokio::select! {
+        result = &mut serve => return serve_result(config, result),
+        () = shutdown_signal() => {}
+    }
+
+    // The receiver is held by the server, so this can't fail.
+    let _ = stop.send(());
+    match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, serve).await {
+        Ok(result) => serve_result(config, result)?,
+        Err(_) => tracing::warn!("requests still running after {SHUTDOWN_GRACE_PERIOD:?}; stopping them"),
+    }
 
     tracing::info!("shut down");
     Ok(())
+}
+
+fn serve_result(config: &Config, result: Result<(), tonic::transport::Error>) -> Result<(), ServerError> {
+    result.map_err(|error| ServerError::Serve {
+        addr: config.listen,
+        error,
+    })
 }
 
 async fn open_cas(config: &Config) -> Result<FsCas, ServerError> {
