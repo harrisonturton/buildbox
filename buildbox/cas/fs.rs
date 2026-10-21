@@ -14,6 +14,9 @@ use tokio::io::AsyncWriteExt;
 /// Committed blobs are read-only, so a materialized hard link to one can't be
 /// used to modify it.
 const BLOB_MODE: u32 = 0o444;
+const EXECUTABLE_BLOB_MODE: u32 = 0o555;
+
+/// Modes for materialized copies, used when hard links aren't possible.
 const FILE_MODE: u32 = 0o644;
 const EXECUTABLE_MODE: u32 = 0o755;
 
@@ -25,8 +28,16 @@ const COPY_CHUNK_SIZE: usize = 64 * 1024;
 ///
 /// - `lock`: held while the store is open, so only one process uses it.
 /// - `blobs/<hash>`: committed blobs.
+/// - `exec/<hash>`: executable copies of blobs, made the first time a blob is
+///   materialized as an executable. Hard links to a file share its mode, so
+///   executable and non-executable links need separate files.
 /// - `tmp/`: blobs being written. Anything here when the store is opened was
 ///   abandoned, and is deleted.
+///
+/// Blobs are materialized as hard links when the destination is on the same
+/// filesystem, so populating a sandbox doesn't copy any data. Linked files are
+/// read-only, but anything that changes their permissions or contents in
+/// place changes the stored blob too.
 #[derive(Debug, Clone)]
 pub struct FsCas {
     dirs: Arc<Dirs>,
@@ -35,6 +46,7 @@ pub struct FsCas {
 #[derive(Debug)]
 struct Dirs {
     blobs: PathBuf,
+    executables: PathBuf,
     tmp: PathBuf,
     // Never read: holding the file holds the lock.
     _lock: File,
@@ -52,6 +64,10 @@ impl FsCas {
     fn blob_path(&self, digest: &Digest) -> PathBuf {
         self.dirs.blobs.join(digest.hash())
     }
+
+    fn executable_path(&self, digest: &Digest) -> PathBuf {
+        self.dirs.executables.join(digest.hash())
+    }
 }
 
 fn open_blocking(dir: &Path) -> Result<FsCas, CasError> {
@@ -61,11 +77,15 @@ fn open_blocking(dir: &Path) -> Result<FsCas, CasError> {
     let blobs = dir.join("blobs");
     create_dir_all(&blobs)?;
 
+    let executables = dir.join("exec");
+    create_dir_all(&executables)?;
+
     let tmp = dir.join("tmp");
     fsutil::reset_dir(&tmp).map_err(|error| io_error("failed to reset", &tmp, error))?;
 
     let dirs = Dirs {
         blobs,
+        executables,
         tmp,
         _lock: lock,
     };
@@ -135,10 +155,10 @@ impl Cas for FsCas {
     }
 
     async fn materialize(&self, digest: &Digest, dest: &Path, executable: bool) -> Result<(), CasError> {
-        let blob_path = self.blob_path(digest);
+        let cas = self.clone();
         let digest = digest.clone();
         let dest = dest.to_path_buf();
-        run_blocking(move || materialize_blocking(&blob_path, &digest, &dest, executable)).await
+        run_blocking(move || materialize_blocking(&cas, &digest, &dest, executable)).await
     }
 
     async fn usage(&self) -> Result<Usage, CasError> {
@@ -173,17 +193,59 @@ fn put_file_blocking(cas: &FsCas, path: &Path) -> Result<Digest, CasError> {
     Ok(digest)
 }
 
-fn materialize_blocking(blob_path: &Path, digest: &Digest, dest: &Path, executable: bool) -> Result<(), CasError> {
-    let mut source = match File::open(blob_path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Err(CasError::NotFound(digest.clone())),
-        Err(error) => return Err(io_error("failed to open", blob_path, error)),
+/// Hard link a blob into place, or copy it where hard links can't be used.
+fn materialize_blocking(cas: &FsCas, digest: &Digest, dest: &Path, executable: bool) -> Result<(), CasError> {
+    let source = if executable {
+        executable_blob(cas, digest)?
+    } else {
+        cas.blob_path(digest)
     };
 
-    let mut file = File::create(dest).map_err(|error| io_error("failed to create", dest, error))?;
-    std::io::copy(&mut source, &mut file).map_err(|error| io_error("failed to write", dest, error))?;
+    let error = match std::fs::hard_link(&source, dest) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if error.kind() == ErrorKind::NotFound && !source.exists() {
+        return Err(CasError::NotFound(digest.clone()));
+    }
+    if !can_copy_instead_of_linking(&error) {
+        return Err(io_error("failed to link", dest, error));
+    }
 
     let mode = if executable { EXECUTABLE_MODE } else { FILE_MODE };
+    copy_file(&source, dest, mode)
+}
+
+/// The executable copy of a blob, made on first use.
+fn executable_blob(cas: &FsCas, digest: &Digest) -> Result<PathBuf, CasError> {
+    let path = cas.executable_path(digest);
+    if path.exists() {
+        return Ok(path);
+    }
+
+    let blob_path = cas.blob_path(digest);
+    let mut source = match File::open(&blob_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Err(CasError::NotFound(digest.clone())),
+        Err(error) => return Err(io_error("failed to open", &blob_path, error)),
+    };
+
+    let (mut temp_file, temp_path) = new_temp_file(&cas.dirs.tmp)?;
+    std::io::copy(&mut source, &mut temp_file).map_err(|error| io_error("failed to write", &temp_path, error))?;
+    persist_with_mode(temp_path, &path, EXECUTABLE_BLOB_MODE)?;
+    Ok(path)
+}
+
+/// Hard links fail across filesystems, and when a file has the most links
+/// the filesystem allows. A copy works in both cases.
+fn can_copy_instead_of_linking(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::CrossesDevices | ErrorKind::TooManyLinks)
+}
+
+fn copy_file(source: &Path, dest: &Path, mode: u32) -> Result<(), CasError> {
+    let mut source_file = File::open(source).map_err(|error| io_error("failed to open", source, error))?;
+    let mut file = File::create(dest).map_err(|error| io_error("failed to create", dest, error))?;
+    std::io::copy(&mut source_file, &mut file).map_err(|error| io_error("failed to write", dest, error))?;
     file.set_permissions(Permissions::from_mode(mode))
         .map_err(|error| io_error("failed to set permissions on", dest, error))
 }
@@ -258,14 +320,18 @@ fn new_temp_file(tmp_dir: &Path) -> Result<(File, TempPath), CasError> {
 
 /// Make a fully-written temporary file visible as a blob.
 fn persist_blob(temp_path: TempPath, blob_path: &Path) -> Result<(), CasError> {
-    std::fs::set_permissions(&temp_path, Permissions::from_mode(BLOB_MODE))
+    persist_with_mode(temp_path, blob_path, BLOB_MODE)
+}
+
+fn persist_with_mode(temp_path: TempPath, path: &Path, mode: u32) -> Result<(), CasError> {
+    std::fs::set_permissions(&temp_path, Permissions::from_mode(mode))
         .map_err(|error| io_error("failed to set permissions on", &temp_path, error))?;
 
-    // If the blob already exists this replaces it with identical contents,
+    // If the file already exists this replaces it with identical contents,
     // which is harmless.
     temp_path
-        .persist(blob_path)
-        .map_err(|error| io_error("failed to rename into", blob_path, error.error))
+        .persist(path)
+        .map_err(|error| io_error("failed to rename into", path, error.error))
 }
 
 fn create_dir_all(path: &Path) -> Result<(), CasError> {
@@ -309,6 +375,27 @@ mod tests {
         let err = FsCas::open(dir.path()).await.unwrap_err();
 
         assert!(err.to_string().contains("in use by another process"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn materialize_hard_links_read_only_files() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cas = FsCas::open(&dir.path().join("cas")).await.unwrap();
+        let digest = cas.put_bytes(b"shared").await.unwrap();
+        let [a, b, x, y] = ["a", "b", "x", "y"].map(|name| dir.path().join(name));
+
+        cas.materialize(&digest, &a, false).await.unwrap();
+        cas.materialize(&digest, &b, false).await.unwrap();
+        cas.materialize(&digest, &x, true).await.unwrap();
+        cas.materialize(&digest, &y, true).await.unwrap();
+
+        let [a, b, x, y] = [a, b, x, y].map(|path| std::fs::metadata(path).unwrap());
+        assert_eq!(a.ino(), b.ino());
+        assert_eq!(x.ino(), y.ino());
+        assert_ne!(a.ino(), x.ino());
+        assert_eq!(a.permissions().mode() & 0o777, BLOB_MODE);
+        assert_eq!(x.permissions().mode() & 0o777, EXECUTABLE_BLOB_MODE);
     }
 
     #[tokio::test]
