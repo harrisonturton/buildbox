@@ -1,6 +1,7 @@
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
+load("//bazel:version.bzl", "VERSION")
 
 proto_library(
     name = "admin_proto",
@@ -19,9 +20,25 @@ rust_prost_library(
 rust_library(
     name = "admin",
     srcs = ["admin_service.rs"],
+    version = VERSION,
     visibility = ["//buildbox/server:__pkg__"],
     deps = [
         ":admin_rust_proto",
+        "//buildbox/actioncache",
+        "//buildbox/cas",
+        "//buildbox/scheduler",
         "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "admin_test",
+    crate = ":admin",
+    deps = [
+        "//buildbox/actioncache:mem",
+        "//buildbox/cas:mem",
+        "//buildbox/executor",
+        "//third_party/remoteapis:remote_execution_rust_proto",
+        "@crates//:tokio",
     ],
 )

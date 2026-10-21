@@ -1,7 +1,11 @@
 //! The buildbox command-line interface.
 
+mod actions;
+mod client;
 mod config_args;
+mod format;
 mod show_config;
+mod status;
 mod up;
 
 use clap::{Parser, Subcommand};
@@ -26,6 +30,12 @@ enum Command {
 
     /// Print the configuration the server would use.
     Config(show_config::ShowConfigArgs),
+
+    /// Summarise a running server's storage and load.
+    Status(status::StatusArgs),
+
+    /// List the actions a running server is handling.
+    Actions(actions::ActionsArgs),
 }
 
 #[tokio::main]
@@ -36,6 +46,8 @@ async fn main() -> ExitCode {
     let result = match cli.command {
         Command::Up(args) => up::run(args).await,
         Command::Config(args) => show_config::run(args),
+        Command::Status(args) => status::run(args).await,
+        Command::Actions(args) => actions::run(args).await,
     };
 
     match result {

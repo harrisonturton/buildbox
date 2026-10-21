@@ -1,20 +1,28 @@
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+load("//bazel:version.bzl", "VERSION")
 
 rust_binary(
     name = "buildbox",
     srcs = [
+        "actions.rs",
+        "client.rs",
         "config_args.rs",
+        "format.rs",
         "main.rs",
         "show_config.rs",
+        "status.rs",
         "up.rs",
     ],
+    version = VERSION,
     visibility = ["//buildbox:__pkg__"],
     deps = [
+        "//buildbox/admin:admin_rust_proto",
         "//buildbox/config",
         "//buildbox/server",
         "@crates//:clap",
         "@crates//:tokio",
         "@crates//:toml",
+        "@crates//:tonic",
         "@crates//:tracing-subscriber",
     ],
 )

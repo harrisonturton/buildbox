@@ -2,7 +2,8 @@
 
 use actioncache::{ActionCache, ActionCacheError};
 use actioncache_fs::FsActionCache;
-use admin_proto::buildbox::buildbox_server::BuildboxServer;
+use admin::AdminService;
+use admin_proto::buildbox::admin::v1::admin_server::AdminServer;
 use bytestream_proto::google::bytestream::byte_stream_server::ByteStreamServer;
 use cas::{Cas, CasError};
 use cas_fs::FsCas;
@@ -46,12 +47,18 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     let local_executor: Arc<dyn Executor> = Arc::new(open_executor(config, cas.clone()).await?);
     let scheduler = Arc::new(Scheduler::new(local_executor, config.max_concurrent_actions));
 
-    let execution_service = reapi::ExecutionService::new(cas.clone(), action_cache.clone(), scheduler);
-    let action_cache_service = reapi::ActionCacheService::new(cas.clone(), action_cache);
+    let execution_service = reapi::ExecutionService::new(cas.clone(), action_cache.clone(), scheduler.clone());
+    let action_cache_service = reapi::ActionCacheService::new(cas.clone(), action_cache.clone());
     let cas_service = reapi::ContentAddressableStorageService::new(cas.clone());
-    let bytestream_service = reapi::ByteStreamService::new(cas);
+    let bytestream_service = reapi::ByteStreamService::new(cas.clone());
     let capabilities_service = reapi::CapabilitiesService::default();
-    let admin_service = admin::BuildboxService::default();
+    let admin_service = AdminService::new(
+        cas.clone(),
+        config.cas_dir.display().to_string(),
+        action_cache.clone(),
+        config.action_cache_dir.display().to_string(),
+        scheduler.clone(),
+    );
 
     tracing::info!("listening on {}", config.listen);
     tracing::info!("running up to {} actions at once", config.max_concurrent_actions);
@@ -78,7 +85,7 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
                 .max_encoding_message_size(MAX_MESSAGE_SIZE_BYTES),
         )
         .add_service(CapabilitiesServer::new(capabilities_service))
-        .add_service(BuildboxServer::new(admin_service))
+        .add_service(AdminServer::new(admin_service))
         .serve_with_shutdown(config.listen, shutdown_signal())
         .await
         .map_err(|error| ServerError::Serve {
