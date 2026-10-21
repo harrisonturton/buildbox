@@ -1,6 +1,0 @@
-proto_library(
-    name = "package_load_metrics_proto",
-    srcs = ["package_load_metrics.proto"],
-    visibility = ["//visibility:public"],
-    deps = ["@google_apis_proto//google/protobuf:duration_proto"],
-)

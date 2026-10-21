@@ -1,0 +1,3 @@
+"""Google API protos (ByteStream, long-running operations, RPC status)."""
+
+bazel_dep(name = "googleapis", version = "0.0.0-20260825-d10ac924")

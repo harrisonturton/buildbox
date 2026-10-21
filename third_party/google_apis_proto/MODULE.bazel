@@ -1,6 +1,0 @@
-"""Protobuf builtin definitions"""
-
-module(
-  name = "google_apis_proto",
-  version = "0.0.1",
-)

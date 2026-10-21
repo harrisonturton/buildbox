@@ -1,0 +1,39 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
+
+proto_library(
+    name = "semver_proto",
+    srcs = ["build/bazel/semver/semver.proto"],
+    strip_import_prefix = "/third_party/remoteapis",
+    deps = [
+        "@googleapis//google/rpc:status_proto",
+        "@protobuf//:timestamp_proto",
+    ],
+)
+
+proto_library(
+    name = "remote_execution_proto",
+    srcs = ["build/bazel/remote/execution/v2/remote_execution.proto"],
+    strip_import_prefix = "/third_party/remoteapis",
+    deps = [
+        ":semver_proto",
+        "@googleapis//google/api:annotations_proto",
+        "@googleapis//google/longrunning:operations_proto",
+        "@googleapis//google/rpc:status_proto",
+        "@protobuf//:duration_proto",
+        "@protobuf//:timestamp_proto",
+        "@protobuf//:wrappers_proto",
+    ],
+)
+
+rust_prost_library(
+    name = "semver_rust_proto",
+    proto = ":semver_proto",
+    visibility = ["//buildbox:__subpackages__"],
+)
+
+rust_prost_library(
+    name = "remote_execution_rust_proto",
+    proto = ":remote_execution_proto",
+    visibility = ["//buildbox:__subpackages__"],
+)

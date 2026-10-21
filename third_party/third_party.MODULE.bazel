@@ -4,10 +4,10 @@ Included files behave as if pasted in place, so the order here is also the
 priority order of the toolchains they register.
 """
 
-include("//third_party/google_apis:google_apis.MODULE.bazel")
 include("//third_party/apple_support:apple_support.MODULE.bazel")
 include("//third_party/llvm:llvm.MODULE.bazel")
 include("//third_party/rust:rust.MODULE.bazel")
 include("//third_party/protobuf:protobuf.MODULE.bazel")
 include("//third_party/prost:prost.MODULE.bazel")
 include("//third_party/crates:crates.MODULE.bazel")
+include("//third_party/googleapis:googleapis.MODULE.bazel")

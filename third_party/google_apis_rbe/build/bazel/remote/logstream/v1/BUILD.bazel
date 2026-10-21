@@ -1,6 +1,0 @@
-
-proto_library(
-    name = "remote_logstream_proto",
-    srcs = ["remote_logstream.proto"],
-    visibility = ["//visibility:public"],
-)
