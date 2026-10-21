@@ -1,16 +1,20 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
+package(default_visibility = ["//visibility:private"])
+
 rust_library(
     name = "cas",
     srcs = [
+        "cas.rs",
         "digest.rs",
-        "fs.rs",
+        "file_store.rs",
         "lib.rs",
-        "mem.rs",
+        "mem_store.rs",
         "proto.rs",
         "store.rs",
         "tee.rs",
     ],
+    proc_macro_deps = ["@crates//:async-trait"],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         "//buildbox/common",
@@ -21,6 +25,7 @@ rust_library(
         "@crates//:prost",
         "@crates//:ring",
         "@crates//:thiserror",
+        "@crates//:tokio",
         "@crates//:tracing",
     ],
 )
@@ -28,4 +33,53 @@ rust_library(
 rust_test(
     name = "cas_test",
     crate = ":cas",
+)
+
+rust_library(
+    name = "fs",
+    srcs = ["fs.rs"],
+    crate_name = "cas_fs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        ":cas",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "fs_test",
+    crate = ":fs",
+    deps = [":conformance"],
+)
+
+rust_library(
+    name = "mem",
+    srcs = ["mem.rs"],
+    crate_name = "cas_mem",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        ":cas",
+        "@crates//:bytes",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "mem_test",
+    crate = ":mem",
+    deps = [":conformance"],
+)
+
+rust_library(
+    name = "conformance",
+    testonly = True,
+    srcs = ["conformance.rs"],
+    crate_name = "cas_conformance",
+    deps = [
+        ":cas",
+        "@crates//:tempfile",
+    ],
 )

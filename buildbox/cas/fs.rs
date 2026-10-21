@@ -1,147 +1,361 @@
-use super::{ReadHandle, Store, WriteHandle};
-use crate::tee::TeeWriter;
-use bytes::BytesMut;
-use common::hash::Hasher;
-use common::rand;
-use common::{Error, Result};
-use prost::Message;
-use proto::bazel::exec::Digest;
-use std::fs::{File, OpenOptions};
-use std::io::{copy, BufReader, BufWriter, ErrorKind, Read, Write};
-use std::path::PathBuf;
+//! A [`Cas`] that stores each blob as a file on the local filesystem.
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct FileStore {
-    dir: PathBuf,
+use async_trait::async_trait;
+use cas::{BlobReader, BlobWriter, Cas, CasError, Digest, Hasher, Usage};
+use std::fs::{File, Permissions, TryLockError};
+use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tempfile::TempPath;
+use tokio::io::AsyncWriteExt;
+
+/// Committed blobs are read-only, so a materialized hard link to one can't be
+/// used to modify it.
+const BLOB_MODE: u32 = 0o444;
+const FILE_MODE: u32 = 0o644;
+const EXECUTABLE_MODE: u32 = 0o755;
+
+const COPY_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Stores blobs as files named after their hash.
+///
+/// The directory layout is:
+///
+/// - `lock`: held while the store is open, so only one process uses it.
+/// - `blobs/<hash>`: committed blobs.
+/// - `tmp/`: blobs being written. Anything here when the store is opened was
+///   abandoned, and is deleted.
+#[derive(Debug, Clone)]
+pub struct FsCas {
+    dirs: Arc<Dirs>,
 }
 
-impl FileStore {
-    /// Create a new [`FileStore`] instance that uses the local disk.
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+#[derive(Debug)]
+struct Dirs {
+    blobs: PathBuf,
+    tmp: PathBuf,
+    // Never read: holding the file holds the lock.
+    _lock: File,
+}
+
+impl FsCas {
+    /// Open the store in `dir`, creating it if needed.
+    ///
+    /// Fails if another process already has the store open.
+    pub async fn open(dir: &Path) -> Result<FsCas, CasError> {
+        let dir = dir.to_path_buf();
+        run_blocking(move || open_blocking(&dir)).await
     }
 
-    fn local_path(&self, name: &str) -> PathBuf {
-        let mut path = self.dir.clone();
-        path.push(name);
-        path
+    fn blob_path(&self, digest: &Digest) -> PathBuf {
+        self.dirs.blobs.join(digest.hash())
     }
 }
 
-impl Store for FileStore {
-    type ReadHandle = FileReadHandle;
+fn open_blocking(dir: &Path) -> Result<FsCas, CasError> {
+    create_dir_all(dir)?;
+    let lock = lock_dir(dir)?;
 
-    fn read(&self, name: &str) -> Result<Self::ReadHandle> {
-        let path = self.local_path(name);
+    let blobs = dir.join("blobs");
+    create_dir_all(&blobs)?;
 
-        let file = OpenOptions::new().read(true).open(path).map_err(|err| {
-            if err.kind() == ErrorKind::NotFound {
-                Error::not_found("file not found")
-            } else {
-                Error::io(err)
+    let tmp = dir.join("tmp");
+    remove_dir_all_if_exists(&tmp)?;
+    create_dir_all(&tmp)?;
+
+    let dirs = Dirs {
+        blobs,
+        tmp,
+        _lock: lock,
+    };
+    let cas = FsCas {
+        dirs: Arc::new(dirs),
+    };
+
+    store_empty_blob(&cas)?;
+    Ok(cas)
+}
+
+fn lock_dir(dir: &Path) -> Result<File, CasError> {
+    let path = dir.join("lock");
+    let file = File::create(&path).map_err(|error| io_error("failed to create", &path, error))?;
+
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => {
+            let error = std::io::Error::new(ErrorKind::WouldBlock, "in use by another process");
+            Err(io_error("failed to lock", &path, error))
+        }
+        Err(TryLockError::Error(error)) => Err(io_error("failed to lock", &path, error)),
+    }
+}
+
+/// Clients may reference the empty blob without uploading it.
+fn store_empty_blob(cas: &FsCas) -> Result<(), CasError> {
+    let path = cas.blob_path(&Digest::empty());
+    if path.exists() {
+        return Ok(());
+    }
+
+    let temp_path = new_temp_file(&cas.dirs.tmp)?.1;
+    persist_blob(temp_path, &path)
+}
+
+#[async_trait]
+impl Cas for FsCas {
+    async fn find_missing(&self, digests: &[Digest]) -> Result<Vec<Digest>, CasError> {
+        let cas = self.clone();
+        let digests = digests.to_vec();
+        run_blocking(move || {
+            let mut missing = vec![];
+            for digest in digests {
+                if !cas.blob_path(&digest).exists() {
+                    missing.push(digest);
+                }
             }
-        })?;
-
-        Ok(FileReadHandle { file })
+            Ok(missing)
+        })
+        .await
     }
 
-    type WriteHandle = FileWriteHandle;
-
-    fn write(&self) -> Result<Self::WriteHandle> {
-        let temp_name = format!("tmp-{}", rand::string(20));
-        let path = self.local_path(&temp_name);
-        println!("path: {path:?}");
-
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&path)
-            .map_err(Error::io)?;
-
-        Ok(FileWriteHandle { path, file })
-    }
-
-    fn contains(&self, name: &str) -> Result<bool> {
-        let path = self.local_path(&name);
-        match OpenOptions::new().read(true).open(path) {
-            Ok(_) => Ok(true),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
-            Err(err) => Err(Error::io(err)),
+    async fn read(&self, digest: &Digest) -> Result<BlobReader, CasError> {
+        let path = self.blob_path(digest);
+        match tokio::fs::File::open(&path).await {
+            Ok(file) => Ok(Box::pin(file)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Err(CasError::NotFound(digest.clone())),
+            Err(error) => Err(io_error("failed to open", &path, error)),
         }
     }
-}
 
-pub struct FileReadHandle {
-    file: File,
-}
+    async fn write(&self, expected: &Digest) -> Result<Box<dyn BlobWriter>, CasError> {
+        let tmp_dir = self.dirs.tmp.clone();
+        let (file, temp_path) = run_blocking(move || new_temp_file(&tmp_dir)).await?;
 
-impl ReadHandle for FileReadHandle {
-    fn metadata(&self) {
-        todo!()
+        let writer = FsBlobWriter {
+            file: tokio::fs::File::from_std(file),
+            temp_path,
+            blob_path: self.blob_path(expected),
+            expected: expected.clone(),
+            hasher: Hasher::new(),
+        };
+        Ok(Box::new(writer))
+    }
+
+    async fn put_file(&self, path: &Path) -> Result<Digest, CasError> {
+        let cas = self.clone();
+        let path = path.to_path_buf();
+        run_blocking(move || put_file_blocking(&cas, &path)).await
+    }
+
+    async fn materialize(&self, digest: &Digest, dest: &Path, executable: bool) -> Result<(), CasError> {
+        let blob_path = self.blob_path(digest);
+        let digest = digest.clone();
+        let dest = dest.to_path_buf();
+        run_blocking(move || materialize_blocking(&blob_path, &digest, &dest, executable)).await
+    }
+
+    async fn usage(&self) -> Result<Usage, CasError> {
+        let blobs_dir = self.dirs.blobs.clone();
+        run_blocking(move || usage_blocking(&blobs_dir)).await
     }
 }
 
-impl Read for FileReadHandle {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read(buf)
+/// Copies a file into the store in one pass, hashing it along the way.
+fn put_file_blocking(cas: &FsCas, path: &Path) -> Result<Digest, CasError> {
+    let mut source = File::open(path).map_err(|error| io_error("failed to open", path, error))?;
+    let (mut temp_file, temp_path) = new_temp_file(&cas.dirs.tmp)?;
+
+    let mut hasher = Hasher::new();
+    let mut buf = vec![0; COPY_CHUNK_SIZE];
+    loop {
+        let read = source.read(&mut buf).map_err(|error| io_error("failed to read", path, error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+        temp_file
+            .write_all(&buf[..read])
+            .map_err(|error| io_error("failed to write", &temp_path, error))?;
+    }
+    temp_file
+        .sync_data()
+        .map_err(|error| io_error("failed to sync", &temp_path, error))?;
+
+    let digest = hasher.finish();
+    persist_blob(temp_path, &cas.blob_path(&digest))?;
+    Ok(digest)
+}
+
+fn materialize_blocking(blob_path: &Path, digest: &Digest, dest: &Path, executable: bool) -> Result<(), CasError> {
+    let mut source = match File::open(blob_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Err(CasError::NotFound(digest.clone())),
+        Err(error) => return Err(io_error("failed to open", blob_path, error)),
+    };
+
+    let mut file = File::create(dest).map_err(|error| io_error("failed to create", dest, error))?;
+    std::io::copy(&mut source, &mut file).map_err(|error| io_error("failed to write", dest, error))?;
+
+    let mode = if executable { EXECUTABLE_MODE } else { FILE_MODE };
+    file.set_permissions(Permissions::from_mode(mode))
+        .map_err(|error| io_error("failed to set permissions on", dest, error))
+}
+
+fn usage_blocking(blobs_dir: &Path) -> Result<Usage, CasError> {
+    let entries = std::fs::read_dir(blobs_dir).map_err(|error| io_error("failed to list", blobs_dir, error))?;
+
+    let mut usage = Usage::default();
+    for entry in entries {
+        let entry = entry.map_err(|error| io_error("failed to list", blobs_dir, error))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|error| io_error("failed to stat", &entry.path(), error))?;
+        usage.blobs += 1;
+        usage.bytes += metadata.len();
+    }
+    Ok(usage)
+}
+
+struct FsBlobWriter {
+    file: tokio::fs::File,
+    temp_path: TempPath,
+    blob_path: PathBuf,
+    expected: Digest,
+    hasher: Hasher,
+}
+
+#[async_trait]
+impl BlobWriter for FsBlobWriter {
+    async fn write(&mut self, data: &[u8]) -> Result<(), CasError> {
+        self.hasher.update(data);
+        self.file
+            .write_all(data)
+            .await
+            .map_err(|error| io_error("failed to write", &self.temp_path, error))
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), CasError> {
+        let FsBlobWriter {
+            mut file,
+            temp_path,
+            blob_path,
+            expected,
+            hasher,
+        } = *self;
+
+        let actual = hasher.finish();
+        if actual != expected {
+            // Dropping temp_path deletes the data.
+            return Err(CasError::DigestMismatch { expected, actual });
+        }
+
+        file.flush()
+            .await
+            .map_err(|error| io_error("failed to write", &temp_path, error))?;
+        file.sync_data()
+            .await
+            .map_err(|error| io_error("failed to sync", &temp_path, error))?;
+        drop(file);
+
+        run_blocking(move || persist_blob(temp_path, &blob_path)).await
     }
 }
 
-pub struct FileWriteHandle {
-    path: PathBuf,
-    file: File,
+/// Create a file in `tmp_dir` that is deleted when the returned path is
+/// dropped, unless it is persisted first.
+fn new_temp_file(tmp_dir: &Path) -> Result<(File, TempPath), CasError> {
+    let temp_file = tempfile::NamedTempFile::new_in(tmp_dir)
+        .map_err(|error| io_error("failed to create temporary file in", tmp_dir, error))?;
+    Ok(temp_file.into_parts())
 }
 
-impl WriteHandle for FileWriteHandle {
-    fn seal(self, name: &str) -> Result<()> {
-        let mut new_path = self
-            .path
-            .parent()
-            .ok_or_else(|| Error::invalid("file has no parent directory"))?
-            .to_owned();
+/// Make a fully-written temporary file visible as a blob.
+fn persist_blob(temp_path: TempPath, blob_path: &Path) -> Result<(), CasError> {
+    std::fs::set_permissions(&temp_path, Permissions::from_mode(BLOB_MODE))
+        .map_err(|error| io_error("failed to set permissions on", &temp_path, error))?;
 
-        new_path.push(name);
-        std::fs::rename(self.path, new_path).map_err(Error::io)
+    // If the blob already exists this replaces it with identical contents,
+    // which is harmless.
+    temp_path
+        .persist(blob_path)
+        .map_err(|error| io_error("failed to rename into", blob_path, error.error))
+}
+
+fn create_dir_all(path: &Path) -> Result<(), CasError> {
+    std::fs::create_dir_all(path).map_err(|error| io_error("failed to create", path, error))
+}
+
+fn remove_dir_all_if_exists(path: &Path) -> Result<(), CasError> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error("failed to remove", path, error)),
     }
 }
 
-impl Write for FileWriteHandle {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write(buf)
-    }
+fn io_error(action: &str, path: &Path, error: std::io::Error) -> CasError {
+    CasError::io(format!("{action} {}", path.display()), error)
+}
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
+/// Run blocking filesystem work off the async runtime.
+async fn run_blocking<T, F>(f: F) -> Result<T, CasError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, CasError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => Err(CasError::io("blocking task was cancelled", std::io::Error::other(error))),
     }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
-    #[test]
-    fn test_read_and_write() {
-        let dir = create_temp_dir();
-        let store = FileStore::new(dir.clone());
-
-        {
-            let mut file = store.write().unwrap();
-            file.write(&[1, 2, 3]).unwrap();
-            file.seal("foo").unwrap();
-        }
-
-        let mut file = store.read("foo").unwrap();
-        let mut read = vec![];
-        file.read_to_end(&mut read);
-        assert_eq!(read, vec![1, 2, 3]);
-
-        std::fs::remove_dir_all(&dir).unwrap();
+    #[tokio::test]
+    async fn conformance() {
+        cas_conformance::run_all(|dir| async move {
+            let cas = FsCas::open(&dir).await.unwrap();
+            Box::new(cas) as Box<dyn Cas>
+        })
+        .await;
     }
 
-    fn create_temp_dir() -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("rust-test-{}", rand::string(20)));
-        std::fs::create_dir(&path).unwrap();
-        path
+    #[tokio::test]
+    async fn open_deletes_abandoned_temporary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let abandoned = dir.path().join("tmp/abandoned");
+        std::fs::create_dir_all(abandoned.parent().unwrap()).unwrap();
+        std::fs::write(&abandoned, b"partial").unwrap();
+
+        let _cas = FsCas::open(dir.path()).await.unwrap();
+
+        assert!(!abandoned.exists());
+    }
+
+    #[tokio::test]
+    async fn open_fails_while_another_store_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let _first = FsCas::open(dir.path()).await.unwrap();
+
+        let err = FsCas::open(dir.path()).await.unwrap_err();
+
+        assert!(err.to_string().contains("in use by another process"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn uncommitted_writes_leave_no_temporary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = FsCas::open(dir.path()).await.unwrap();
+
+        let mut writer = cas.write(&Digest::of_bytes(b"hello")).await.unwrap();
+        writer.write(b"hello").await.unwrap();
+        drop(writer);
+
+        let leftovers = std::fs::read_dir(dir.path().join("tmp")).unwrap().count();
+        assert_eq!(leftovers, 0);
     }
 }
