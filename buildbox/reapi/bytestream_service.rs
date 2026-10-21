@@ -1,194 +1,237 @@
-//! The [`crate::rpc::bytestream`] RPC service acts like a generic,
-//! content-addressable blob storage server.
-//!
-//! While not technically a "named" part of the Bazel remote APIs, the other RPC
-//! services assume that a `bytestream` service is available. The bytestream
-//! service is used by the remote execution and caching services to store
-//! inputs, action digests, output artifacts, etc.
+//! The ByteStream service, which REAPI clients use to upload and download
+//! blobs too large for the batch CAS calls.
 
-use super::ResponseStream;
-use common::Error;
+use crate::status;
+use cas::{BlobReader, BlobWriter, Cas, CasError, Digest};
 use proto::google::bytestream::{
-    ByteStream, QueryWriteStatusRequest, QueryWriteStatusResponse, ReadRequest, ReadResponse,
-    WriteRequest, WriteResponse,
+    ByteStream, QueryWriteStatusRequest, QueryWriteStatusResponse, ReadRequest, ReadResponse, WriteRequest,
+    WriteResponse,
 };
-use std::{
-    io::{Cursor, Read, Write},
-    str::FromStr,
-};
-use cas::{Store, WriteHandle};
+use std::str::FromStr;
+use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
-/// Effectively the read/write input to the CAS for large byte payloads.
-#[derive(Debug)]
-pub struct ByteStreamService<S> {
-    store: S,
+/// The size of each chunk sent when reading a blob.
+const READ_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Reads and writes CAS blobs as byte streams.
+pub struct ByteStreamService {
+    cas: Arc<dyn Cas>,
 }
 
-impl<S> ByteStreamService<S>
-where
-    S: Store + 'static,
-{
-    /// Create a new [`ByteStreamService`] instance.
-    #[must_use]
-    pub fn new(store: S) -> Self {
-        Self { store }
+impl ByteStreamService {
+    pub fn new(cas: Arc<dyn Cas>) -> ByteStreamService {
+        ByteStreamService { cas }
     }
 }
 
-#[async_trait::async_trait]
-impl<S> ByteStream for ByteStreamService<S>
-where
-    S: Store + 'static,
-{
+#[tonic::async_trait]
+impl ByteStream for ByteStreamService {
     type ReadStream = ReceiverStream<Result<ReadResponse, Status>>;
 
-    async fn read(&self, req: Request<ReadRequest>) -> Result<Response<Self::ReadStream>, Status> {
-        let req = req.into_inner();
-        tracing::info!("ByteStream::read {req:?}");
+    async fn read(&self, request: Request<ReadRequest>) -> Result<Response<Self::ReadStream>, Status> {
+        let request = request.into_inner();
+        let digest = parse_read_resource(&request.resource_name)?;
+        if request.read_offset != 0 || request.read_limit != 0 {
+            return Err(Status::unimplemented("partial reads are not supported"));
+        }
 
-        let parts = req.resource_name.split("/").collect::<Vec<&str>>();
-        let hash = &parts[1];
-
-        let mut reader = self
-            .store
-            .read(hash)
-            .map_err(|err| Status::internal(err.to_string()))?;
-
-        let (tx, rx) = mpsc::channel(1024);
-
-        tokio::spawn(async move {
-            loop {
-                let mut data = vec![0; 1024];
-                let read = reader
-                    .read(&mut data)
-                    .map_err(|err| Status::internal("failed to read"))
-                    .unwrap();
-
-                if read == 0 {
-                    break;
-                }
-
-                let res = ReadResponse {
-                    data: data[0..read].to_vec(),
-                };
-
-                tx.send(Ok(res))
-                    .await
-                    .map_err(|err| Status::internal("failed to send execute response"))
-                    .unwrap();
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
+        let reader = self.cas.read(&digest).await.map_err(status::from_cas_error)?;
+        let (sender, receiver) = mpsc::channel(4);
+        tokio::spawn(send_chunks(reader, digest, sender));
+        Ok(Response::new(ReceiverStream::new(receiver)))
     }
 
-    async fn write(
-        &self,
-        req: Request<Streaming<WriteRequest>>,
-    ) -> Result<Response<WriteResponse>, Status> {
-        let mut stream = req.into_inner();
+    async fn write(&self, request: Request<Streaming<WriteRequest>>) -> Result<Response<WriteResponse>, Status> {
+        let mut stream = request.into_inner();
+        let Some(first) = stream.next().await else {
+            return Err(Status::invalid_argument("write stream is empty"));
+        };
+        let first = first?;
 
-        let mut name = None;
-        let mut data: Vec<u8> = vec![];
-        let mut received = 0;
+        let digest = parse_write_resource(&first.resource_name)?;
+        let mut upload = Upload::start(&*self.cas, &digest).await?;
+        let mut finished = upload.append(first).await?;
 
-        while let Some(Ok(req)) = stream.next().await {
-            if &req.resource_name != "" {
-                let resource_name = ResourceName::parse(&req.resource_name)
-                    .map_err(|err| Status::invalid_argument(err.to_string()))?;
-                tracing::info!("ByteStream::write hash={:?}", resource_name.hash);
-                name = Some(resource_name.clone());
-
-                if resource_name.uuid
-                    == "hash=d0b06d284064528c34e0177821b739e116582907f4de5e0886cde3476483367a"
-                {
-                    tracing::warn!("GOT {req:?}");
-                }
-            }
-
-            data.extend(req.data.iter());
-
-            if req.finish_write {
-                break;
-            }
+        while !finished {
+            let Some(request) = stream.next().await else {
+                return Err(Status::invalid_argument("write stream ended before finish_write"));
+            };
+            finished = upload.append(request?).await?;
         }
 
-        let name = name.ok_or_else(|| Status::invalid_argument("did not receive resource name"))?;
-
-        if data.len() != name.size as usize {
-            let err = format!("Expected {} bytes but received {}", name.size, data.len());
-            tracing::error!("{err}");
-            return Err(Status::invalid_argument(&err));
-        }
-
-        tracing::info!("Writing {}", name.hash);
-
-        let mut reader = std::io::Cursor::new(&data);
-
-        let mut writer = self.store.write().map_err(|err| {
-            tracing::error!("Failed to open file for writing: {err}");
-            Status::internal(err.to_string())
-        })?;
-
-        std::io::copy(&mut reader, &mut writer).map_err(|err| {
-            tracing::error!("Failed to write file: {err}");
-            Status::internal(err.to_string())
-        })?;
-
-        writer.seal(&name.hash).map_err(|err| {
-            tracing::error!("Failed to seal file after writing: {err}");
-            Status::internal(err.to_string())
-        })?;
-
-        Ok(Response::new(WriteResponse {
-            committed_size: data.len() as i64,
-        }))
+        let committed_size = upload.finish().await?;
+        Ok(Response::new(WriteResponse { committed_size }))
     }
 
     async fn query_write_status(
         &self,
-        req: Request<QueryWriteStatusRequest>,
+        _request: Request<QueryWriteStatusRequest>,
     ) -> Result<Response<QueryWriteStatusResponse>, Status> {
-        let req = req.into_inner();
-        tracing::info!("ByteStream::query_write_status {req:?}");
-        Err(Status::internal("not implemented"))
+        Err(Status::unimplemented("resumable writes are not supported"))
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct ResourceName {
-    pub uuid: String,
-    pub hash: String,
-    pub size: u64,
+/// Stream a blob to a client in chunks.
+async fn send_chunks(mut reader: BlobReader, digest: Digest, sender: mpsc::Sender<Result<ReadResponse, Status>>) {
+    let mut buf = vec![0; READ_CHUNK_SIZE];
+    loop {
+        let message = match reader.read(&mut buf).await {
+            Ok(0) => return,
+            Ok(read) => Ok(ReadResponse {
+                data: buf[..read].to_vec(),
+            }),
+            Err(error) => Err(Status::internal(format!("failed to read blob {digest}: {error}"))),
+        };
+
+        let failed = message.is_err();
+        // A send error means the client went away, so there's nobody to tell.
+        if sender.send(message).await.is_err() || failed {
+            return;
+        }
+    }
 }
 
-impl ResourceName {
-    // `resource_name` is `{instance_name}/uploads/{uuid}/blobs/{hash}/{size}`,
-    // where `{instance_name}` is optional, and there can be trailing URL
-    // components after {size}.
-    pub fn parse(resource_name: &str) -> Result<Self, Error> {
-        let parts = resource_name.split("/").collect::<Vec<_>>();
+/// A write in progress. The data is written to the CAS as it arrives.
+struct Upload {
+    digest: Digest,
+    writer: Box<dyn BlobWriter>,
+    received: u64,
+}
 
-        if parts.len() < 5 {
-            return Err(Error::invalid(&format!(
-                "must have more parts: {resource_name}"
-            )));
-        }
-
-        if parts[0] != "uploads" {
-            return Err(Error::invalid("resource name does not begin with uploads"));
-        }
-
-        let size =
-            u64::from_str(parts[4]).map_err(|_| Error::invalid("invalid size in resource name"))?;
-
-        Ok(ResourceName {
-            uuid: parts[1].to_string(),
-            hash: parts[3].to_string(),
-            size,
+impl Upload {
+    async fn start(cas: &dyn Cas, digest: &Digest) -> Result<Upload, Status> {
+        let writer = cas.write(digest).await.map_err(status::from_cas_error)?;
+        Ok(Upload {
+            digest: digest.clone(),
+            writer,
+            received: 0,
         })
+    }
+
+    /// Check one request of the stream and write its data. Returns whether it
+    /// was the last.
+    async fn append(&mut self, request: WriteRequest) -> Result<bool, Status> {
+        if request.write_offset != self.received as i64 {
+            let message = format!("write_offset is {}, expected {}", request.write_offset, self.received);
+            return Err(Status::invalid_argument(message));
+        }
+
+        self.received += request.data.len() as u64;
+        if self.received > self.digest.size_bytes() {
+            let message = format!("received more than the {} bytes of blob {}", self.digest.size_bytes(), self.digest);
+            return Err(Status::invalid_argument(message));
+        }
+
+        self.writer.write(&request.data).await.map_err(status::from_cas_error)?;
+        Ok(request.finish_write)
+    }
+
+    /// Verify and commit the blob, returning its size.
+    async fn finish(self) -> Result<i64, Status> {
+        match self.writer.commit().await {
+            Ok(()) => Ok(self.received as i64),
+            Err(error @ CasError::DigestMismatch { .. }) => Err(Status::invalid_argument(error.to_string())),
+            Err(error) => Err(status::from_cas_error(error)),
+        }
+    }
+}
+
+/// Parse a read resource name, `{instance_name}/blobs/{hash}/{size}`, where
+/// the instance name may be empty or contain slashes.
+fn parse_read_resource(resource_name: &str) -> Result<Digest, Status> {
+    let parts: Vec<&str> = resource_name.split('/').collect();
+    let Some(blobs) = parts.iter().position(|part| *part == "blobs") else {
+        return Err(invalid_resource(resource_name));
+    };
+    parse_digest_parts(&parts[blobs + 1..], resource_name)
+}
+
+/// Parse a write resource name,
+/// `{instance_name}/uploads/{uuid}/blobs/{hash}/{size}{/optional_metadata}`,
+/// where the instance name may be empty or contain slashes.
+fn parse_write_resource(resource_name: &str) -> Result<Digest, Status> {
+    let parts: Vec<&str> = resource_name.split('/').collect();
+    let Some(uploads) = parts.iter().position(|part| *part == "uploads") else {
+        return Err(invalid_resource(resource_name));
+    };
+    if parts.get(uploads + 2) != Some(&"blobs") {
+        return Err(invalid_resource(resource_name));
+    }
+    parse_digest_parts(&parts[uploads + 3..], resource_name)
+}
+
+/// Parse the `{hash}/{size}` at the start of `parts`.
+fn parse_digest_parts(parts: &[&str], resource_name: &str) -> Result<Digest, Status> {
+    let [hash, size, ..] = parts else {
+        return Err(invalid_resource(resource_name));
+    };
+    let Ok(size) = u64::from_str(size) else {
+        return Err(invalid_resource(resource_name));
+    };
+    Digest::new(hash, size).map_err(|error| Status::invalid_argument(format!("{resource_name:?}: {error}")))
+}
+
+fn invalid_resource(resource_name: &str) -> Status {
+    Status::invalid_argument(format!("invalid resource name {resource_name:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HASH: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    #[test]
+    fn parses_read_resources_with_and_without_instance_names() {
+        let expected = Digest::new(HASH, 5).unwrap();
+        for name in [
+            format!("blobs/{HASH}/5"),
+            format!("my/instance/blobs/{HASH}/5"),
+        ] {
+            assert_eq!(parse_read_resource(&name).unwrap(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn parses_write_resources_with_and_without_instance_names() {
+        let expected = Digest::new(HASH, 5).unwrap();
+        for name in [
+            format!("uploads/some-uuid/blobs/{HASH}/5"),
+            format!("instance/uploads/some-uuid/blobs/{HASH}/5"),
+            format!("uploads/some-uuid/blobs/{HASH}/5/extra/metadata"),
+        ] {
+            assert_eq!(parse_write_resource(&name).unwrap(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_read_resources() {
+        for name in [
+            String::new(),
+            format!("blobs/{HASH}"),
+            format!("blobs/{HASH}/not-a-size"),
+            "blobs/../../etc/passwd/5".to_string(),
+            format!("compressed-blobs/zstd/{HASH}/5"),
+        ] {
+            assert!(parse_read_resource(&name).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_write_resources() {
+        for name in [
+            String::new(),
+            format!("blobs/{HASH}/5"),
+            format!("uploads/some-uuid/blobs/{HASH}"),
+            format!("uploads/some-uuid/blobs/../5"),
+            format!("uploads/some-uuid/compressed-blobs/zstd/{HASH}/5"),
+        ] {
+            assert!(parse_write_resource(&name).is_err(), "{name}");
+        }
     }
 }

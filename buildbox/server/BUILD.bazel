@@ -11,8 +11,10 @@ rust_library(
     deps = [
         "//buildbox/admin",
         "//buildbox/cas",
+        "//buildbox/cas:fs",
         "//buildbox/common",
         "//buildbox/executor",
+        "//buildbox/executor:local",
         "//buildbox/proto",
         "//buildbox/reapi",
         "@crates//:serde",

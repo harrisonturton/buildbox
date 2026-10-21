@@ -16,14 +16,9 @@ rust_prost_library(
 rust_library(
     name = "admin",
     srcs = ["admin_service.rs"],
-    proc_macro_deps = ["@crates//:async-trait"],
     visibility = ["//buildbox/server:__pkg__"],
     deps = [
-        "//buildbox/cas",
-        "//buildbox/common",
-        "//buildbox/executor",
         "//buildbox/proto",
         "@crates//:tonic",
-        "@crates//:tracing",
     ],
 )

@@ -1,6 +1,8 @@
 //! Content-addressable storage: blobs stored and looked up by their digest.
 
-use crate::Digest;
+mod digest;
+pub use digest::{Digest, DigestError, Hasher};
+
 use async_trait::async_trait;
 use std::path::Path;
 use std::pin::Pin;

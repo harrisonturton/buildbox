@@ -1,115 +1,62 @@
-use super::ResponseStream;
+//! The ContentAddressableStorage service: finding, uploading and downloading
+//! blobs in bulk.
+
+use crate::status;
+use crate::ResponseStream;
+use cas::{Cas, Digest};
 use proto::bazel::exec::{
-    BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest,
-    BatchUpdateBlobsResponse, ContentAddressableStorage, FindMissingBlobsRequest,
-    FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
+    BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest, BatchUpdateBlobsResponse,
+    ContentAddressableStorage, FindMissingBlobsRequest, FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
 };
-use cas::Store;
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
-/// The CAS (content-addressable storage) is used to store the inputs to and
-/// outputs from the execution service. Each piece of content is addressed by
-/// the digest of its binary data.
-///
-/// Most of the binary data stored in the CAS is opaque to the execution engine,
-/// and is only used as a communication medium. In order to build an `Action`,
-/// however, the client will need to also upload  the `Command` and input root
-/// `Directory` for the `Action`.
-///
-/// The `Command` and `Directory` messages must be marshalled to wire format and
-/// then uploaded under the hash as with any other piece of content. In
-/// practice, the input root directory is likely to refer to other directories
-/// in it's hierarchy, which must also each by uploaded on their own.
-///
-/// For small uploads the client should group them together and call
-/// `batchUpdateBlobs`.
-///
-/// For larger uploads, the client must use the `Write` method of the
-/// `ByteStream` API.
-#[derive(Debug)]
-pub struct ContentAddressableStorageService<S> {
-    storage: S,
+pub struct ContentAddressableStorageService {
+    cas: Arc<dyn Cas>,
 }
 
-impl<S> ContentAddressableStorageService<S>
-where
-    S: Store + 'static,
-{
-    /// Create new instance of [`ContentAddressableStorageService`].
-    #[must_use]
-    pub fn new(storage: S) -> Self {
-        Self { storage }
+impl ContentAddressableStorageService {
+    pub fn new(cas: Arc<dyn Cas>) -> ContentAddressableStorageService {
+        ContentAddressableStorageService { cas }
     }
 }
 
-#[async_trait::async_trait]
-impl<S> ContentAddressableStorage for ContentAddressableStorageService<S>
-where
-    S: Store + 'static,
-{
-    /// Determine whether a blob is in the CAS.
-    ///
-    /// Clients can use this API before uploading blobs to determine which ones
-    /// are already present in the CAS and do not need to be uploaded again.
+#[tonic::async_trait]
+impl ContentAddressableStorage for ContentAddressableStorageService {
     async fn find_missing_blobs(
         &self,
-        req: Request<FindMissingBlobsRequest>,
+        request: Request<FindMissingBlobsRequest>,
     ) -> Result<Response<FindMissingBlobsResponse>, Status> {
-        let req = req.into_inner();
-        let mut missing = vec![];
+        let request = request.into_inner();
 
-        for digest in &req.blob_digests {
-            let hash = &digest.hash;
-
-            let exists = match self.storage.contains(&hash) {
-                Ok(exists) => exists,
-                Err(err) => return Err(Status::internal(err.to_string())),
-            };
-
-            // Empty file digest
-            if hash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
-                continue;
-            }
-
-            if !exists {
-                tracing::info!("ContentAddressableStorage::find_missing_blobs missing hash={hash}");
-                missing.push(digest.clone());
-            } else {
-                tracing::info!("ContentAddressableStorage::find_missing_blobs found hash={hash}");
-            }
+        let mut digests = Vec::with_capacity(request.blob_digests.len());
+        for proto in &request.blob_digests {
+            let digest = Digest::from_proto(proto).map_err(|error| status::invalid_digest("blob_digests", error))?;
+            digests.push(digest);
         }
 
-        Ok(Response::new(FindMissingBlobsResponse {
-            missing_blob_digests: missing,
-        }))
+        let missing = self.cas.find_missing(&digests).await.map_err(status::from_cas_error)?;
+        let missing_blob_digests = missing.iter().map(Digest::to_proto).collect();
+        Ok(Response::new(FindMissingBlobsResponse { missing_blob_digests }))
     }
 
     async fn batch_update_blobs(
         &self,
-        req: Request<BatchUpdateBlobsRequest>,
+        _request: Request<BatchUpdateBlobsRequest>,
     ) -> Result<Response<BatchUpdateBlobsResponse>, Status> {
-        let req = req.into_inner();
-        tracing::info!("ContentAddressableStorage::batch_update_blobs {req:?}");
-        Ok(Response::new(BatchUpdateBlobsResponse::default()))
+        Err(Status::unimplemented("BatchUpdateBlobs is not supported yet"))
     }
 
     async fn batch_read_blobs(
         &self,
-        req: Request<BatchReadBlobsRequest>,
+        _request: Request<BatchReadBlobsRequest>,
     ) -> Result<Response<BatchReadBlobsResponse>, Status> {
-        let req = req.into_inner();
-        tracing::info!("ContentAddressableStorage::batch_read_blobs {req:?}");
-        Ok(Response::new(BatchReadBlobsResponse::default()))
+        Err(Status::unimplemented("BatchReadBlobs is not supported yet"))
     }
 
     type GetTreeStream = ResponseStream<Result<GetTreeResponse, Status>>;
 
-    async fn get_tree(
-        &self,
-        req: Request<GetTreeRequest>,
-    ) -> Result<Response<Self::GetTreeStream>, Status> {
-        let req = req.into_inner();
-        tracing::info!("ContentAddressableStorage::get_tree {req:?}");
-        todo!()
+    async fn get_tree(&self, _request: Request<GetTreeRequest>) -> Result<Response<Self::GetTreeStream>, Status> {
+        Err(Status::unimplemented("GetTree is not supported yet"))
     }
 }

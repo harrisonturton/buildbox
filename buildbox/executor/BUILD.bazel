@@ -1,17 +1,47 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
 
 rust_library(
     name = "executor",
-    srcs = [
-        "executor.rs",
-        "lib.rs",
-        "local.rs",
-    ],
+    srcs = ["executor.rs"],
+    proc_macro_deps = ["@crates//:async-trait"],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         "//buildbox/cas",
-        "//buildbox/common",
-        "//buildbox/proto",
+        "//third_party/remoteapis:remote_execution_rust_proto",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_library(
+    name = "local",
+    srcs = [
+        "inputs.rs",
+        "local.rs",
+        "outputs.rs",
+        "paths.rs",
+        "process.rs",
+        "sandbox.rs",
+    ],
+    crate_name = "executor_local",
+    crate_root = "local.rs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox/server:__pkg__"],
+    deps = [
+        ":executor",
+        "//buildbox/cas",
+        "//buildbox/fsutil",
+        "//third_party/remoteapis:remote_execution_rust_proto",
+        "@crates//:prost",
+        "@crates//:tempfile",
+        "@crates//:tokio",
         "@crates//:tracing",
     ],
+)
+
+rust_test(
+    name = "local_test",
+    crate = ":local",
+    deps = ["//buildbox/cas:mem"],
 )

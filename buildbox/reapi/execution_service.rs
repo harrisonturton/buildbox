@@ -1,244 +1,107 @@
-use super::ResponseStream;
-use bytes::BytesMut;
-use common::Error;
-use executor::{
-    DentryTemplate, DirTemplate, ExecCommand, Executor, SandboxHandle, FileTemplate, SandboxTemplate,
-    SymlinkTemplate,
-};
-use prost::Message;
-use proto::bazel::exec::{
-    Action, ActionResult, Command, Digest, Directory, DirectoryNode, ExecuteRequest,
-    ExecuteResponse, Execution, FileNode, OutputFile, SymlinkNode, WaitExecutionRequest,
-};
-use proto::google::{
-    longrunning::{operation, Operation},
-    protobuf::Any,
-    rpc,
-};
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::io::Read;
-use std::path::PathBuf;
-use std::str::FromStr;
+//! The Execution service, which runs actions.
+
+use crate::status;
+use crate::ResponseStream;
+use cas::{Cas, Digest};
+use executor::Executor;
+use proto::bazel::exec::{Action, Command, ExecuteRequest, ExecuteResponse, Execution, WaitExecutionRequest};
+use proto::google::longrunning::{operation, Operation};
+use proto::google::protobuf::Any;
+use proto::google::rpc;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use cas::{Store, ProtoStoreExt};
 
-#[derive(Debug)]
-pub struct ExecutionService<S, E> {
-    store: S,
-    executor: E,
+pub struct ExecutionService {
+    cas: Arc<dyn Cas>,
+    executor: Arc<dyn Executor>,
 }
 
-impl<S, E> ExecutionService<S, E>
-where
-    S: Store + 'static,
-    E: Executor + 'static,
-{
-    /// Create new [`ExecutionService`] instance.
-    #[must_use]
-    pub fn new(store: S, executor: E) -> Self {
-        Self { store, executor }
+impl ExecutionService {
+    pub fn new(cas: Arc<dyn Cas>, executor: Arc<dyn Executor>) -> ExecutionService {
+        ExecutionService { cas, executor }
     }
 
-    async fn execute(&self, req: &ExecuteRequest) -> Result<ExecuteResponse, Error> {
-        let action = req
-            .action_digest
-            .as_ref()
-            .ok_or_else(|| Error::invalid("missing action digest"))
-            .and_then(|digest| self.store.read_message::<Action>(&digest))?;
+    async fn run(&self, request: &ExecuteRequest) -> Result<ExecuteResponse, Status> {
+        let action_digest = Digest::from_required_proto(request.action_digest.as_ref())
+            .map_err(|error| status::invalid_digest("action_digest", error))?;
+        let action: Action = crate::read_message(&*self.cas, &action_digest).await?;
 
-        let input_root = action
-            .input_root_digest
-            .as_ref()
-            .ok_or_else(|| Error::invalid("missing input root"))
-            .and_then(|digest| self.store.read_message::<Directory>(&digest))?;
+        let command_digest = Digest::from_required_proto(action.command_digest.as_ref())
+            .map_err(|error| status::invalid_digest("command_digest", error))?;
+        let command: Command = crate::read_message(&*self.cas, &command_digest).await?;
 
-        let command = action
-            .command_digest
-            .as_ref()
-            .ok_or_else(|| Error::invalid("missing command digest"))
-            .and_then(|digest| self.store.read_message::<Command>(&digest))?;
+        let input_root = Digest::from_required_proto(action.input_root_digest.as_ref())
+            .map_err(|error| status::invalid_digest("input_root_digest", error))?;
 
-        tracing::info!("command: {command:?}");
-
-        let template = self.build_sandbox_template(&input_root)?;
-        let mut sandbox = self.executor.spawn(&template)?;
-        sandbox.prepare()?;
-
-        let mut env = HashMap::new();
-        for var in &command.environment_variables {
-            env.insert(var.name.clone(), var.value.clone());
-        }
-
-        let cmd = ExecCommand {
-            env,
-            args: command.arguments,
-            outputs: command.output_files.clone(),
+        let timeout = match &action.timeout {
+            Some(timeout) => Some(parse_timeout(timeout.seconds, timeout.nanos)?),
+            None => None,
         };
 
-        let res = sandbox.exec(&cmd)?;
-        tracing::info!("Sandbox result: {res:?}");
-
-        let output_files = res
-            .outputs
-            .iter()
-            .map(|output| OutputFile {
-                path: output.path.to_string_lossy().to_string(),
-                digest: Some(output.digest.clone()),
-                is_executable: false,
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
-
-        let action_res = ActionResult {
-            output_files: output_files,
-            output_file_symlinks: vec![],
-            output_symlinks: vec![],
-            output_directories: vec![],
-            output_directory_symlinks: vec![],
-            exit_code: res.exit_code,
-            stdout_raw: vec![],
-            stdout_digest: Some(res.stdout),
-            stderr_raw: vec![],
-            stderr_digest: Some(res.stderr),
-            execution_metadata: None,
+        let executable = executor::Action {
+            digest: action_digest,
+            command,
+            input_root,
+            timeout,
         };
+        let result = self
+            .executor
+            .execute(&executable)
+            .await
+            .map_err(status::from_execute_error)?;
 
-        let status = rpc::Status {
-            code: 0,
-            message: "succcess".to_string(),
-            details: vec![],
-        };
-
-        let res = ExecuteResponse {
-            result: Some(action_res),
-            cached_result: false,
-            status: Some(status),
-            server_logs: HashMap::new(),
-            message: "exec response".to_string(),
-        };
-
-        Ok(res)
-    }
-
-    fn build_sandbox_template(&self, input_root: &Directory) -> Result<SandboxTemplate, Error> {
-        struct DirEntry {
-            path: PathBuf,
-            dir: Directory,
-        };
-
-        let mut next = VecDeque::new();
-        let mut actions = vec![];
-
-        next.push_back(DirEntry {
-            path: PathBuf::new(),
-            dir: input_root.clone(),
-        });
-
-        while let Some(entry) = next.pop_front() {
-            actions.push(DentryTemplate::Dir(DirTemplate {
-                path: entry.path.clone(),
-            }));
-
-            for file in &entry.dir.files {
-                let digest = file
-                    .digest
-                    .as_ref()
-                    .ok_or_else(|| Error::invalid("missing file"))?;
-
-                actions.push(DentryTemplate::File(FileTemplate {
-                    path: self.relative_path(&entry.path, &file.name),
-                    digest: digest.clone(),
-                    executable: file.is_executable,
-                }));
-            }
-
-            for symlink in &entry.dir.symlinks {
-                actions.push(DentryTemplate::Symlink(SymlinkTemplate {
-                    path: self.relative_path(&entry.path, &symlink.name),
-                    target: self.relative_path(&entry.path, &symlink.target),
-                }));
-            }
-
-            for dir_node in &entry.dir.directories {
-                let dir = dir_node
-                    .digest
-                    .as_ref()
-                    .ok_or_else(|| Error::invalid("missing directory"))
-                    .and_then(|digest| self.store.read_message::<Directory>(&digest))?;
-
-                next.push_back(DirEntry {
-                    path: self.relative_path(&entry.path, &dir_node.name),
-                    dir,
-                });
-            }
-        }
-
-        Ok(SandboxTemplate {
-            filesystem: actions,
+        Ok(ExecuteResponse {
+            result: Some(result),
+            status: Some(rpc::Status::default()),
+            ..Default::default()
         })
     }
-
-    fn relative_path(&self, root: &PathBuf, child: &str) -> PathBuf {
-        let mut path = root.clone();
-        path.push(child.to_owned());
-        path
-    }
 }
 
-#[async_trait::async_trait]
-impl<S, E> Execution for ExecutionService<S, E>
-where
-    S: Store + 'static,
-    E: Executor + 'static,
-{
+#[tonic::async_trait]
+impl Execution for ExecutionService {
     type ExecuteStream = ReceiverStream<Result<Operation, Status>>;
 
-    async fn execute(
-        &self,
-        req: Request<ExecuteRequest>,
-    ) -> Result<Response<Self::ExecuteStream>, Status> {
-        tracing::info!("Execution::execute {req:?}");
-        let req = req.into_inner();
+    async fn execute(&self, request: Request<ExecuteRequest>) -> Result<Response<Self::ExecuteStream>, Status> {
+        let request = request.into_inner();
+        let response = self.run(&request).await?;
 
-        let (tx, rx) = mpsc::channel(1);
-
-        let res = self
-            .execute(&req)
-            .await
-            .map_err(|err| Status::internal("failed to execute"))?;
-
-        let any = prost_types::Any::from_msg(&res)
-            .map_err(|err| Status::internal("failed to map to any type"))?;
-
-        let proto_any = Any {
-            type_url: any.type_url,
-            value: any.value,
+        let response = Any {
+            type_url: "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteResponse".to_string(),
+            value: prost::Message::encode_to_vec(&response),
         };
-
-        let op = Operation {
-            // TODO: Build directory of operations to allow awaiting them later.
+        let operation = Operation {
+            // TODO: Track operations so they can be waited on.
             name: "operations/fake-id".to_string(),
             metadata: None,
             done: true,
-            result: Some(operation::Result::Response(proto_any)),
+            result: Some(operation::Result::Response(response)),
         };
 
-        tx.send(Ok(op))
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .send(Ok(operation))
             .await
-            .map_err(|err| Status::internal("failed to send execute response"))?;
-
-        Ok(Response::new(ReceiverStream::new(rx)))
+            .map_err(|_| Status::internal("failed to send execute response"))?;
+        Ok(Response::new(ReceiverStream::new(receiver)))
     }
 
     type WaitExecutionStream = ResponseStream<Result<Operation, Status>>;
 
     async fn wait_execution(
         &self,
-        req: tonic::Request<WaitExecutionRequest>,
+        _request: Request<WaitExecutionRequest>,
     ) -> Result<Response<Self::WaitExecutionStream>, Status> {
-        todo!()
+        Err(Status::unimplemented("WaitExecution is not supported yet"))
     }
+}
+
+fn parse_timeout(seconds: i64, nanos: i32) -> Result<Duration, Status> {
+    let (Ok(seconds), Ok(nanos)) = (u64::try_from(seconds), u32::try_from(nanos)) else {
+        return Err(Status::invalid_argument("timeout must not be negative"));
+    };
+    Ok(Duration::new(seconds, nanos))
 }

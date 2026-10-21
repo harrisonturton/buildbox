@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "reapi",
@@ -9,20 +9,22 @@ rust_library(
         "cas_service.rs",
         "execution_service.rs",
         "lib.rs",
+        "status.rs",
     ],
-    proc_macro_deps = ["@crates//:async-trait"],
     visibility = ["//buildbox/server:__pkg__"],
     deps = [
         "//buildbox/cas",
-        "//buildbox/common",
         "//buildbox/executor",
         "//buildbox/proto",
-        "@crates//:bytes",
         "@crates//:prost",
-        "@crates//:prost-types",
         "@crates//:tokio",
         "@crates//:tokio-stream",
         "@crates//:tonic",
         "@crates//:tracing",
     ],
+)
+
+rust_test(
+    name = "reapi_test",
+    crate = ":reapi",
 )

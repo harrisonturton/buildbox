@@ -1,50 +1,24 @@
-use common::Error;
-pub use proto::bazel::exec::{
-    Action, ActionCache, ActionResult, Command, Digest, GetActionResultRequest, OutputFile,
-    UpdateActionResultRequest,
-};
-use cas::Store;
+//! The ActionCache service: looking up and recording action results.
+
+use proto::bazel::exec::{ActionCache, ActionResult, GetActionResultRequest, UpdateActionResultRequest};
 use tonic::{Request, Response, Status};
 
-#[derive(Debug)]
-pub struct ActionCacheService<S>
-where
-    S: Store + 'static,
-{
-    store: S,
-}
+#[derive(Debug, Default)]
+pub struct ActionCacheService {}
 
-impl<S> ActionCacheService<S>
-where
-    S: Store + 'static,
-{
-    pub fn new(store: S) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait::async_trait]
-impl<S> ActionCache for ActionCacheService<S>
-where
-    S: Store + 'static,
-{
+#[tonic::async_trait]
+impl ActionCache for ActionCacheService {
     async fn get_action_result(
         &self,
-        req: Request<GetActionResultRequest>,
+        _request: Request<GetActionResultRequest>,
     ) -> Result<Response<ActionResult>, Status> {
-        let req = req.into_inner();
-        let hash = req.action_digest.clone().unwrap().hash;
-        tracing::info!("ActionCache::get_action_result {req:?}");
         Err(Status::not_found("action not found"))
     }
 
     async fn update_action_result(
         &self,
-        req: Request<UpdateActionResultRequest>,
+        _request: Request<UpdateActionResultRequest>,
     ) -> Result<Response<ActionResult>, Status> {
-        let req = req.into_inner();
-        let hash = req.action_digest.unwrap().hash;
-        tracing::info!("ActionCache::update_action_result {hash}");
-        Ok(Response::new(ActionResult::default()))
+        Err(Status::unimplemented("UpdateActionResult is not supported yet"))
     }
 }

@@ -1,53 +1,19 @@
-use common::Error;
-use executor::{Executor, SandboxHandle};
-use proto::buildbox::{
-    Buildbox, FindBlobsRequest, FindBlobsResponse, FindSandboxesRequest, FindSandboxesResponse,
-};
-use cas::Store;
+use proto::buildbox::{Buildbox, FindBlobsRequest, FindBlobsResponse, FindSandboxesRequest, FindSandboxesResponse};
 use tonic::{Request, Response, Status};
 
-#[derive(Debug)]
-pub struct BuildboxService<S, E>
-where
-    S: Store + 'static,
-    E: Executor + 'static,
-{
-    storage: S,
-    executor: E,
-}
+#[derive(Debug, Default)]
+pub struct BuildboxService {}
 
-impl<S, E> BuildboxService<S, E>
-where
-    S: Store + 'static,
-    E: Executor + 'static,
-{
-    pub fn new(storage: S, executor: E) -> Self {
-        Self { storage, executor }
-    }
-}
-
-#[async_trait::async_trait]
-impl<S, E> Buildbox for BuildboxService<S, E>
-where
-    S: Store + 'static,
-    E: Executor + 'static,
-{
-    async fn find_blobs(
-        &self,
-        req: Request<FindBlobsRequest>,
-    ) -> Result<Response<FindBlobsResponse>, Status> {
-        tracing::info!("BuildboxService::find_blobs");
-        let blobs = vec![];
-        Ok(Response::new(FindBlobsResponse { blobs }))
+#[tonic::async_trait]
+impl Buildbox for BuildboxService {
+    async fn find_blobs(&self, _request: Request<FindBlobsRequest>) -> Result<Response<FindBlobsResponse>, Status> {
+        Err(Status::unimplemented("FindBlobs is not supported yet"))
     }
 
     async fn find_sandboxes(
         &self,
-        req: Request<FindSandboxesRequest>,
+        _request: Request<FindSandboxesRequest>,
     ) -> Result<Response<FindSandboxesResponse>, Status> {
-        tracing::info!("BuildboxService::find_sandboxes");
-        Ok(Response::new(FindSandboxesResponse {
-            sandboxes: vec!["one".to_string(), "two".to_string()],
-        }))
+        Err(Status::unimplemented("FindSandboxes is not supported yet"))
     }
 }
