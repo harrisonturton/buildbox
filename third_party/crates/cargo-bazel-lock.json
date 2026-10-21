@@ -4,7 +4,7 @@
     "protoc-gen-prost 0.4.0",
     "protoc-gen-tonic 0.4.1"
   ],
-  "checksum": "326b6e1df5d266ce9b0b736474328cad06f2b13240057819168166825c998c7c",
+  "checksum": "d233701ec63e545d977149b10fc055e34418a43fbc8863bf449647ecab318b06",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"

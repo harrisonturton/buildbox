@@ -1,0 +1,4 @@
+"""Proto rules, and a prebuilt protoc so it isn't compiled from source."""
+
+bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "toolchains_protoc", version = "0.6.1")

@@ -1,0 +1,18 @@
+filegroup(
+    name = "sysroot",
+    srcs = glob(
+        [
+            "lib/**",
+            "lib64/**",
+            "usr/include/**",
+            "usr/lib/**",
+        ],
+        # Unit files have names that aren't valid Bazel labels, and aren't
+        # needed for compiling or linking.
+        exclude = [
+            "lib/systemd/**",
+            "usr/lib/systemd/**",
+        ],
+    ),
+    visibility = ["//visibility:public"],
+)

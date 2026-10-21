@@ -1,0 +1,136 @@
+"""Rust crates from crates.io, resolved by crate_universe."""
+
+crate = use_extension(
+    "@rules_rust//crate_universe:extension.bzl",
+    "crate",
+    isolate = True,
+)
+
+crate.spec(
+    package = "clap",
+    version = "4.5",
+    features = ["derive"],
+)
+
+crate.spec(
+    package = "bytes",
+    version = "1.7",
+)
+
+crate.spec(
+    package = "tracing",
+    version = "0.1",
+)
+
+crate.spec(
+    package = "tracing-subscriber",
+    version = "0.3",
+    features = ["env-filter"],
+)
+
+crate.spec(
+    package = "thiserror",
+    version = "1.0",
+)
+
+crate.spec(
+    package = "ring",
+    version = "0.17",
+)
+
+crate.spec(
+    package = "base64",
+    version = "0.22",
+)
+
+crate.spec(
+    package = "async-trait",
+    version = "0.1",
+)
+
+crate.spec(
+    package = "serde",
+    version = "1.0",
+    features = ["derive"],
+)
+
+crate.spec(
+    package = "toml",
+    version = "0.8",
+)
+
+crate.spec(
+    package = "rand",
+    version = "0.9",
+)
+
+crate.spec(
+    package = "data-encoding",
+    version = "2.8",
+)
+
+crate.spec(
+    package = "shellexpand",
+    version = "3.1",
+)
+
+# Rust gRPC and proto dependencies
+
+crate.spec(
+    package = "tokio",
+    version = "1",
+    features = ["full"],
+)
+
+crate.spec(
+    package = "tokio-stream",
+    version = "0.1",
+    features = ["full"],
+)
+
+crate.spec(
+    package = "prost",
+    version = "0.13",
+)
+
+crate.spec(
+    default_features = False,
+    package = "prost-types",
+    version = "0.13",
+)
+
+crate.spec(
+    package = "tonic",
+    features = ["transport", "tls"],
+    version = "0.12",
+)
+
+crate.spec(
+    package = "protoc-gen-prost",
+    version = "0.4",
+)
+
+crate.annotation(
+    crate = "protoc-gen-prost",
+    gen_binaries = ["protoc-gen-prost"],
+)
+
+crate.spec(
+    package = "protoc-gen-tonic",
+    version = "0.4",
+)
+
+crate.annotation(
+    crate = "protoc-gen-tonic",
+    gen_binaries = ["protoc-gen-tonic"],
+)
+
+# Resolved crate versions are pinned in these lockfiles. To update them, run:
+#   CARGO_BAZEL_REPIN=1 bazel build //...
+crate.from_specs(
+    cargo_lockfile = "//third_party/crates:Cargo.lock",
+    generate_binaries = True,
+    lockfile = "//third_party/crates:cargo-bazel-lock.json",
+)
+
+use_repo(crate, "crates")
