@@ -9,7 +9,6 @@ rust_library_group(
         ":code_proto_rs",
         ":operations_proto_rs",
         ":status_proto_rs",
-        ":remote_asset_proto_rs",
         ":remote_execution_proto_rs",
         ":semver_proto_rs",
         ":any_proto_rs",
@@ -34,11 +33,6 @@ rust_prost_library(
 rust_prost_library(
     name = "code_proto_rs",
     proto = "@google_apis_core//google/rpc:code_proto",
-)
-
-rust_prost_library(
-    name = "remote_asset_proto_rs",
-    proto = "@google_apis_rbe//build/bazel/remote/asset/v1:remote_asset_proto",
 )
 
 rust_prost_library(

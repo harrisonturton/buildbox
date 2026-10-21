@@ -2,7 +2,6 @@ use super::{bazel, buildbox};
 use common::config::Config;
 use common::{Error, Result};
 use executor::LocalExecutor;
-use proto::bazel::asset::{FetchServer, PushServer};
 use proto::bazel::exec::ActionCacheServer;
 use proto::bazel::exec::CapabilitiesServer;
 use proto::bazel::exec::ContentAddressableStorageServer;
@@ -27,8 +26,6 @@ pub async fn launch(config: &Config) -> Result<()> {
         config.retain_sandboxes,
     );
 
-    let fetch_service = bazel::FetchService::default();
-    let push_service = bazel::PushService::default();
     let execution_service = bazel::ExecutionService::new(storage.clone(), executor.clone());
     let action_cache_service = bazel::ActionCacheService::new(storage.clone());
     let cas_service = bazel::ContentAddressableStorageService::new(storage.clone());
@@ -40,8 +37,6 @@ pub async fn launch(config: &Config) -> Result<()> {
     Server::builder()
         .trace_fn(|_| tracing::info_span!("buildbox"))
         .accept_http1(true)
-        .add_service(FetchServer::new(fetch_service))
-        .add_service(PushServer::new(push_service))
         .add_service(ExecutionServer::new(execution_service))
         .add_service(ActionCacheServer::new(action_cache_service))
         .add_service(ContentAddressableStorageServer::new(cas_service))
