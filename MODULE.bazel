@@ -12,11 +12,62 @@ bazel_dep(name = "google_apis_rbe", version = "0.0.1")
 
 # Dependencies from the Bazel Central registry
 
-bazel_dep(name = "apple_support", version = "1.17.1")
+bazel_dep(name = "apple_support", version = "1.24.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
-bazel_dep(name = "rules_rust", version = "0.57.1")
-bazel_dep(name = "rules_rust_prost", version = "0.57.1")
-bazel_dep(name = "toolchains_protoc", version = "0.3.7")
+bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "rules_rust_prost", version = "0.74.0")
+bazel_dep(name = "toolchains_protoc", version = "0.6.1")
+bazel_dep(name = "toolchains_llvm", version = "1.11.2")
+
+# Hermetic C/C++ toolchain, used by rules_rust for linking. Avoids depending on
+# whatever compiler (if any) is installed on the host.
+
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+
+llvm.toolchain(
+    llvm_version = "20.1.4",
+)
+
+# Link against a pinned Debian sysroot rather than the host's libc and libgcc,
+# so builds don't depend on which -dev packages the host has installed. This is
+# Chromium's published sysroot; the hash is from Chromium's
+# build/linux/sysroot_scripts/sysroots.json.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "sysroot_linux_x86_64",
+    build_file_content = """
+filegroup(
+    name = "sysroot",
+    srcs = glob(
+        [
+            "lib/**",
+            "lib64/**",
+            "usr/include/**",
+            "usr/lib/**",
+        ],
+        # Unit files have names that aren't valid Bazel labels, and aren't
+        # needed for compiling or linking.
+        exclude = [
+            "lib/systemd/**",
+            "usr/lib/systemd/**",
+        ],
+    ),
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "f851add76bdae472fb6c94b4f920bc4a132d85ac607951391297f636af7e934e",
+    urls = ["https://commondatastorage.googleapis.com/chrome-linux-sysroot/f851add76bdae472fb6c94b4f920bc4a132d85ac607951391297f636af7e934e"],
+    type = "tar.xz",
+)
+
+llvm.sysroot(
+    label = "@sysroot_linux_x86_64//:sysroot",
+    targets = ["linux-x86_64"],
+)
+
+use_repo(llvm, "llvm_toolchain")
+register_toolchains("@llvm_toolchain//:all")
 
 # Rust toolchain
 
@@ -24,7 +75,7 @@ rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 
 rust.toolchain(
     edition = "2021",
-    versions = ["1.84.0"],
+    versions = ["1.98.0"],
 )
 
 use_repo(rust, "rust_toolchains")
