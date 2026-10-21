@@ -9,6 +9,8 @@ rust_library(
     crate_root = "server.rs",
     visibility = ["//buildbox/cli:__pkg__"],
     deps = [
+        "//buildbox/actioncache",
+        "//buildbox/actioncache:fs",
         "//buildbox/admin",
         "//buildbox/cas",
         "//buildbox/cas:fs",

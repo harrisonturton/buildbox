@@ -1,5 +1,7 @@
 pub mod config;
 
+use actioncache::ActionCache;
+use actioncache_fs::FsActionCache;
 use cas::Cas;
 use cas_fs::FsCas;
 use common::{Error, Result};
@@ -26,6 +28,10 @@ pub async fn launch(config: &Config) -> Result<()> {
     let cas_dir = PathBuf::from(&config.storage_dir).join("cas");
     let cas: Arc<dyn Cas> = Arc::new(FsCas::open(&cas_dir).await.map_err(Error::boxed)?);
 
+    let action_cache_dir = PathBuf::from(&config.storage_dir).join("ac");
+    let action_cache: Arc<dyn ActionCache> =
+        Arc::new(FsActionCache::open(&action_cache_dir).await.map_err(Error::boxed)?);
+
     let executor: Arc<dyn Executor> = Arc::new(LocalExecutor::new(
         cas.clone(),
         PathBuf::from(&config.sandbox_dir),
@@ -33,7 +39,7 @@ pub async fn launch(config: &Config) -> Result<()> {
     ));
 
     let execution_service = reapi::ExecutionService::new(cas.clone(), executor);
-    let action_cache_service = reapi::ActionCacheService::default();
+    let action_cache_service = reapi::ActionCacheService::new(cas.clone(), action_cache);
     let cas_service = reapi::ContentAddressableStorageService::new(cas.clone());
     let bytestream_service = reapi::ByteStreamService::new(cas);
     let capabilities_service = reapi::CapabilitiesService::default();

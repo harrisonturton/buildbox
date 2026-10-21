@@ -20,7 +20,7 @@ impl Capabilities for CapabilitiesService {
             cache_capabilities: Some(CacheCapabilities {
                 digest_function: vec![digest_function::Value::Sha256.into()],
                 action_cache_update_capabilities: Some(ActionCacheUpdateCapabilities {
-                    update_enabled: false,
+                    update_enabled: true,
                 }),
                 ..Default::default()
             }),

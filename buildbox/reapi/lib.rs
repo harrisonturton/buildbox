@@ -15,6 +15,7 @@ pub use cas_service::ContentAddressableStorageService;
 pub mod execution_service;
 pub use execution_service::ExecutionService;
 
+mod cached_result;
 mod status;
 
 use cas::{Cas, CasError, Digest};
