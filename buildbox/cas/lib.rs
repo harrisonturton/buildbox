@@ -1,3 +1,6 @@
+pub mod digest;
+pub use digest::{Digest, DigestError, Hasher};
+
 pub(crate) mod tee;
 pub(crate) mod store;
 pub(crate) mod proto;

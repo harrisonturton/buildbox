@@ -3,6 +3,7 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 rust_library(
     name = "cas",
     srcs = [
+        "digest.rs",
         "fs.rs",
         "lib.rs",
         "mem.rs",
@@ -14,8 +15,12 @@ rust_library(
     deps = [
         "//buildbox/common",
         "//buildbox/proto",
+        "//third_party/remoteapis:remote_execution_rust_proto",
         "@crates//:bytes",
+        "@crates//:data-encoding",
         "@crates//:prost",
+        "@crates//:ring",
+        "@crates//:thiserror",
         "@crates//:tracing",
     ],
 )
