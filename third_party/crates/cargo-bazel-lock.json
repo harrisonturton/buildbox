@@ -4,7 +4,7 @@
     "protoc-gen-prost 0.4.0",
     "protoc-gen-tonic 0.4.1"
   ],
-  "checksum": "990cdcefa7684a34228de5a6abb68354074712f878ae0ebf98f45160b4537407",
+  "checksum": "e3ad9bcd9b7ce3ec3e54e4d24e61a715d3a72a0b4dc9fac138a2ef9c914d7d1d",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -1251,7 +1251,11 @@
             "target": "shellexpand"
           },
           {
-            "id": "thiserror 1.0.69",
+            "id": "tempfile 3.27.0",
+            "target": "tempfile"
+          },
+          {
+            "id": "thiserror 2.0.21",
             "target": "thiserror"
           },
           {
@@ -5947,54 +5951,13 @@
       ],
       "version": "3.27.0"
     },
-    "thiserror 1.0.69": {
-      "build_script_attrs": {},
-      "common_attrs": {
-        "edition": "2021",
-        "extra_deps": [
-          ":build_script_build"
-        ],
-        "proc_macro_deps": [
-          {
-            "id": "thiserror-impl 1.0.69",
-            "target": "thiserror_impl"
-          }
-        ]
-      },
-      "library_target_name": "thiserror",
-      "license": "MIT OR Apache-2.0",
-      "license_file": "LICENSE-APACHE",
-      "license_ids": [
-        "Apache-2.0",
-        "MIT"
-      ],
-      "name": "thiserror",
-      "package_url": "https://github.com/dtolnay/thiserror",
-      "repository": {
-        "Http": {
-          "sha256": "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52",
-          "url": "https://static.crates.io/crates/thiserror/1.0.69/download"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "thiserror",
-            "crate_root": "src/lib.rs"
-          }
-        },
-        {
-          "BuildScript": {
-            "crate_name": "build_script_build",
-            "crate_root": "build.rs"
-          }
-        }
-      ],
-      "version": "1.0.69"
-    },
     "thiserror 2.0.21": {
       "build_script_attrs": {},
       "common_attrs": {
+        "crate_features": [
+          "default",
+          "std"
+        ],
         "edition": "2021",
         "extra_deps": [
           ":build_script_build"
@@ -6036,49 +5999,6 @@
         }
       ],
       "version": "2.0.21"
-    },
-    "thiserror-impl 1.0.69": {
-      "common_attrs": {
-        "deps": [
-          {
-            "id": "proc-macro2 1.0.107",
-            "target": "proc_macro2"
-          },
-          {
-            "id": "quote 1.0.47",
-            "target": "quote"
-          },
-          {
-            "id": "syn 2.0.119",
-            "target": "syn"
-          }
-        ],
-        "edition": "2021"
-      },
-      "library_target_name": "thiserror_impl",
-      "license": "MIT OR Apache-2.0",
-      "license_file": "LICENSE-APACHE",
-      "license_ids": [
-        "Apache-2.0",
-        "MIT"
-      ],
-      "name": "thiserror-impl",
-      "package_url": "https://github.com/dtolnay/thiserror",
-      "repository": {
-        "Http": {
-          "sha256": "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1",
-          "url": "https://static.crates.io/crates/thiserror-impl/1.0.69/download"
-        }
-      },
-      "targets": [
-        {
-          "ProcMacro": {
-            "crate_name": "thiserror_impl",
-            "crate_root": "src/lib.rs"
-          }
-        }
-      ],
-      "version": "1.0.69"
     },
     "thiserror-impl 2.0.21": {
       "common_attrs": {
@@ -8324,7 +8244,8 @@
     "ring 0.17.14",
     "serde 1.0.229",
     "shellexpand 3.1.2",
-    "thiserror 1.0.69",
+    "tempfile 3.27.0",
+    "thiserror 2.0.21",
     "tokio 1.54.0",
     "tokio-stream 0.1.19",
     "toml 0.8.23",

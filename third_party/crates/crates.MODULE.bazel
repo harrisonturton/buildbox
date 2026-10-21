@@ -26,7 +26,12 @@ crate.spec(
 
 crate.spec(
     package = "thiserror",
-    version = "1.0",
+    version = "2",
+)
+
+crate.spec(
+    package = "tempfile",
+    version = "3",
 )
 
 crate.spec(
