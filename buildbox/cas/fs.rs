@@ -232,6 +232,9 @@ fn executable_blob(cas: &FsCas, digest: &Digest) -> Result<PathBuf, CasError> {
 
     let (mut temp_file, temp_path) = new_temp_file(&cas.dirs.tmp)?;
     std::io::copy(&mut source, &mut temp_file).map_err(|error| io_error("failed to write", &temp_path, error))?;
+    // Close the file before it can be run: running a file that's open for
+    // writing fails.
+    drop(temp_file);
     persist_with_mode(temp_path, &path, EXECUTABLE_BLOB_MODE)?;
     Ok(path)
 }

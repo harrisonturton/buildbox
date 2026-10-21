@@ -9,6 +9,11 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Child;
 
+/// How many times to try starting a process whose program is busy, and how
+/// long to wait before the first retry. Each retry waits longer.
+const SPAWN_ATTEMPTS: u32 = 5;
+const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(10);
+
 /// What a finished command produced.
 #[derive(Debug)]
 pub struct ProcessOutput {
@@ -43,7 +48,7 @@ pub async fn run(command: &Command, working_dir: &Path, timeout: Option<Duration
         process.env(&variable.name, &variable.value);
     }
 
-    let child = process.spawn().map_err(|error| {
+    let child = spawn(&mut process).await.map_err(|error| {
         ExecuteError::InvalidAction(format!("failed to start {}: {error}", program.display()))
     })?;
 
@@ -54,6 +59,27 @@ pub async fn run(command: &Command, working_dir: &Path, timeout: Option<Duration
     match tokio::time::timeout(timeout, finished).await {
         Ok(output) => output,
         Err(_elapsed) => Err(ExecuteError::Timeout(timeout)),
+    }
+}
+
+/// Start a process, retrying while its program is "busy".
+///
+/// Running a file fails with ETXTBSY while any process has it open for
+/// writing. That happens briefly, and harmlessly, when another thread forks
+/// just as the file is written: the child holds a copy of the file
+/// descriptor until it calls exec. Retrying shortly afterwards succeeds.
+async fn spawn(process: &mut tokio::process::Command) -> std::io::Result<Child> {
+    let mut attempt = 1;
+    loop {
+        let error = match process.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) => error,
+        };
+        if error.raw_os_error() != Some(libc::ETXTBSY) || attempt == SPAWN_ATTEMPTS {
+            return Err(error);
+        }
+        tokio::time::sleep(SPAWN_RETRY_DELAY * attempt).await;
+        attempt += 1;
     }
 }
 
