@@ -2,7 +2,11 @@
 
 use executor::ExecuteError;
 use fsutil::run_blocking;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+/// Sandbox directory names start with this, so leftovers can be recognised.
+const SANDBOX_PREFIX: &str = "action-";
 
 /// A fresh directory for one action, deleted when dropped unless it is kept
 /// for debugging.
@@ -16,7 +20,7 @@ impl Sandbox {
     pub async fn create(root: &Path, keep: bool) -> Result<Sandbox, ExecuteError> {
         let root = root.to_path_buf();
         let path = run_blocking(move || {
-            let dir = tempfile::Builder::new().prefix("action-").tempdir_in(&root)?;
+            let dir = tempfile::Builder::new().prefix(SANDBOX_PREFIX).tempdir_in(&root)?;
             Ok(dir.keep())
         })
         .await
@@ -27,6 +31,27 @@ impl Sandbox {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// Create `root` if needed, and delete any sandboxes left in it by a previous
+/// run. Other files in `root` are left alone.
+pub fn prepare_root(root: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(root)?;
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let is_sandbox = entry.file_name().to_string_lossy().starts_with(SANDBOX_PREFIX);
+        if is_sandbox {
+            remove_dir_all_if_exists(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
 }
 

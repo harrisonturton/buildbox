@@ -29,10 +29,7 @@ pub fn lock_dir(dir: &Path) -> io::Result<File> {
 
     match file.try_lock() {
         Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => Err(io::Error::new(
-            ErrorKind::WouldBlock,
-            format!("{} is in use by another process", dir.display()),
-        )),
+        Err(TryLockError::WouldBlock) => Err(io::Error::new(ErrorKind::WouldBlock, "in use by another process")),
         Err(TryLockError::Error(error)) => Err(error),
     }
 }

@@ -1,19 +1,25 @@
-load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
 
 rust_binary(
     name = "buildbox",
-    srcs = ["main.rs"],
+    srcs = [
+        "config_args.rs",
+        "main.rs",
+        "show_config.rs",
+        "up.rs",
+    ],
     visibility = ["//buildbox:__pkg__"],
     deps = [
-        "//buildbox/common",
-        "//buildbox/executor",
-        "//buildbox/admin:admin_rust_proto",
+        "//buildbox/config",
         "//buildbox/server",
-        "//buildbox/cas",
         "@crates//:clap",
         "@crates//:tokio",
-        "@crates//:tonic",
-        "@crates//:tracing",
+        "@crates//:toml",
         "@crates//:tracing-subscriber",
     ],
+)
+
+rust_test(
+    name = "buildbox_test",
+    crate = ":buildbox",
 )

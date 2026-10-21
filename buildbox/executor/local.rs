@@ -38,6 +38,22 @@ impl LocalExecutor {
             keep_sandboxes,
         }
     }
+
+    /// Like [`LocalExecutor::new`], but first creates `sandbox_root` if
+    /// needed and, unless sandboxes are being kept, deletes any left over
+    /// from a previous run.
+    pub async fn open(cas: Arc<dyn Cas>, sandbox_root: PathBuf, keep_sandboxes: bool) -> std::io::Result<LocalExecutor> {
+        let root = sandbox_root.clone();
+        fsutil::run_blocking(move || {
+            if keep_sandboxes {
+                std::fs::create_dir_all(&root)
+            } else {
+                sandbox::prepare_root(&root)
+            }
+        })
+        .await?;
+        Ok(LocalExecutor::new(cas, sandbox_root, keep_sandboxes))
+    }
 }
 
 #[async_trait]
@@ -184,6 +200,19 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("sandbox wasn't removed");
+    }
+
+    #[tokio::test]
+    async fn open_removes_leftover_sandboxes_only() {
+        let cas = Arc::new(MemCas::new());
+        let sandboxes = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(sandboxes.path().join("action-old/nested")).unwrap();
+        std::fs::write(sandboxes.path().join("unrelated"), b"keep me").unwrap();
+
+        LocalExecutor::open(cas, sandboxes.path().to_path_buf(), false).await.unwrap();
+
+        assert!(!sandboxes.path().join("action-old").exists());
+        assert!(sandboxes.path().join("unrelated").exists());
     }
 
     #[tokio::test]
