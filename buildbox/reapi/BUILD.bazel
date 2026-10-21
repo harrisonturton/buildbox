@@ -19,6 +19,7 @@ rust_library(
         "//buildbox/executor",
         "//third_party/googleapis:any_rust_proto",
         "//third_party/googleapis:bytestream_rust_proto",
+        "//third_party/googleapis:error_details_rust_proto",
         "//third_party/googleapis:operations_rust_proto",
         "//third_party/googleapis:status_rust_proto",
         "//third_party/remoteapis:remote_execution_rust_proto",

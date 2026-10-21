@@ -38,7 +38,7 @@ pub async fn launch(config: &Config) -> Result<()> {
         config.retain_sandboxes,
     ));
 
-    let execution_service = reapi::ExecutionService::new(cas.clone(), executor);
+    let execution_service = reapi::ExecutionService::new(cas.clone(), action_cache.clone(), executor);
     let action_cache_service = reapi::ActionCacheService::new(cas.clone(), action_cache);
     let cas_service = reapi::ContentAddressableStorageService::new(cas.clone());
     let bytestream_service = reapi::ByteStreamService::new(cas);

@@ -23,3 +23,9 @@ rust_prost_library(
     proto = "@protobuf//:any_proto",
     visibility = ["//buildbox:__subpackages__"],
 )
+
+rust_prost_library(
+    name = "error_details_rust_proto",
+    proto = "@googleapis//google/rpc:error_details_proto",
+    visibility = ["//buildbox:__subpackages__"],
+)
