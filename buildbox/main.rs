@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
-use common::{config::Config, Error, Result};
+use common::{Error, Result};
+use server::config::Config;
 use proto::buildbox::{BuildboxClient, FindSandboxesRequest, FindBlobsRequest};
 use std::process::ExitCode;
 use std::{path::PathBuf, str::FromStr};
@@ -80,7 +81,7 @@ fn init_tracing_or_die() {
 
 async fn up(cmd: &UpCmd) -> Result<()> {
     let config = Config::load(cmd.config.as_ref())?;
-    rpc::launch(&config).await
+    server::launch(&config).await
 }
 
 async fn list_sandboxes(args: &ListSandboxesCmd) -> Result<()> {

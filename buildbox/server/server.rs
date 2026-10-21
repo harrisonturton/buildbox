@@ -1,5 +1,6 @@
-use super::{bazel, buildbox};
-use common::config::Config;
+pub mod config;
+
+use config::Config;
 use common::{Error, Result};
 use executor::LocalExecutor;
 use proto::bazel::exec::ActionCacheServer;
@@ -26,13 +27,13 @@ pub async fn launch(config: &Config) -> Result<()> {
         config.retain_sandboxes,
     );
 
-    let execution_service = bazel::ExecutionService::new(storage.clone(), executor.clone());
-    let action_cache_service = bazel::ActionCacheService::new(storage.clone());
-    let cas_service = bazel::ContentAddressableStorageService::new(storage.clone());
-    let bytestream_service = bazel::ByteStreamService::new(storage.clone());
-    let capabilities_service = bazel::CapabilitiesService::default();
+    let execution_service = reapi::ExecutionService::new(storage.clone(), executor.clone());
+    let action_cache_service = reapi::ActionCacheService::new(storage.clone());
+    let cas_service = reapi::ContentAddressableStorageService::new(storage.clone());
+    let bytestream_service = reapi::ByteStreamService::new(storage.clone());
+    let capabilities_service = reapi::CapabilitiesService::default();
 
-    let buildbox_service = buildbox::BuildboxService::new(storage.clone(), executor.clone());
+    let buildbox_service = admin::BuildboxService::new(storage.clone(), executor.clone());
 
     Server::builder()
         .trace_fn(|_| tracing::info_span!("buildbox"))

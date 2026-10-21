@@ -2,12 +2,12 @@ load("@rules_rust//rust:defs.bzl", "rust_binary")
 
 rust_binary(
     name = "buildbox",
-    srcs = glob(["**/*.rs"]),
+    srcs = ["main.rs"],
     deps = [
         "//buildbox/common",
         "//buildbox/executor",
         "//buildbox/proto",
-        "//buildbox/rpc",
+        "//buildbox/server",
         "//buildbox/cas",
         "@crates//:clap",
         "@crates//:tokio",

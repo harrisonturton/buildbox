@@ -1,4 +1,4 @@
-use super::{Error, Result};
+use common::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

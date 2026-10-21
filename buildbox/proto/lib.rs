@@ -26,7 +26,7 @@ pub mod google {
 }
 
 pub mod buildbox {
-    pub use buildbox_proto::buildbox::*;
-    pub use buildbox_proto::buildbox::buildbox_server::*;
-    pub use buildbox_proto::buildbox::buildbox_client::*;
+    pub use admin_proto::buildbox::*;
+    pub use admin_proto::buildbox::buildbox_server::*;
+    pub use admin_proto::buildbox::buildbox_client::*;
 }

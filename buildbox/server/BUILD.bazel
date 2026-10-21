@@ -1,0 +1,24 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "server",
+    srcs = [
+        "config.rs",
+        "server.rs",
+    ],
+    crate_root = "server.rs",
+    visibility = ["//buildbox:__pkg__"],
+    deps = [
+        "//buildbox/admin",
+        "//buildbox/cas",
+        "//buildbox/common",
+        "//buildbox/executor",
+        "//buildbox/proto",
+        "//buildbox/reapi",
+        "@crates//:serde",
+        "@crates//:shellexpand",
+        "@crates//:toml",
+        "@crates//:tonic",
+        "@crates//:tracing",
+    ],
+)

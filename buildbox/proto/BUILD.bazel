@@ -2,10 +2,10 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 
 rust_library(
     name = "proto",
-    srcs = glob(["**/*.rs"]),
+    srcs = ["lib.rs"],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
+        "//buildbox/admin:admin_rust_proto",
         "//buildbox/proto/bazel",
-        "//buildbox/proto/buildbox",
     ],
 )

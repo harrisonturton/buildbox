@@ -1,0 +1,29 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
+
+proto_library(
+    name = "admin_proto",
+    srcs = ["admin.proto"],
+)
+
+rust_prost_library(
+    name = "admin_rust_proto",
+    proto = ":admin_proto",
+    visibility = ["//buildbox/proto:__pkg__"],
+)
+
+rust_library(
+    name = "admin",
+    srcs = ["admin_service.rs"],
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox/server:__pkg__"],
+    deps = [
+        "//buildbox/cas",
+        "//buildbox/common",
+        "//buildbox/executor",
+        "//buildbox/proto",
+        "@crates//:tonic",
+        "@crates//:tracing",
+    ],
+)

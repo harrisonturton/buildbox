@@ -1,25 +1,28 @@
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 rust_library(
-    name = "rpc",
-    srcs = glob(["**/*.rs"]),
+    name = "reapi",
+    srcs = [
+        "action_cache_service.rs",
+        "bytestream_service.rs",
+        "capabilities_service.rs",
+        "cas_service.rs",
+        "execution_service.rs",
+        "lib.rs",
+    ],
     proc_macro_deps = ["@crates//:async-trait"],
-    visibility = ["//buildbox:__subpackages__"],
+    visibility = ["//buildbox/server:__pkg__"],
     deps = [
+        "//buildbox/cas",
         "//buildbox/common",
         "//buildbox/executor",
         "//buildbox/proto",
-        "//buildbox/cas",
         "@crates//:bytes",
-        "@crates//:data-encoding",
         "@crates//:prost",
         "@crates//:prost-types",
-        "@crates//:ring",
-        "@crates//:thiserror",
         "@crates//:tokio",
         "@crates//:tokio-stream",
         "@crates//:tonic",
         "@crates//:tracing",
-        "@crates//:tracing-subscriber",
     ],
 )
