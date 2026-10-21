@@ -1,0 +1,19 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+rust_binary(
+    name = "buildbox",
+    srcs = ["main.rs"],
+    visibility = ["//buildbox:__pkg__"],
+    deps = [
+        "//buildbox/common",
+        "//buildbox/executor",
+        "//buildbox/proto",
+        "//buildbox/server",
+        "//buildbox/cas",
+        "@crates//:clap",
+        "@crates//:tokio",
+        "@crates//:tonic",
+        "@crates//:tracing",
+        "@crates//:tracing-subscriber",
+    ],
+)

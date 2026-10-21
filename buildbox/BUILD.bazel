@@ -1,18 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_binary")
-
-rust_binary(
+alias(
     name = "buildbox",
-    srcs = ["main.rs"],
-    deps = [
-        "//buildbox/common",
-        "//buildbox/executor",
-        "//buildbox/proto",
-        "//buildbox/server",
-        "//buildbox/cas",
-        "@crates//:clap",
-        "@crates//:tokio",
-        "@crates//:tonic",
-        "@crates//:tracing",
-        "@crates//:tracing-subscriber",
-    ],
+    actual = "//buildbox/cli:buildbox",
 )
