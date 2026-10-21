@@ -68,11 +68,28 @@ impl ByteStream for ByteStreamService {
         Ok(Response::new(WriteResponse { committed_size }))
     }
 
+    /// Writes can't be resumed: a write is either complete, because the blob
+    /// is stored, or must start again from the beginning.
     async fn query_write_status(
         &self,
-        _request: Request<QueryWriteStatusRequest>,
+        request: Request<QueryWriteStatusRequest>,
     ) -> Result<Response<QueryWriteStatusResponse>, Status> {
-        Err(Status::unimplemented("resumable writes are not supported"))
+        let request = request.into_inner();
+        let digest = parse_write_resource(&request.resource_name)?;
+
+        let missing = self.cas.find_missing(&[digest.clone()]).await.map_err(status::from_cas_error)?;
+        let response = if missing.is_empty() {
+            QueryWriteStatusResponse {
+                committed_size: digest.size_bytes() as i64,
+                complete: true,
+            }
+        } else {
+            QueryWriteStatusResponse {
+                committed_size: 0,
+                complete: false,
+            }
+        };
+        Ok(Response::new(response))
     }
 }
 

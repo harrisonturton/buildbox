@@ -14,6 +14,7 @@ use remote_execution_proto::build::bazel::remote::execution::v2::action_cache_se
 use remote_execution_proto::build::bazel::remote::execution::v2::capabilities_server::CapabilitiesServer;
 use remote_execution_proto::build::bazel::remote::execution::v2::content_addressable_storage_server::ContentAddressableStorageServer;
 use remote_execution_proto::build::bazel::remote::execution::v2::execution_server::ExecutionServer;
+use reapi::MAX_MESSAGE_SIZE_BYTES;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tonic::transport::Server;
@@ -49,10 +50,26 @@ pub async fn launch(config: &Config) -> Result<()> {
     Server::builder()
         .trace_fn(|_| tracing::info_span!("buildbox"))
         .accept_http1(true)
-        .add_service(ExecutionServer::new(execution_service))
-        .add_service(ActionCacheServer::new(action_cache_service))
-        .add_service(ContentAddressableStorageServer::new(cas_service))
-        .add_service(ByteStreamServer::new(bytestream_service))
+        .add_service(
+            ExecutionServer::new(execution_service)
+                .max_decoding_message_size(MAX_MESSAGE_SIZE_BYTES)
+                .max_encoding_message_size(MAX_MESSAGE_SIZE_BYTES),
+        )
+        .add_service(
+            ActionCacheServer::new(action_cache_service)
+                .max_decoding_message_size(MAX_MESSAGE_SIZE_BYTES)
+                .max_encoding_message_size(MAX_MESSAGE_SIZE_BYTES),
+        )
+        .add_service(
+            ContentAddressableStorageServer::new(cas_service)
+                .max_decoding_message_size(MAX_MESSAGE_SIZE_BYTES)
+                .max_encoding_message_size(MAX_MESSAGE_SIZE_BYTES),
+        )
+        .add_service(
+            ByteStreamServer::new(bytestream_service)
+                .max_decoding_message_size(MAX_MESSAGE_SIZE_BYTES)
+                .max_encoding_message_size(MAX_MESSAGE_SIZE_BYTES),
+        )
         .add_service(CapabilitiesServer::new(capabilities_service))
         .add_service(BuildboxServer::new(buildbox_service))
         .serve(addr)

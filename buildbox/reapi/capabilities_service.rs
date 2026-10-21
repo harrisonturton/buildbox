@@ -3,6 +3,7 @@ use remote_execution_proto::build::bazel::remote::execution::v2::{
     digest_function, ActionCacheUpdateCapabilities, CacheCapabilities, ExecutionCapabilities, GetCapabilitiesRequest,
     ServerCapabilities,
 };
+use crate::MAX_BATCH_TOTAL_SIZE_BYTES;
 use semver_proto::build::bazel::semver::SemVer;
 use tonic::{Request, Response, Status};
 
@@ -22,6 +23,7 @@ impl Capabilities for CapabilitiesService {
                 action_cache_update_capabilities: Some(ActionCacheUpdateCapabilities {
                     update_enabled: true,
                 }),
+                max_batch_total_size_bytes: MAX_BATCH_TOTAL_SIZE_BYTES as i64,
                 ..Default::default()
             }),
             execution_capabilities: Some(ExecutionCapabilities {

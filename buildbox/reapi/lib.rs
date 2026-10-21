@@ -25,6 +25,13 @@ use tonic::Status;
 
 pub type ResponseStream<T> = Pin<Box<dyn Stream<Item = T> + Send + 'static>>;
 
+/// The most data a client may send or request in one batch CAS call.
+pub const MAX_BATCH_TOTAL_SIZE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The largest gRPC message the services accept or send. Larger than the
+/// batch limit, to leave room for the rest of the message.
+pub const MAX_MESSAGE_SIZE_BYTES: usize = 2 * MAX_BATCH_TOTAL_SIZE_BYTES as usize;
+
 /// Read a proto message the client stored in the CAS.
 async fn read_message<T: prost::Message + Default>(cas: &dyn Cas, digest: &Digest) -> Result<T, Status> {
     let data = match cas.read_bytes(digest).await {
