@@ -53,22 +53,24 @@ use this in trusted environments.
 
 ## Building
 
-If you already have Bazel, building `buildbox` is easy:
+Buildbox is built with Bazel; install
+[bazelisk](https://github.com/bazelbuild/bazelisk) as `bazel`. All toolchains,
+including the C toolchain and sysroot, are downloaded by Bazel.
+
+To build and install the `buildbox` binary to `~/.local/bin`:
 
 ```
-git clone git@github.com:harrisonturton/buildbox.git
-cd buildbox
+./install.sh
+```
+
+Set `PREFIX` to install somewhere else, e.g. `PREFIX=/usr/local ./install.sh`
+installs to `/usr/local/bin`.
+
+To just build it:
+
+```
 bazel build //buildbox
 ```
-
-This will produce the `buildbox` binary at:
-
-```
-$(bazel info bazel-bin)/buildbox/buildbox
-```
-
-If you don't already have Bazel installed, you probably shouldn't be reading this `README`.
-
 
 ## Usage
 
