@@ -1,139 +1,178 @@
 # `buildbox`
 
-Buildbox is an implementation of the Bazel [Remote Execution](https://bazel.build/remote/rbe)
-protocol.
-
-It's designed for near-trivial deployment and maintenance. Getting started is as simple as:
+Buildbox is a Bazel [remote execution](https://bazel.build/remote/rbe) server
+for running builds on a machine you control. It implements the
+[Remote Execution API](https://github.com/bazelbuild/remote-apis) (REAPI)
+with a local action cache and local, unisolated execution, and it's designed to
+be trivial to run:
 
 ```
 buildbox up
 ```
 
-Buildbox is intended for personal use. I developed it to achieve easy
-reproducible/hermetic builds at home, and also to make it easy to develop
-applications that use Linux-based toolchains (e.g. Vivado) from my Macbook.
+I built it for reproducible builds at home, and to build with Linux-only
+toolchains (e.g. Vivado) from a MacBook. It may be useful to you if:
 
-This may be useful to you if:
+* You want remote execution and caching without the yak shaving.
+* You trust your build inputs: actions run on the host with no isolation.
+* You're happy with *mostly* hermetic and reproducible.
+* One machine is enough.
 
-* You want remote execution without the yak shaving
-* You trust your compilation inputs (i.e. don't need to isolate build actions)
-* You're happy with *mostly* hermetic and reproducible
-* You don't care about scale
+This is a personal utility, shared in case others find it useful. I'll gladly
+accept contributions, but make no stability, support or response time
+guarantees.
 
-This is a personal utility that I've made available to the world in case others
-find it useful. I'll gladly accept contributions, but I make no stability,
-support, or response time guarantees.
+> **Security:** buildbox has no authentication or TLS, and runs whatever
+> actions it is sent with your user's permissions. By default it only listens
+> on the loopback address. Don't expose it to networks you don't trust; to
+> reach it from other machines, use something like
+> [Tailscale](https://tailscale.com).
 
-## How it works
+## Installing
 
-There are two main parts to the remote execution protocol:
+Buildbox is built with Bazel. Install
+[bazelisk](https://github.com/bazelbuild/bazelisk) as `bazel`; every toolchain,
+including the C toolchain and sysroot, is downloaded by Bazel.
 
-1. Action caching (i.e. storing the outputs of already-executed actions)
-2. Action execution
-
-Buildbox implements these in the simplest way possible.
-
-Whenever the protocol requests something to be stored, the corresponding blob is
-stored in a single file on-disk, named according to the SHA256 hash of the data.
-
-Whenever an action needs to be executed, buildbox creates a new sandbox
-directory `/sandbox-{id}/` and populates it with the necessary inputs copied
-from the file blobs. The build command is then executed within this directory,
-and the outputs are copied out into content-addressable blobs.
-
-This architecture is simple and *sufficiently* fast. Because there is no action
-isolation, they execute quickly. Because the execroots are populated from files
-already stored on-disk, constructing the trees is also quick enough. There are
-fancier optimisations we could do here (i.e. use FUSE or NFS filesystems to
-project execroot views without copying files) but they'd cause an increase in
-deployment complexity.
-
-The big downside, of course, is that there's no security guardrails. Please only
-use this in trusted environments.
-
-## Building
-
-Buildbox is built with Bazel; install
-[bazelisk](https://github.com/bazelbuild/bazelisk) as `bazel`. All toolchains,
-including the C toolchain and sysroot, are downloaded by Bazel.
-
-To build and install the `buildbox` binary to `~/.local/bin`:
+To build and install `buildbox` to `~/.local/bin`:
 
 ```
 ./install.sh
 ```
 
-Set `PREFIX` to install somewhere else, e.g. `PREFIX=/usr/local ./install.sh`
-installs to `/usr/local/bin`.
+Set `PREFIX` to install elsewhere: `PREFIX=/usr/local ./install.sh` installs to
+`/usr/local/bin`.
 
-To just build it:
+## Using it
 
-```
-bazel build //buildbox
-```
-
-## Usage
-
-### Server setup
-
-> **Note:** Buildbox does not use TLS. This makes it very easy to
-> setup and run, but it's important that the server is not exposed to the
-> internet. I recommend exposing it to your local network over something like
-> [Tailscale](https://tailscale.com).
-
-Starting the buildbox server is easy:
+Start the server:
 
 ```
 buildbox up
 ```
 
-By default, this will listen on `localhost:50051` and create a `~/.buildbox`
-directory to store compilation artifacts and directories for executing actions.
-
-If you'd rather put these files somewhere else, you can configure this behaviour
-using a small configuration file. The configuration file is canonically called
-`buildbox.toml` (but can be anything) and the most important directives are the
-*storage directory* and the *sandbox directory*.
+Then point Bazel at it, in your project's `.bazelrc`:
 
 ```
-buildbox up --config <config file path>
+build --remote_executor=grpc://[::1]:50051
 ```
 
-The storage directory will contain cached build-time artifacts. The sandbox
-directory will contain subdirectories that create the environments required to
-execute build actions and extract their outputs.
+Actions run on the server's host, so toolchains need to work there. Toolchains
+that Bazel downloads (rather than ones installed on the host) make this easy.
 
-A possible `buildbox.toml` could be:
-
-```
-addr        = "[::1]:50051"
-storage_dir = "~/.my-custom-buildbox-dir/storage"
-sandbox_dir = "~/.my-custom-buildbox-dir/sandbox"
-```
-
-## Client setup
-
-To use that server with Bazel, you can configure the connection in your
-`.bazelrc` like so:
+While the server runs, the CLI can inspect it:
 
 ```
-build --remote_executor="grpc://localhost:50051"
+$ buildbox status
+buildbox 0.1.0, up 2h 5m
+CAS           34102 blobs, 9.2 GiB      /home/me/.cache/buildbox/cas
+Action cache  381 entries, 161.6 KiB    /home/me/.cache/buildbox/ac
+Actions       48 running, 4 queued, limit 48
+
+$ buildbox actions
+ID      STATE    TIME      COMMAND
+52      running  822ms     /bin/bash -c source external/bazel_tools/tools/genrule/genrule-setup.sh; ...
 ```
 
-And that's it! Your Bazel builds will now be passed to the buildbox server. You'll need to make sure that your toolchains work with the server's environment, but once you've done that, it should "just work".
+## Configuration
 
-You can use the `buildbox` binary as a client to adminster the server. If the service is running on `:50051`, it will work by default, but you can pass the address in explicitly using `--addr`.
+Settings come from built-in defaults, then an optional config file, then
+command-line flags, each overriding the last. `buildbox config` prints the
+result.
 
+The config file is `$XDG_CONFIG_HOME/buildbox/config.toml` (usually
+`~/.config/buildbox/config.toml`) if it exists, or the file given with
+`--config`. Every setting is optional:
+
+```toml
+# The address to listen on.
+listen = "[::1]:50051"
+
+# Holds the CAS, action cache and sandboxes, unless they're set individually.
+# Defaults to $XDG_CACHE_HOME/buildbox, usually ~/.cache/buildbox.
+root = "~/.cache/buildbox"
+
+# Where blobs, action results and running actions live.
+cas_dir = "~/.cache/buildbox/cas"
+action_cache_dir = "~/.cache/buildbox/ac"
+sandbox_dir = "~/.cache/buildbox/sandbox"
+
+# How many actions may run at once. Defaults to the number of CPUs.
+max_concurrent_actions = 48
+
+# Keep each action's directory after it finishes, for debugging.
+keep_sandboxes = false
 ```
-> buildbox blobs
-NAME
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-cd4d9df7f4e22659e33bb204fc1a7cd8577df7bfcc046bdb61fc704187f4abdc
-e5be7e5560520731e1e8f57d1e6447cfcb5c8656e7c26fc630c99caa62de1177
-...
-```
+
+`~` is your home directory, and relative paths are relative to the config file.
+Each setting has a matching flag, e.g. `buildbox up --root /data/buildbox -j 16`;
+see `buildbox up --help`.
+
+Keep `cas_dir` and `sandbox_dir` on the same filesystem, so inputs can be hard
+linked into sandboxes rather than copied.
+
+## How it works
+
+Buildbox implements the parts of REAPI v2 that Bazel uses: the
+ContentAddressableStorage, ByteStream, ActionCache, Execution and Capabilities
+services.
+
+**Storage.** Each blob is a read-only file named after its SHA-256 hash, under
+`<cas_dir>/blobs`. Uploads are written to a temporary file, checked against
+their expected digest, and renamed into place, so a partial or corrupt upload
+is never visible. Each action result is a file named after the action's hash,
+under `<action_cache_dir>/entries`. Cached results are only returned while
+every output they refer to is still in the CAS.
+
+**Execution.** To run an action, buildbox makes a fresh directory under
+`<sandbox_dir>`, hard links the action's inputs into it from the CAS, and runs
+the command there with exactly the environment the action specifies. The
+command runs in its own process group, so on exit, timeout or cancellation
+everything it started is killed. Outputs are stored in the CAS, and results
+of successful actions are cached. Up to `max_concurrent_actions` run at once;
+the rest queue.
+
+Actions run on the host with your user's permissions and can see everything on
+it. Inputs are hard linked and read-only, so an action that changes an input's
+permissions or contents in place changes the stored blob too.
+
+**Code layout.** All Rust code is under `buildbox/`, one Bazel package per
+component, with interfaces and implementations as separate targets:
+
+| Package | Contents |
+|---|---|
+| `buildbox/cli` | The `buildbox` command. |
+| `buildbox/server` | Wires the stores, executor and services together. |
+| `buildbox/config` | Layered configuration. |
+| `buildbox/reapi` | The REAPI gRPC services. |
+| `buildbox/admin` | The admin API (`buildbox.admin.v1`) the CLI talks to. |
+| `buildbox/cas` | The `Cas` trait, plus filesystem and in-memory stores. |
+| `buildbox/actioncache` | The `ActionCache` trait, plus filesystem and in-memory stores. |
+| `buildbox/executor` | The `Executor` trait, and the local executor. |
+| `buildbox/scheduler` | Limits and tracks running actions. |
+| `buildbox/fsutil` | Filesystem helpers. |
+
+`bazel/` holds Bazel definitions (toolchains, the version number), and
+`third_party/` holds the external dependencies, one `*.MODULE.bazel` file
+each, included from `MODULE.bazel`.
+
+## Limitations
+
+* Nothing is ever deleted from the CAS or action cache.
+* Only REAPI v2.0 is supported: no `output_paths`, compression, or Remote Asset
+  API.
+* Actions aren't isolated from the host or each other.
+* One machine only.
 
 ## Development
+
+```
+bazel build //...
+bazel test //...
+```
+
+Warnings are errors. See [AGENTS.md](AGENTS.md) for the engineering
+guidelines.
 
 ### Rust Analyzer
 
