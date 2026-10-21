@@ -135,29 +135,11 @@ e5be7e5560520731e1e8f57d1e6447cfcb5c8656e7c26fc630c99caa62de1177
 
 ### Rust Analyzer
 
-Because this repository is built with Bazel, rust analyzer cannot index it
-without some help. We need to provide it with the `rust-project.json` file,
-which we can do using the following utility script:
+Because this repository is built with Bazel, rust-analyzer needs a generated
+`rust-project.json` to index it. Generate it with:
 
 ```
-./tools/regen_rust_project.sh
+bazel run @rules_rust//tools/rust_analyzer:gen_rust_project -- //buildbox/...
 ```
 
-Which, under the hood, runs:
-
-```
-RUST_LOG=trace bazel run @rules_rust//tools/rust_analyzer:gen_rust_project -- //buildbox/...
-```
-
-Note the `//buildbox/...` part of the query is needed so that the
-`gen_rust_project` script only picks up dependencies from `//buildbox`. Without
-it, the command will crawl all directories, and break when it gets to
-`//third_party` because it will encounter `BUILD.bazel` files who have labels
-that are relative to the third-party module, not the repository root.
-
-Also potentially helpful:
-
-```
-bazel build //buildbox --aspects @rules_rust//rust:defs.bzl%rust_analyzer_aspect --output_groups=rust_analyzer_crate_spec,rust_generated_srcs
-bazel aquery --include_aspects --include_artifacts --aspects @rules_rust//rust:defs.bzl%rust_analyzer_aspect --output_groups=rust_analyzer_crate_spec 'outputs(".*\.rust_analyzer_crate_spec\.json", deps(//server))' --output=jsonproto
-```
+Re-run it after adding or removing targets or dependencies.
