@@ -8,7 +8,7 @@ use proto::bazel::exec::ContentAddressableStorageServer;
 use proto::bazel::exec::ExecutionServer;
 use proto::buildbox::BuildboxServer;
 use proto::google::bytestream::ByteStreamServer;
-use storage::file::FileStore;
+use cas::fs::FileStore;
 use tonic::transport::Server;
 
 pub async fn launch(config: &Config) -> Result<()> {

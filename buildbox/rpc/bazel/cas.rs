@@ -4,7 +4,7 @@ use proto::bazel::exec::{
     BatchUpdateBlobsResponse, ContentAddressableStorage, FindMissingBlobsRequest,
     FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
 };
-use storage::Store;
+use cas::Store;
 use tonic::{Request, Response, Status};
 
 /// The CAS (content-addressable storage) is used to store the inputs to and

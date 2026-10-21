@@ -23,7 +23,7 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use storage::{Store, ProtoStoreExt};
+use cas::{Store, ProtoStoreExt};
 
 #[derive(Debug)]
 pub struct ExecutionService<S, E> {

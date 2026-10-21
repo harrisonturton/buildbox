@@ -9,7 +9,7 @@ use std::ops::Drop;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use storage::{Store, ProtoStoreExt};
+use cas::{Store, ProtoStoreExt};
 
 /// Executes build actions within local directories.
 ///

@@ -3,7 +3,7 @@ pub use proto::bazel::exec::{
     Action, ActionCache, ActionResult, Command, Digest, GetActionResultRequest, OutputFile,
     UpdateActionResultRequest,
 };
-use storage::Store;
+use cas::Store;
 use tonic::{Request, Response, Status};
 
 #[derive(Debug)]

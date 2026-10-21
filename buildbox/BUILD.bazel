@@ -8,7 +8,7 @@ rust_binary(
         "//buildbox/executor",
         "//buildbox/proto",
         "//buildbox/rpc",
-        "//buildbox/storage",
+        "//buildbox/cas",
         "@crates//:clap",
         "@crates//:tokio",
         "@crates//:tonic",

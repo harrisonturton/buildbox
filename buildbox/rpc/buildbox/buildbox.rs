@@ -3,7 +3,7 @@ use executor::{Executor, SandboxHandle};
 use proto::buildbox::{
     Buildbox, FindBlobsRequest, FindBlobsResponse, FindSandboxesRequest, FindSandboxesResponse,
 };
-use storage::Store;
+use cas::Store;
 use tonic::{Request, Response, Status};
 
 #[derive(Debug)]

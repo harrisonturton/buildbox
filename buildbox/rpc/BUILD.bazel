@@ -9,7 +9,7 @@ rust_library(
         "//buildbox/common",
         "//buildbox/executor",
         "//buildbox/proto",
-        "//buildbox/storage",
+        "//buildbox/cas",
         "@crates//:bytes",
         "@crates//:data-encoding",
         "@crates//:prost",

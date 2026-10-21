@@ -1,8 +1,15 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
-    name = "storage",
-    srcs = glob(["**/*.rs"]),
+    name = "cas",
+    srcs = [
+        "fs.rs",
+        "lib.rs",
+        "mem.rs",
+        "proto.rs",
+        "store.rs",
+        "tee.rs",
+    ],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         "//buildbox/common",
@@ -14,6 +21,6 @@ rust_library(
 )
 
 rust_test(
-    name = "unit_tests",
-    crate = ":storage",
+    name = "cas_test",
+    crate = ":cas",
 )

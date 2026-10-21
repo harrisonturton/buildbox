@@ -7,7 +7,7 @@ rust_library(
     deps = [
         "//buildbox/common",
         "//buildbox/proto",
-        "//buildbox/storage",
+        "//buildbox/cas",
         "@crates//:tracing",
     ],
 )
