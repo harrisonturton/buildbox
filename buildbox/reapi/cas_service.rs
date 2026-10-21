@@ -4,9 +4,10 @@
 use crate::status;
 use crate::ResponseStream;
 use cas::{Cas, Digest};
-use proto::bazel::exec::{
+use remote_execution_proto::build::bazel::remote::execution::v2::content_addressable_storage_server::ContentAddressableStorage;
+use remote_execution_proto::build::bazel::remote::execution::v2::{
     BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest, BatchUpdateBlobsResponse,
-    ContentAddressableStorage, FindMissingBlobsRequest, FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
+    FindMissingBlobsRequest, FindMissingBlobsResponse, GetTreeRequest, GetTreeResponse,
 };
 use std::sync::Arc;
 use tonic::{Request, Response, Status};

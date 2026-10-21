@@ -3,9 +3,9 @@
 
 use crate::status;
 use cas::{BlobReader, BlobWriter, Cas, CasError, Digest};
-use proto::google::bytestream::{
-    ByteStream, QueryWriteStatusRequest, QueryWriteStatusResponse, ReadRequest, ReadResponse, WriteRequest,
-    WriteResponse,
+use bytestream_proto::google::bytestream::byte_stream_server::ByteStream;
+use bytestream_proto::google::bytestream::{
+    QueryWriteStatusRequest, QueryWriteStatusResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse,
 };
 use std::str::FromStr;
 use std::sync::Arc;

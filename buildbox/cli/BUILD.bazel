@@ -7,7 +7,7 @@ rust_binary(
     deps = [
         "//buildbox/common",
         "//buildbox/executor",
-        "//buildbox/proto",
+        "//buildbox/admin:admin_rust_proto",
         "//buildbox/server",
         "//buildbox/cas",
         "@crates//:clap",

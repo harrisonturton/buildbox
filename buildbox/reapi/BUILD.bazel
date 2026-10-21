@@ -15,7 +15,12 @@ rust_library(
     deps = [
         "//buildbox/cas",
         "//buildbox/executor",
-        "//buildbox/proto",
+        "//third_party/googleapis:any_rust_proto",
+        "//third_party/googleapis:bytestream_rust_proto",
+        "//third_party/googleapis:operations_rust_proto",
+        "//third_party/googleapis:status_rust_proto",
+        "//third_party/remoteapis:remote_execution_rust_proto",
+        "//third_party/remoteapis:semver_rust_proto",
         "@crates//:prost",
         "@crates//:tokio",
         "@crates//:tokio-stream",

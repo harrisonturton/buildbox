@@ -1,6 +1,7 @@
 //! The ActionCache service: looking up and recording action results.
 
-use proto::bazel::exec::{ActionCache, ActionResult, GetActionResultRequest, UpdateActionResultRequest};
+use remote_execution_proto::build::bazel::remote::execution::v2::action_cache_server::ActionCache;
+use remote_execution_proto::build::bazel::remote::execution::v2::{ActionResult, GetActionResultRequest, UpdateActionResultRequest};
 use tonic::{Request, Response, Status};
 
 #[derive(Debug, Default)]

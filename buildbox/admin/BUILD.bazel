@@ -10,7 +10,10 @@ proto_library(
 rust_prost_library(
     name = "admin_rust_proto",
     proto = ":admin_proto",
-    visibility = ["//buildbox/proto:__pkg__"],
+    visibility = [
+        "//buildbox/cli:__pkg__",
+        "//buildbox/server:__pkg__",
+    ],
 )
 
 rust_library(
@@ -18,7 +21,7 @@ rust_library(
     srcs = ["admin_service.rs"],
     visibility = ["//buildbox/server:__pkg__"],
     deps = [
-        "//buildbox/proto",
+        ":admin_rust_proto",
         "@crates//:tonic",
     ],
 )

@@ -1,7 +1,8 @@
 use clap::{Args, Parser, Subcommand};
 use common::{Error, Result};
 use server::config::Config;
-use proto::buildbox::{BuildboxClient, FindSandboxesRequest, FindBlobsRequest};
+use admin_proto::buildbox::buildbox_client::BuildboxClient;
+use admin_proto::buildbox::{FindBlobsRequest, FindSandboxesRequest};
 use std::process::ExitCode;
 use std::{path::PathBuf, str::FromStr};
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, layer::SubscriberExt};

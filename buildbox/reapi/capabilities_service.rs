@@ -1,8 +1,9 @@
-use proto::bazel::exec::{
-    digest_function, ActionCacheUpdateCapabilities, CacheCapabilities, Capabilities,
-    ExecutionCapabilities, GetCapabilitiesRequest, ServerCapabilities,
+use remote_execution_proto::build::bazel::remote::execution::v2::capabilities_server::Capabilities;
+use remote_execution_proto::build::bazel::remote::execution::v2::{
+    digest_function, ActionCacheUpdateCapabilities, CacheCapabilities, ExecutionCapabilities, GetCapabilitiesRequest,
+    ServerCapabilities,
 };
-use proto::bazel::semver::SemVer;
+use semver_proto::build::bazel::semver::SemVer;
 use tonic::{Request, Response, Status};
 
 #[derive(Default, Debug)]

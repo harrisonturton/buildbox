@@ -1,4 +1,5 @@
-use proto::buildbox::{Buildbox, FindBlobsRequest, FindBlobsResponse, FindSandboxesRequest, FindSandboxesResponse};
+use admin_proto::buildbox::buildbox_server::Buildbox;
+use admin_proto::buildbox::{FindBlobsRequest, FindBlobsResponse, FindSandboxesRequest, FindSandboxesResponse};
 use tonic::{Request, Response, Status};
 
 #[derive(Debug, Default)]
