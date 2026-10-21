@@ -2,12 +2,16 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 
 rust_library(
     name = "executor",
-    srcs = glob(["**/*.rs"]),
+    srcs = [
+        "executor.rs",
+        "lib.rs",
+        "local.rs",
+    ],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
+        "//buildbox/cas",
         "//buildbox/common",
         "//buildbox/proto",
-        "//buildbox/cas",
         "@crates//:tracing",
     ],
 )

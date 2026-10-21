@@ -2,16 +2,16 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 
 rust_library(
     name = "common",
-    srcs = glob(["**/*.rs"]),
+    srcs = [
+        "error.rs",
+        "hash.rs",
+        "lib.rs",
+        "rand.rs",
+    ],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
-        "@crates//:base64",
         "@crates//:data-encoding",
         "@crates//:rand",
         "@crates//:ring",
-        "@crates//:serde",
-        "@crates//:toml",
-        "@crates//:shellexpand",
-        "@crates//:tracing",
     ],
 )

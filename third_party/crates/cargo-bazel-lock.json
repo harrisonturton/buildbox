@@ -4,7 +4,7 @@
     "protoc-gen-prost 0.4.0",
     "protoc-gen-tonic 0.4.1"
   ],
-  "checksum": "d233701ec63e545d977149b10fc055e34418a43fbc8863bf449647ecab318b06",
+  "checksum": "990cdcefa7684a34228de5a6abb68354074712f878ae0ebf98f45160b4537407",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -1206,10 +1206,6 @@
     "direct-cargo-bazel-deps 0.0.1": {
       "common_attrs": {
         "deps": [
-          {
-            "id": "base64 0.22.1",
-            "target": "base64"
-          },
           {
             "id": "bytes 1.12.1",
             "target": "bytes"
@@ -5098,220 +5094,6 @@
       ],
       "version": "1.1.5"
     },
-    "rustls 0.23.46": {
-      "build_script_attrs": {
-        "link_deps": [
-          {
-            "id": "ring 0.17.14",
-            "target": "ring"
-          }
-        ]
-      },
-      "common_attrs": {
-        "crate_features": [
-          "log",
-          "logging",
-          "ring",
-          "std",
-          "tls12"
-        ],
-        "deps": [
-          {
-            "id": "log 0.4.34",
-            "target": "log"
-          },
-          {
-            "id": "once_cell 1.21.4",
-            "target": "once_cell"
-          },
-          {
-            "id": "ring 0.17.14",
-            "target": "ring"
-          },
-          {
-            "alias": "pki_types",
-            "id": "rustls-pki-types 1.15.1",
-            "target": "rustls_pki_types"
-          },
-          {
-            "id": "rustls-webpki 0.103.16",
-            "target": "webpki"
-          },
-          {
-            "id": "subtle 2.6.1",
-            "target": "subtle"
-          },
-          {
-            "id": "zeroize 1.9.1",
-            "target": "zeroize"
-          }
-        ],
-        "edition": "2021",
-        "extra_deps": [
-          ":build_script_build"
-        ]
-      },
-      "library_target_name": "rustls",
-      "license": "Apache-2.0 OR ISC OR MIT",
-      "license_file": "LICENSE-APACHE",
-      "license_ids": [
-        "Apache-2.0",
-        "ISC",
-        "MIT"
-      ],
-      "name": "rustls",
-      "package_url": "https://github.com/rustls/rustls",
-      "repository": {
-        "Http": {
-          "sha256": "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf",
-          "url": "https://static.crates.io/crates/rustls/0.23.46/download"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "rustls",
-            "crate_root": "src/lib.rs"
-          }
-        },
-        {
-          "BuildScript": {
-            "crate_name": "build_script_build",
-            "crate_root": "build.rs"
-          }
-        }
-      ],
-      "version": "0.23.46"
-    },
-    "rustls-pemfile 2.2.0": {
-      "common_attrs": {
-        "crate_features": [
-          "default",
-          "std"
-        ],
-        "deps": [
-          {
-            "alias": "pki_types",
-            "id": "rustls-pki-types 1.15.1",
-            "target": "rustls_pki_types"
-          }
-        ],
-        "edition": "2018"
-      },
-      "library_target_name": "rustls_pemfile",
-      "license": "Apache-2.0 OR ISC OR MIT",
-      "license_file": "LICENSE",
-      "license_ids": [
-        "Apache-2.0",
-        "ISC",
-        "MIT"
-      ],
-      "name": "rustls-pemfile",
-      "package_url": "https://github.com/rustls/pemfile",
-      "repository": {
-        "Http": {
-          "sha256": "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50",
-          "url": "https://static.crates.io/crates/rustls-pemfile/2.2.0/download"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "rustls_pemfile",
-            "crate_root": "src/lib.rs"
-          }
-        }
-      ],
-      "version": "2.2.0"
-    },
-    "rustls-pki-types 1.15.1": {
-      "common_attrs": {
-        "crate_features": [
-          "alloc",
-          "default",
-          "std"
-        ],
-        "deps": [
-          {
-            "id": "zeroize 1.9.1",
-            "target": "zeroize"
-          }
-        ],
-        "edition": "2021"
-      },
-      "library_target_name": "rustls_pki_types",
-      "license": "MIT OR Apache-2.0",
-      "license_file": "LICENSE-APACHE",
-      "license_ids": [
-        "Apache-2.0",
-        "MIT"
-      ],
-      "name": "rustls-pki-types",
-      "package_url": "https://github.com/rustls/pki-types",
-      "repository": {
-        "Http": {
-          "sha256": "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96",
-          "url": "https://static.crates.io/crates/rustls-pki-types/1.15.1/download"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "rustls_pki_types",
-            "crate_root": "src/lib.rs"
-          }
-        }
-      ],
-      "version": "1.15.1"
-    },
-    "rustls-webpki 0.103.16": {
-      "common_attrs": {
-        "crate_features": [
-          "alloc",
-          "ring",
-          "std"
-        ],
-        "deps": [
-          {
-            "id": "ring 0.17.14",
-            "target": "ring"
-          },
-          {
-            "alias": "pki_types",
-            "id": "rustls-pki-types 1.15.1",
-            "target": "rustls_pki_types"
-          },
-          {
-            "id": "untrusted 0.9.0",
-            "target": "untrusted"
-          }
-        ],
-        "edition": "2021"
-      },
-      "library_target_name": "webpki",
-      "license": "ISC",
-      "license_file": "LICENSE",
-      "license_ids": [
-        "ISC"
-      ],
-      "name": "rustls-webpki",
-      "package_url": "https://github.com/rustls/webpki",
-      "repository": {
-        "Http": {
-          "sha256": "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281",
-          "url": "https://static.crates.io/crates/rustls-webpki/0.103.16/download"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "webpki",
-            "crate_root": "src/lib.rs"
-          }
-        }
-      ],
-      "version": "0.103.16"
-    },
     "rustversion 1.0.23": {
       "build_script_attrs": {},
       "common_attrs": {
@@ -5912,34 +5694,6 @@
         }
       ],
       "version": "0.11.1"
-    },
-    "subtle 2.6.1": {
-      "common_attrs": {
-        "edition": "2018"
-      },
-      "library_target_name": "subtle",
-      "license": "BSD-3-Clause",
-      "license_file": "LICENSE",
-      "license_ids": [
-        "BSD-3-Clause"
-      ],
-      "name": "subtle",
-      "package_url": "https://github.com/dalek-cryptography/subtle",
-      "repository": {
-        "Http": {
-          "sha256": "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292",
-          "url": "https://static.crates.io/crates/subtle/2.6.1/download"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "subtle",
-            "crate_root": "src/lib.rs"
-          }
-        }
-      ],
-      "version": "2.6.1"
     },
     "syn 2.0.119": {
       "common_attrs": {
@@ -6603,50 +6357,6 @@
       ],
       "version": "2.7.2"
     },
-    "tokio-rustls 0.26.6": {
-      "common_attrs": {
-        "crate_features": [
-          "logging",
-          "ring",
-          "tls12"
-        ],
-        "deps": [
-          {
-            "id": "rustls 0.23.46",
-            "target": "rustls"
-          },
-          {
-            "id": "tokio 1.54.0",
-            "target": "tokio"
-          }
-        ],
-        "edition": "2021"
-      },
-      "library_target_name": "tokio_rustls",
-      "license": "MIT OR Apache-2.0",
-      "license_file": "LICENSE-APACHE",
-      "license_ids": [
-        "Apache-2.0",
-        "MIT"
-      ],
-      "name": "tokio-rustls",
-      "package_url": "https://github.com/rustls/tokio-rustls",
-      "repository": {
-        "Http": {
-          "sha256": "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db",
-          "url": "https://static.crates.io/crates/tokio-rustls/0.26.6/download"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "tokio_rustls",
-            "crate_root": "src/lib.rs"
-          }
-        }
-      ],
-      "version": "0.26.6"
-    },
     "tokio-stream 0.1.19": {
       "common_attrs": {
         "crate_features": [
@@ -6982,7 +6692,6 @@
           "prost",
           "router",
           "server",
-          "tls",
           "transport"
         ],
         "deps": [
@@ -7043,20 +6752,12 @@
             "target": "prost"
           },
           {
-            "id": "rustls-pemfile 2.2.0",
-            "target": "rustls_pemfile"
-          },
-          {
             "id": "socket2 0.5.10",
             "target": "socket2"
           },
           {
             "id": "tokio 1.54.0",
             "target": "tokio"
-          },
-          {
-            "id": "tokio-rustls 0.26.6",
-            "target": "tokio_rustls"
           },
           {
             "id": "tokio-stream 0.1.19",
@@ -8608,44 +8309,10 @@
         }
       ],
       "version": "0.8.63"
-    },
-    "zeroize 1.9.1": {
-      "common_attrs": {
-        "crate_features": [
-          "alloc",
-          "default"
-        ],
-        "edition": "2024"
-      },
-      "library_target_name": "zeroize",
-      "license": "Apache-2.0 OR MIT",
-      "license_file": "LICENSE-APACHE",
-      "license_ids": [
-        "Apache-2.0",
-        "MIT"
-      ],
-      "name": "zeroize",
-      "package_url": "https://github.com/RustCrypto/utils",
-      "repository": {
-        "Http": {
-          "sha256": "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879",
-          "url": "https://static.crates.io/crates/zeroize/1.9.1/download"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "zeroize",
-            "crate_root": "src/lib.rs"
-          }
-        }
-      ],
-      "version": "1.9.1"
     }
   },
   "direct_deps": [
     "async-trait 0.1.92",
-    "base64 0.22.1",
     "bytes 1.12.1",
     "clap 4.6.7",
     "data-encoding 2.11.1",
