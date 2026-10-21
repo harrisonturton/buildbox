@@ -21,6 +21,7 @@ rust_library(
         "//third_party/googleapis:bytestream_rust_proto",
         "//third_party/remoteapis:remote_execution_rust_proto",
         "//buildbox/reapi",
+        "//buildbox/scheduler",
         "@crates//:serde",
         "@crates//:shellexpand",
         "@crates//:toml",

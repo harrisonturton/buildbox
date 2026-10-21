@@ -1,0 +1,22 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "scheduler",
+    srcs = ["scheduler.rs"],
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = [
+        "//buildbox/admin:__pkg__",
+        "//buildbox/server:__pkg__",
+    ],
+    deps = [
+        "//buildbox/cas",
+        "//buildbox/executor",
+        "//third_party/remoteapis:remote_execution_rust_proto",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "scheduler_test",
+    crate = ":scheduler",
+)

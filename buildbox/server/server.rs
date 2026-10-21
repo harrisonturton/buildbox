@@ -15,6 +15,7 @@ use remote_execution_proto::build::bazel::remote::execution::v2::capabilities_se
 use remote_execution_proto::build::bazel::remote::execution::v2::content_addressable_storage_server::ContentAddressableStorageServer;
 use remote_execution_proto::build::bazel::remote::execution::v2::execution_server::ExecutionServer;
 use reapi::MAX_MESSAGE_SIZE_BYTES;
+use scheduler::Scheduler;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tonic::transport::Server;
@@ -33,11 +34,14 @@ pub async fn launch(config: &Config) -> Result<()> {
     let action_cache: Arc<dyn ActionCache> =
         Arc::new(FsActionCache::open(&action_cache_dir).await.map_err(Error::boxed)?);
 
-    let executor: Arc<dyn Executor> = Arc::new(LocalExecutor::new(
+    let local_executor: Arc<dyn Executor> = Arc::new(LocalExecutor::new(
         cas.clone(),
         PathBuf::from(&config.sandbox_dir),
         config.retain_sandboxes,
     ));
+    let max_concurrent_actions = std::thread::available_parallelism().map_or(1, |n| n.get());
+    tracing::info!("Running up to {max_concurrent_actions} actions at once");
+    let executor = Arc::new(Scheduler::new(local_executor, max_concurrent_actions));
 
     let execution_service = reapi::ExecutionService::new(cas.clone(), action_cache.clone(), executor);
     let action_cache_service = reapi::ActionCacheService::new(cas.clone(), action_cache);
