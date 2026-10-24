@@ -1,0 +1,42 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "execution",
+    srcs = [
+        "action_key.rs",
+        "backend.rs",
+        "digest.rs",
+        "execution.rs",
+        "inputs.rs",
+        "materialize.rs",
+        "source.rs",
+        "spawn.rs",
+    ],
+    crate_name = "bazel_execution",
+    crate_root = "execution.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/actioncache",
+        "//buildbox/bazel/analysis",
+        "//buildbox/bazel/fs",
+        "//buildbox/bazel/loading",
+        "//buildbox/cas",
+        "//buildbox/executor",
+        "//buildbox/intern",
+        "//buildbox/skycodec",
+        "//buildbox/skyframe",
+        "//third_party/remoteapis:remote_execution_rust_connect",
+        "@crates//:buffa",
+        "@crates//:data-encoding",
+        "@crates//:futures",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "execution_test",
+    crate = ":execution",
+)
