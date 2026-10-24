@@ -127,6 +127,18 @@ fn build_identity() -> Fingerprint {
     fingerprinter.finish()
 }
 
+/// Page every analyzed target's providers out of memory, while the server
+/// is idle. They're read back when next used.
+fn page_out_analysis(engine: &Engine) {
+    let started = std::time::Instant::now();
+    let targets = engine.live_values::<bazel_analysis::ConfiguredTargetKey>();
+    match bazel_analysis::paging::page_out(targets.iter().map(|target| target.paged_value())) {
+        Ok(0) => {}
+        Ok(paged) => tracing::info!("paged {paged} analyzed targets out of memory in {:?}", started.elapsed()),
+        Err(error) => tracing::warn!("couldn't page analysis out of memory: {error:#}"),
+    }
+}
+
 /// Save the engine, logging what was saved.
 fn checkpoint(engine: &Engine) {
     let started = std::time::Instant::now();
@@ -158,6 +170,9 @@ fn engine_config() -> EngineConfig {
 impl BazelServer {
     pub fn new(config: ServerConfig) -> BazelServer {
         let engine = open_engine(&config.bazel_dir.join("engine"));
+        if let Err(error) = bazel_analysis::paging::set_up(&config.bazel_dir.join("paging")) {
+            tracing::warn!("analysis won't be paged out of memory: {error}");
+        }
         bazel_analysis::cc::register();
         let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), Some(BAZEL_VERSION));
         match &bazel_tools {
@@ -214,6 +229,7 @@ impl BazelServer {
             saved.save();
             if let Some(engine) = engine {
                 checkpoint(&engine);
+                page_out_analysis(&engine);
             }
             memory::release_free_memory();
         });
