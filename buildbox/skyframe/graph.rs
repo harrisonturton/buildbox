@@ -306,7 +306,7 @@ impl GraphInner {
             self.break_cycle(path, &broken);
         }
         if started {
-            tokio::spawn(self.clone().evaluate(key, revision, in_flight.clone()));
+            tokio::spawn(self.clone().evaluate(key, revision, in_flight.clone()).in_current_span());
         }
         let outcome = in_flight.wait().await;
         if let Some(requester) = requester {
