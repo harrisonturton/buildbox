@@ -8,7 +8,6 @@ mod client;
 mod config_args;
 mod format;
 mod image_layout;
-mod show_config;
 mod status;
 mod up;
 
@@ -18,7 +17,8 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 use std::time::Duration;
 
-/// A Bazel remote execution server for running builds on this machine.
+/// bb's own commands. Every other command line is run as Bazel would run
+/// it, so these only take names Bazel doesn't use.
 #[derive(Parser)]
 #[command(name = "bb", version)]
 struct Cli {
@@ -30,9 +30,6 @@ struct Cli {
 enum Command {
     /// Run the server.
     Up(up::UpArgs),
-
-    /// Print the configuration the server would use.
-    Config(show_config::ShowConfigArgs),
 
     /// Summarise a running server's storage and load.
     Status(status::StatusArgs),
@@ -68,7 +65,7 @@ fn main() -> ExitCode {
         return container_namespaces::helper_main(&args[2..]);
     }
 
-    if bazel::is_bazel_command(&args[0], &args[1..]) {
+    if bazel::is_bazel_command(&args[1..]) {
         return run_bazel(args[1..].to_vec());
     }
 
@@ -131,7 +128,6 @@ fn run_bazel(args: Vec<OsString>) -> ExitCode {
 async fn run(command: Command) -> Result<(), Box<dyn Error>> {
     match command {
         Command::Up(args) => up::run(args).await,
-        Command::Config(args) => show_config::run(args),
         Command::Status(args) => status::run(args).await,
         Command::Actions(args) => actions::run(args).await,
         Command::Artifacts(args) => artifacts::run(args).await,

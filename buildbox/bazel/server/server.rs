@@ -9,6 +9,7 @@
 mod build;
 mod command;
 mod commands;
+mod help;
 mod memory;
 mod output;
 mod repos;

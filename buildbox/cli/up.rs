@@ -9,9 +9,18 @@ use telemetry::Telemetry;
 pub struct UpArgs {
     #[command(flatten)]
     config: ConfigArgs,
+
+    /// Print the configuration the server would use, instead of running it.
+    #[arg(long)]
+    print_config: bool,
 }
 
 pub async fn run(args: UpArgs) -> Result<(), Box<dyn Error>> {
+    if args.print_config {
+        let config = args.config.load()?;
+        print!("{}", toml::to_string(&config)?);
+        return Ok(());
+    }
     #[cfg(feature = "dhat-heap")]
     let _profiler = write_profile_on_signal(dhat::Profiler::new_heap());
     #[cfg(feature = "dhat-heap")]

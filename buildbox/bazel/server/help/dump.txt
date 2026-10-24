@@ -1,0 +1,3 @@
+Usage: bazel dump <options>
+
+Dumps the internal state of the bazel server process.

@@ -1,0 +1,7 @@
+Usage: bazel clean [<option> ...]
+
+Removes bazel-created output, including all object files, and bazel
+metadata.
+
+If '--expunge' is specified, the entire working tree will be removed
+and the server stopped.

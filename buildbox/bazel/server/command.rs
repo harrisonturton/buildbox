@@ -63,21 +63,21 @@ pub async fn run(server: &BazelServer, invocation: Invocation, out: &Output) -> 
 async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output) -> i32 {
     let (startup, rest) = split_startup_options(&invocation.args);
     let Some((command, args)) = rest.split_first() else {
-        out.stdout(&help_text()).await;
+        out.stdout(&crate::help::index()).await;
         return exit::SUCCESS;
     };
 
     match command.as_str() {
         "version" => return crate::commands::version(args, out).await,
-        "help" => {
-            out.stdout(&help_text()).await;
-            return exit::SUCCESS;
-        }
+        "help" | "-h" | "-help" | "--help" => return crate::help::help(args, out).await,
         "license" => {
             out.stdout("bb is licensed under the Apache License 2.0.\n").await;
             return exit::SUCCESS;
         }
         _ => {}
+    }
+    if !crate::help::is_supported(command) {
+        return unsupported(command, out).await;
     }
 
     let Some(workspace_root) = workspace::find_root(&invocation.working_directory) else {
@@ -113,16 +113,35 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         "build" => crate::build::build(&context, args, out).await,
         "test" => crate::test::test(&context, args, out).await,
         "run" => crate::run::run(&context, args, out).await,
-        "coverage" | "cquery" | "aquery" | "fetch" | "sync" | "mod" | "print_action"
-        | "canonicalize-flags" | "config" | "mobile-install" | "vendor" => {
-            out.error(&format!("'{command}' isn't supported by bb yet")).await;
-            exit::COMMAND_LINE_ERROR
-        }
-        other => {
-            out.error(&format!("Command '{other}' not found. Try 'bazel help'.")).await;
-            exit::COMMAND_LINE_ERROR
-        }
+        other => unsupported(other, out).await,
     }
+}
+
+/// The commands Bazel has that bb doesn't support yet.
+const UNSUPPORTED_COMMANDS: &[&str] = &[
+    "analyze-profile",
+    "aquery",
+    "canonicalize-flags",
+    "config",
+    "coverage",
+    "cquery",
+    "fetch",
+    "mobile-install",
+    "mod",
+    "print_action",
+    "sync",
+    "vendor",
+];
+
+/// Report a command bb can't run: one it doesn't support yet, or one Bazel
+/// doesn't have either.
+async fn unsupported(command: &str, out: &Output) -> i32 {
+    if UNSUPPORTED_COMMANDS.contains(&command) {
+        out.error(&format!("'{command}' isn't supported by bb yet")).await;
+    } else {
+        out.stderr(&format!("Command '{command}' not found. Try 'bazel help'.\n")).await;
+    }
+    exit::COMMAND_LINE_ERROR
 }
 
 /// Separate the startup options, which come before the command, from the
@@ -167,18 +186,4 @@ pub fn working_package(workspace_root: &Path, working_directory: &Path) -> bazel
     let relative = working_directory.strip_prefix(workspace_root).unwrap_or(Path::new(""));
     let path = relative.to_str().and_then(|text| intern::PathId::parse(text).ok()).unwrap_or(intern::PathId::ROOT);
     bazel_label::PackageId::new(bazel_label::RepoName::MAIN, path)
-}
-
-fn help_text() -> String {
-    format!(
-        "Usage: bb <command> <options> ...\n\n\
-         bb runs Bazel commands in a server shared by every workspace on this machine.\n\
-         It behaves like Bazel {BAZEL_VERSION}.\n\n\
-         Available commands:\n  \
-           query     Executes a dependency graph query.\n  \
-           info      Displays runtime info about the bazel server.\n  \
-           version   Prints version information for bazel.\n  \
-           shutdown  Frees the memory this workspace's build graph uses.\n  \
-           clean     Removes output files.\n"
-    )
 }

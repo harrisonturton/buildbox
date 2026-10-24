@@ -22,6 +22,9 @@ message RunRequest {
 
   // Whether the client's stderr is a terminal, for progress output.
   bool interactive = 4;
+
+  // The width of the client's terminal, or 0 if it isn't on one.
+  uint32 terminal_columns = 5;
 }
 
 message EnvironmentVariable {

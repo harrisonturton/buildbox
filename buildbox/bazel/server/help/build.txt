@@ -1,0 +1,6 @@
+Usage: bazel build <options> <targets>
+
+Builds the specified targets, using the options.
+
+See 'bazel help target-syntax' for details and examples on how to
+specify targets to build.

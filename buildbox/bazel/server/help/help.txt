@@ -1,0 +1,4 @@
+Usage: bazel help [<command>]
+
+Prints a help page for the given command, or, if no command is
+specified, prints the index of available commands.

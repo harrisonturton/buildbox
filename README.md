@@ -141,7 +141,7 @@ when it starts.
 ## Configuration
 
 Settings come from built-in defaults, then an optional config file, then
-command-line flags, each overriding the last. `bb config` prints the
+command-line flags, each overriding the last. `bb up --print-config` prints the
 result.
 
 The config file is `$XDG_CONFIG_HOME/buildbox/config.toml` (usually

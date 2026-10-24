@@ -1,7 +1,8 @@
 //! Running Bazel commands in the server, as `bb build`, `bb query` and so on,
 //! or as `bazel ...` when bb is installed under that name.
 
-use bazel_rust_connect::buildbox::bazel::v1::{BazelClient, EnvironmentVariable, Exec, RunRequest, run_response};
+use bazel_rust_connect::buildbox::bazel::v1::{BazelClient, EnvironmentVariable, Exec, RunRequest, RunResponse, run_response};
+use bazel_server::BAZEL_VERSION;
 use config::{Environment, Settings};
 use connectrpc::client::{ClientConfig, HttpClient};
 use std::error::Error;
@@ -19,23 +20,17 @@ const SERVER_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// not to be running.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// The commands bb has of its own; any other first argument is a Bazel
-/// command.
-const BB_COMMANDS: [&str; 6] = ["up", "config", "status", "actions", "artifacts", "help"];
+/// The commands bb has of its own. Bazel has no commands by these names,
+/// so every other command line is a Bazel one.
+const BB_COMMANDS: [&str; 4] = ["up", "status", "actions", "artifacts"];
+
+/// Bazel's exit code for a command cancelled by an interrupt.
+const INTERRUPTED: u8 = 8;
 
 /// Whether a command line is a Bazel command rather than one of bb's own.
-pub fn is_bazel_command(program: &OsString, args: &[OsString]) -> bool {
-    let invoked_as = std::path::Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or("");
-    if invoked_as == "bazel" || invoked_as == "bazelisk" {
-        return true;
-    }
-    let Some(first) = args.first().and_then(|arg| arg.to_str()) else {
-        return false;
-    };
-    if matches!(first, "-h" | "--help" | "-V" | "--version") {
-        return false;
-    }
-    !BB_COMMANDS.contains(&first)
+pub fn is_bazel_command(args: &[OsString]) -> bool {
+    let first = args.first().and_then(|arg| arg.to_str());
+    !first.is_some_and(|first| BB_COMMANDS.contains(&first))
 }
 
 /// Run a Bazel command line in the server, starting the server if it isn't
@@ -45,6 +40,10 @@ pub async fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
         .into_iter()
         .map(|arg| arg.into_string().map_err(|arg| format!("argument {arg:?} isn't valid UTF-8")))
         .collect::<Result<_, _>>()?;
+    if args == ["--version"] {
+        println!("bazel {BAZEL_VERSION}");
+        return Ok(ExitCode::SUCCESS);
+    }
     let config = config::load(None, Settings::default(), &Environment::from_process())?;
     ensure_server(config.listen).await?;
 
@@ -61,28 +60,44 @@ pub async fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
             })
             .collect(),
         interactive: std::io::stderr().is_terminal(),
+        terminal_columns: terminal_columns().unwrap_or(0),
         ..Default::default()
     };
     let mut stream = client.run(request).await?;
-    let mut stdout = std::io::stdout().lock();
-    let mut stderr = std::io::stderr().lock();
-    while let Some(message) = stream.message().await? {
-        let message = message.to_owned_message();
-        match message.output {
-            Some(run_response::Output::Stdout(bytes)) => stdout.write_all(&bytes)?,
-            Some(run_response::Output::Stderr(bytes)) => stderr.write_all(&bytes)?,
-            Some(run_response::Output::ExitCode(code)) => {
-                stdout.flush()?;
-                return Ok(ExitCode::from(code.clamp(0, 255) as u8));
+    let forward = async {
+        while let Some(message) = stream.message().await? {
+            if let Some(code) = write_output(message.to_owned_message())? {
+                return Ok(code);
             }
-            Some(run_response::Output::Exec(exec)) => {
-                stdout.flush()?;
-                return Err(exec_program(*exec).into());
-            }
-            None => {}
+        }
+        Err("the server closed the connection before the command finished".into())
+    };
+    tokio::select! {
+        result = forward => result,
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\nBazel caught interrupt signal; cancelling pending invocation.\n");
+            Ok(ExitCode::from(INTERRUPTED))
         }
     }
-    Err("the server closed the connection before the command finished".into())
+}
+
+/// Write one message of a command's output to stdout or stderr, returning
+/// the exit code once the command has finished.
+fn write_output(message: RunResponse) -> Result<Option<ExitCode>, Box<dyn Error>> {
+    match message.output {
+        Some(run_response::Output::Stdout(bytes)) => std::io::stdout().write_all(&bytes)?,
+        Some(run_response::Output::Stderr(bytes)) => std::io::stderr().write_all(&bytes)?,
+        Some(run_response::Output::ExitCode(code)) => {
+            std::io::stdout().flush()?;
+            return Ok(Some(ExitCode::from(code.clamp(0, 255) as u8)));
+        }
+        Some(run_response::Output::Exec(exec)) => {
+            std::io::stdout().flush()?;
+            return Err(exec_program(*exec).into());
+        }
+        None => {}
+    }
+    Ok(None)
 }
 
 /// Replace this process with the program `bazel run` built.
@@ -126,6 +141,19 @@ fn loopback(listen: SocketAddr) -> SocketAddr {
         .unwrap_or(listen)
 }
 
+/// The width of the terminal stderr is on, if it is one.
+fn terminal_columns() -> Option<u32> {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ writes only to the winsize it's given.
+    let result = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
+    (result == 0 && size.ws_col > 0).then_some(u32::from(size.ws_col))
+}
+
 /// Run `bb up` detached from this process, logging to the bazel directory.
 fn start_server() -> Result<(), Box<dyn Error>> {
     let config = config::load(None, Settings::default(), &Environment::from_process())?;
@@ -133,7 +161,7 @@ fn start_server() -> Result<(), Box<dyn Error>> {
     let log_path = config.bazel_dir.join("server.log");
     let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
     let program = std::env::current_exe()?;
-    eprintln!("Starting local bb server and connecting to it... (log: {})", log_path.display());
+    eprintln!("Starting local Bazel server ({BAZEL_VERSION}) and connecting to it...");
     let mut command = std::process::Command::new(program);
     command
         .arg("up")
@@ -143,4 +171,23 @@ fn start_server() -> Result<(), Box<dyn Error>> {
         .process_group(0);
     command.spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(text: &str) -> Vec<OsString> {
+        text.split_whitespace().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn only_bb_commands_are_not_bazel_commands() {
+        assert!(!is_bazel_command(&args("up --root /data")));
+        assert!(!is_bazel_command(&args("status")));
+        assert!(is_bazel_command(&args("")));
+        assert!(is_bazel_command(&args("--help")));
+        assert!(is_bazel_command(&args("config")));
+        assert!(is_bazel_command(&args("--bazelrc=x build //...")));
+    }
 }

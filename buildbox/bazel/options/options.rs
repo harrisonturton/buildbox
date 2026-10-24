@@ -9,7 +9,7 @@ pub use rc::{RcFile, RcError, parse_rc_files};
 use std::collections::HashMap;
 
 /// The kind of value an option takes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OptionKind {
     /// `--flag`, `--noflag`, or `--flag=true|false|yes|no|1|0`.
     Bool,
@@ -34,6 +34,13 @@ impl OptionSpec {
 
     pub fn kind(&self, name: &str) -> Option<OptionKind> {
         self.kinds.get(name).copied()
+    }
+
+    /// Every option's name and kind, sorted by name.
+    pub fn options(&self) -> Vec<(&'static str, OptionKind)> {
+        let mut options: Vec<(&'static str, OptionKind)> = self.kinds.iter().map(|(name, kind)| (*name, *kind)).collect();
+        options.sort();
+        options
     }
 }
 

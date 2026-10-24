@@ -1,0 +1,207 @@
+//! `help`: Bazel's help pages, for the commands and options bb supports.
+
+use crate::command::{BAZEL_VERSION, exit};
+use crate::output::Output;
+use bazel_options::{OptionKind, OptionSpec};
+
+/// A Bazel command bb runs, as `help` lists it.
+struct CommandHelp {
+    name: &'static str,
+    summary: &'static str,
+    /// The command's help page, from Bazel.
+    page: &'static str,
+}
+
+/// The Bazel commands bb supports, in the order `help` lists them.
+const COMMANDS: &[CommandHelp] = &[
+    CommandHelp {
+        name: "build",
+        summary: "Builds the specified targets.",
+        page: include_str!("help/build.txt"),
+    },
+    CommandHelp {
+        name: "clean",
+        summary: "Removes output files and optionally stops the server.",
+        page: include_str!("help/clean.txt"),
+    },
+    CommandHelp {
+        name: "dump",
+        summary: "Dumps the internal state of the bazel server process.",
+        page: include_str!("help/dump.txt"),
+    },
+    CommandHelp {
+        name: "help",
+        summary: "Prints help for commands, or the index.",
+        page: include_str!("help/help.txt"),
+    },
+    CommandHelp {
+        name: "info",
+        summary: "Displays runtime info about the bazel server.",
+        page: include_str!("help/info.txt"),
+    },
+    CommandHelp {
+        name: "license",
+        summary: "Prints the license of this software.",
+        page: include_str!("help/license.txt"),
+    },
+    CommandHelp {
+        name: "query",
+        summary: "Executes a dependency graph query.",
+        page: include_str!("help/query.txt"),
+    },
+    CommandHelp {
+        name: "run",
+        summary: "Runs the specified target.",
+        page: include_str!("help/run.txt"),
+    },
+    CommandHelp {
+        name: "shutdown",
+        summary: "Stops the bazel server.",
+        page: include_str!("help/shutdown.txt"),
+    },
+    CommandHelp {
+        name: "test",
+        summary: "Builds and runs the specified test targets.",
+        page: include_str!("help/test.txt"),
+    },
+    CommandHelp {
+        name: "version",
+        summary: "Prints version information for bazel.",
+        page: include_str!("help/version.txt"),
+    },
+];
+
+/// bb's own commands, which the client runs.
+const BB_COMMANDS: &[(&str, &str)] = &[
+    ("actions", "Lists the actions the buildbox server is handling."),
+    ("artifacts", "Manages the buildbox server's artifacts, such as container images."),
+    ("status", "Summarises the buildbox server's storage and load."),
+    ("up", "Runs the buildbox server."),
+];
+
+/// The startup options bb reads, as `help startup_options` lists them.
+const STARTUP_OPTIONS: &[(&str, &str)] = &[
+    ("--bazelrc", "(a string; may be used multiple times)"),
+    ("--[no]ignore_all_rc_files", "(a boolean; default: \"false\")"),
+];
+
+const STARTUP_OPTIONS_PAGE: &str = "\
+Startup options
+===============
+
+These options affect how bazel starts up, or more specifically, how
+the virtual machine hosting bazel starts up, and how the bazel server
+starts up. These options must be specified to the left of the bazel
+command (e.g. 'build'), and they must not contain any space between
+option name and value.
+
+Example:
+  % bazel --host_jvm_args=-Xmx1400m --output_base=/tmp/foo build //base
+";
+
+/// Whether a command is a Bazel command bb supports.
+pub fn is_supported(command: &str) -> bool {
+    COMMANDS.iter().any(|help| help.name == command)
+}
+
+/// `help [topic]`, which Bazel also runs for `-h`, `-help` and `--help`.
+pub async fn help(args: &[String], out: &Output) -> i32 {
+    let topic = args.iter().find(|arg| !arg.starts_with('-'));
+    let Some(topic) = topic else {
+        out.stdout(&index()).await;
+        return exit::SUCCESS;
+    };
+    let page = match topic.as_str() {
+        "startup_options" => Some(startup_options()),
+        "target-syntax" => Some(format!("{}{}", header(), include_str!("help/target-syntax.txt"))),
+        "info-keys" => Some(info_keys()),
+        command => command_page(command),
+    };
+    match page {
+        Some(page) => {
+            out.stdout(&page).await;
+            exit::SUCCESS
+        }
+        None => {
+            out.error(&format!("'{topic}' is not a known command")).await;
+            exit::COMMAND_LINE_ERROR
+        }
+    }
+}
+
+/// The line every help page starts with.
+fn header() -> String {
+    format!("{:>80}\n", format!("[bazel release {BAZEL_VERSION}]"))
+}
+
+/// The list of commands, which `help` prints with no topic.
+pub fn index() -> String {
+    let mut text = header();
+    text.push_str("Usage: bazel <command> <options> ...\n\nAvailable commands:\n");
+    for command in COMMANDS {
+        text.push_str(&format!("  {:<18}  {}\n", command.name, command.summary));
+    }
+    text.push_str("\nBuildbox commands:\n");
+    for (name, summary) in BB_COMMANDS {
+        text.push_str(&format!("  {name:<18}  {summary}\n"));
+    }
+    text.push_str(
+        "\nGetting more help:\n  \
+         bazel help <command>\n                   Prints help and options for <command>.\n  \
+         bazel help startup_options\n                   Options for the JVM hosting bazel.\n  \
+         bazel help target-syntax\n                   Explains the syntax for specifying targets.\n  \
+         bazel help info-keys\n                   Displays a list of keys used by the info command.\n",
+    );
+    text
+}
+
+fn command_page(name: &str) -> Option<String> {
+    let command = COMMANDS.iter().find(|command| command.name == name)?;
+    let mut text = header();
+    text.push_str(command.page);
+    if let Some(spec) = command_options(name) {
+        text.push_str("\nOptions:\n");
+        text.push_str(&option_list(&spec));
+    }
+    Some(text)
+}
+
+/// The options a command's help page lists: those bb reads.
+fn command_options(command: &str) -> Option<OptionSpec> {
+    match command {
+        "build" | "test" | "run" => Some(crate::build::build_spec()),
+        "query" => Some(crate::commands::query_spec()),
+        _ => None,
+    }
+}
+
+fn option_list(spec: &OptionSpec) -> String {
+    let mut text = String::new();
+    for (name, kind) in spec.options() {
+        let line = match kind {
+            OptionKind::Bool => format!("  --[no]{name}\n"),
+            OptionKind::Value => format!("  --{name}\n"),
+            OptionKind::Multi => format!("  --{name} (may be used multiple times)\n"),
+        };
+        text.push_str(&line);
+    }
+    text
+}
+
+fn startup_options() -> String {
+    let mut text = header();
+    text.push_str(STARTUP_OPTIONS_PAGE);
+    text.push_str("\nOptions that appear before the command and are parsed by the client:\n");
+    for (name, kind) in STARTUP_OPTIONS {
+        text.push_str(&format!("  {name} {kind}\n"));
+    }
+    text
+}
+
+fn info_keys() -> String {
+    let mut text = String::new();
+    for (key, description) in crate::commands::INFO_KEYS {
+        text.push_str(&format!("{key:<24}{description}\n"));
+    }
+    text
+}

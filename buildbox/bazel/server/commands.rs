@@ -9,7 +9,11 @@ use bazel_query::{OutputFormat, QueryOptions, QueryRequest};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub async fn version(_args: &[String], out: &Output) -> i32 {
+pub async fn version(args: &[String], out: &Output) -> i32 {
+    if args.iter().any(|arg| arg == "--gnu_format") {
+        out.stdout(&format!("bazel {BAZEL_VERSION}\n")).await;
+        return exit::SUCCESS;
+    }
     out.stdout(&format!(
         "Build label: {BAZEL_VERSION}\nBuild target: bb {}\nBuild time: unknown\nBuild timestamp: 0\nBuild timestamp as int: 0\n",
         env!("CARGO_PKG_VERSION")
@@ -18,7 +22,7 @@ pub async fn version(_args: &[String], out: &Output) -> i32 {
     exit::SUCCESS
 }
 
-fn query_spec() -> OptionSpec {
+pub(crate) fn query_spec() -> OptionSpec {
     use OptionKind::*;
     OptionSpec::new(&[
         ("output", Value),
@@ -146,27 +150,28 @@ pub fn output_base_for(server: &crate::BazelServer, root: &std::path::Path) -> P
     server.config().bazel_dir.join("output_bases").join(digest.to_string())
 }
 
+/// The keys `info` prints, with Bazel's descriptions of them.
+pub const INFO_KEYS: &[(&str, &str)] = &[
+    ("bazel-bin", "Configuration dependent directory for binaries."),
+    ("bazel-genfiles", "Configuration dependent directory for generated files."),
+    ("bazel-testlogs", "Configuration dependent directory for logs from a test run."),
+    ("execution_root", "A directory that makes all input and output files visible to the build."),
+    ("install_base", "The installation base directory."),
+    ("output_base", "A directory for shared bazel state as well as tool and strategy specific subdirectories."),
+    ("output_path", "Output directory"),
+    ("package_path", "The search path for resolving package labels."),
+    ("release", "bazel release identifier"),
+    ("repository_cache", "The location of the repository download cache used"),
+    ("server_pid", "bazel process id"),
+    (
+        "used-heap-size",
+        "The amount of used memory in bytes. Note that this is not a good indicator of the actual memory use, as it includes any remaining inaccessible memory.",
+    ),
+    ("workspace", "The working directory of the server."),
+];
+
 pub async fn info(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {
-    let output_base = output_base(context);
-    let execution_root = output_base.join("execroot/_main");
-    let output_path = execution_root.join("bazel-out");
-    let bin = output_path.join("k8-fastbuild/bin");
-    let engine = context.server.workspaces().engine().stats();
-    let entries: Vec<(&str, String)> = vec![
-        ("bazel-bin", bin.display().to_string()),
-        ("bazel-genfiles", bin.display().to_string()),
-        ("bazel-testlogs", output_path.join("k8-fastbuild/testlogs").display().to_string()),
-        ("execution_root", execution_root.display().to_string()),
-        ("install_base", context.server.config().bazel_dir.join("install").display().to_string()),
-        ("output_base", output_base.display().to_string()),
-        ("output_path", output_path.display().to_string()),
-        ("package_path", "%workspace%".to_string()),
-        ("release", format!("release {BAZEL_VERSION}")),
-        ("repository_cache", context.server.config().bazel_dir.join("repository_cache").display().to_string()),
-        ("server_pid", std::process::id().to_string()),
-        ("used-heap-size", format!("{}MB", (engine.store.stored_bytes + engine.store.entry_bytes) >> 20)),
-        ("workspace", context.workspace_root.display().to_string()),
-    ];
+    let entries = info_values(context);
     let keys: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
     if keys.is_empty() {
         let text: String = entries.iter().map(|(key, value)| format!("{key}: {value}\n")).collect();
@@ -187,6 +192,31 @@ pub async fn info(context: &CommandContext<'_>, args: &[String], out: &Output) -
     }
     out.stdout(&text).await;
     exit::SUCCESS
+}
+
+/// The value of each of [`INFO_KEYS`], in order.
+fn info_values(context: &CommandContext<'_>) -> Vec<(&'static str, String)> {
+    let output_base = output_base(context);
+    let execution_root = output_base.join("execroot/_main");
+    let output_path = execution_root.join("bazel-out");
+    let bin = output_path.join("k8-fastbuild/bin");
+    let bazel_dir = &context.server.config().bazel_dir;
+    let engine = context.server.workspaces().engine().stats();
+    let value = |key: &str| match key {
+        "bazel-bin" | "bazel-genfiles" => bin.display().to_string(),
+        "bazel-testlogs" => output_path.join("k8-fastbuild/testlogs").display().to_string(),
+        "execution_root" => execution_root.display().to_string(),
+        "install_base" => bazel_dir.join("install").display().to_string(),
+        "output_base" => output_base.display().to_string(),
+        "output_path" => output_path.display().to_string(),
+        "package_path" => "%workspace%".to_string(),
+        "release" => format!("release {BAZEL_VERSION}"),
+        "repository_cache" => bazel_dir.join("repository_cache").display().to_string(),
+        "server_pid" => std::process::id().to_string(),
+        "used-heap-size" => format!("{}MB", (engine.store.stored_bytes + engine.store.entry_bytes) >> 20),
+        _ => context.workspace_root.display().to_string(),
+    };
+    INFO_KEYS.iter().map(|(key, _)| (*key, value(key))).collect()
 }
 
 pub async fn shutdown(context: &CommandContext<'_>, out: &Output) -> i32 {
