@@ -29,9 +29,12 @@ pub use workspace::{Workspace, Workspaces, find_root};
 use bazel_bzlmod::{BzlmodConfig, BzlmodRepositories};
 use bazel_execution::{Backend, LocalActionCache, SourceDigests};
 use persist::PersistedMap;
+use skycodec::{Fingerprint, Fingerprinter};
+use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use bazel_loading::{BuiltinsDir, Repositories};
-use skyframe::{Engine, EngineConfig, Globals};
+use skyframe::{Engine, EngineConfig, Globals, Persistence};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -49,7 +52,13 @@ pub struct BazelServer {
     config: ServerConfig,
     workspaces: Workspaces,
     saved: Arc<SavedState>,
+    /// How many commands are running; the engine is saved when none is.
+    running: Arc<AtomicUsize>,
 }
+
+/// Above this many bytes of saved values, the engine keeps only each key's
+/// newest trace when it's saved.
+const MAX_SAVED_ENGINE_BYTES: u64 = 2 << 30;
 
 /// What the server keeps across restarts, besides the CAS and action
 /// cache: small maps that save work, bounded since all of it can be
@@ -84,6 +93,58 @@ impl SavedState {
     }
 }
 
+/// The engine saved in `dir` by this build of bb, or a new one. Opened
+/// before anything else is interned, so the saved ids are free.
+fn open_engine(dir: &Path) -> Engine {
+    let persistence = Persistence {
+        dir: dir.to_path_buf(),
+        version: build_identity(),
+        max_disk_bytes: MAX_SAVED_ENGINE_BYTES,
+    };
+    Engine::open(engine_config(), persistence)
+}
+
+/// Identifies the running build of bb: a fingerprint of its executable's
+/// contents, so a copy of the same build is the same build. About a quarter
+/// of a second for bb's size, once per start.
+fn build_identity() -> Fingerprint {
+    let mut fingerprinter = Fingerprinter::new();
+    fingerprinter.bytes(env!("CARGO_PKG_VERSION").as_bytes());
+    let hashed = std::env::current_exe().and_then(std::fs::File::open).and_then(|mut file| {
+        let mut buffer = vec![0u8; 1 << 20];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                return Ok(());
+            }
+            fingerprinter.bytes(&buffer[..read]);
+        }
+    });
+    if let Err(error) = hashed {
+        tracing::warn!("couldn't read bb's executable, so its saved engine won't be reused: {error}");
+        fingerprinter.u64(std::process::id() as u64);
+    }
+    fingerprinter.finish()
+}
+
+/// Save the engine, logging what was saved.
+fn checkpoint(engine: &Engine) {
+    let started = std::time::Instant::now();
+    match engine.checkpoint() {
+        Ok(Some(stats)) => tracing::info!(
+            "saved {} keys, {} traces and {} values ({} bytes of segments, {} of manifest) in {:?}",
+            stats.keys,
+            stats.traces,
+            stats.values,
+            stats.segment_bytes,
+            stats.manifest_bytes,
+            started.elapsed()
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::warn!("couldn't save the engine: {error}"),
+    }
+}
+
 /// The engine's configuration. `BB_CACHE_MB` sets how many megabytes of
 /// decoded values it keeps, for tuning.
 fn engine_config() -> EngineConfig {
@@ -96,6 +157,7 @@ fn engine_config() -> EngineConfig {
 
 impl BazelServer {
     pub fn new(config: ServerConfig) -> BazelServer {
+        let engine = open_engine(&config.bazel_dir.join("engine"));
         bazel_analysis::cc::register();
         let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), Some(BAZEL_VERSION));
         match &bazel_tools {
@@ -119,11 +181,11 @@ impl BazelServer {
         if let Some(backend) = &config.backend {
             services = services.with(backend.clone());
         }
-        let engine = Engine::new(engine_config());
         BazelServer {
             config,
             workspaces: Workspaces::new(engine, services),
             saved,
+            running: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -143,12 +205,25 @@ impl BazelServer {
     /// Run a command line, writing its output to `out`, and return its exit
     /// code.
     pub async fn run(&self, invocation: Invocation, out: &Output) -> i32 {
+        self.running.fetch_add(1, Ordering::SeqCst);
         let code = command::run(self, invocation, out).await;
+        let idle = self.running.fetch_sub(1, Ordering::SeqCst) == 1;
         let saved = self.saved.clone();
+        let engine = idle.then(|| self.workspaces.engine().clone());
         tokio::task::spawn_blocking(move || {
             saved.save();
+            if let Some(engine) = engine {
+                checkpoint(&engine);
+            }
             memory::release_free_memory();
         });
         code
+    }
+
+    /// Save the engine now, as when the server stops. Blocks on the
+    /// filesystem.
+    pub fn save(&self) {
+        self.saved.save();
+        checkpoint(self.workspaces.engine());
     }
 }

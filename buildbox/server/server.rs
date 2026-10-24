@@ -97,7 +97,7 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
         // profile written then shows what they hold.
         std::mem::forget(bazel_server.clone());
     }
-    let bazel_service = BazelService::new(bazel_server);
+    let bazel_service = BazelService::new(bazel_server.clone());
     let admin_service = AdminService::new(Components {
         cas: cas.clone(),
         cas_location: config.cas_dir.display().to_string(),
@@ -159,6 +159,9 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
         Err(_) => tracing::warn!("requests still running after {SHUTDOWN_GRACE_PERIOD:?}; stopping them"),
     }
 
+    if let Err(error) = tokio::task::spawn_blocking(move || bazel_server.save()).await {
+        tracing::warn!("saving Bazel state failed: {error}");
+    }
     tracing::info!("shut down");
     Ok(())
 }
