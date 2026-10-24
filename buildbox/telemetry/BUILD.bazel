@@ -1,0 +1,35 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//bazel:version.bzl", "VERSION")
+
+# Logging, and spans recorded with `tracing`, written to a file as OTLP JSON.
+# Adapted from neptune's //backend/base/trace.
+rust_library(
+    name = "telemetry",
+    srcs = [
+        "context.rs",
+        "export.rs",
+        "layer.rs",
+        "otlp_json.rs",
+        "telemetry.rs",
+        "tests.rs",
+    ],
+    version = VERSION,
+    visibility = [
+        "//buildbox/cli:__pkg__",
+        "//buildbox/reapi:__pkg__",
+    ],
+    deps = [
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:tracing-subscriber",
+    ],
+)
+
+rust_test(
+    name = "telemetry_test",
+    crate = ":telemetry",
+    deps = ["@crates//:tempfile"],
+)

@@ -12,10 +12,6 @@ use clap::{Parser, Subcommand};
 use std::error::Error;
 use std::process::ExitCode;
 use std::time::Duration;
-use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 /// A Bazel remote execution server for running builds on this machine.
 #[derive(Parser)]
@@ -45,8 +41,12 @@ enum Command {
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
-    init_logging();
     let cli = Cli::parse();
+    // The server sets up logging itself, once it has read its config, which
+    // says where to send traces.
+    if !matches!(cli.command, Command::Up(_)) {
+        telemetry::init_logging();
+    }
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -74,20 +74,6 @@ async fn run(command: Command) -> Result<(), Box<dyn Error>> {
         Command::Status(args) => status::run(args).await,
         Command::Actions(args) => actions::run(args).await,
     }
-}
-
-/// Log to stderr, at the level set by the LOG_LEVEL environment variable
-/// (e.g. LOG_LEVEL=debug), or at info by default.
-fn init_logging() {
-    let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .with_env_var("LOG_LEVEL")
-        .from_env_lossy();
-
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(filter)
-        .init();
 }
 
 #[cfg(test)]

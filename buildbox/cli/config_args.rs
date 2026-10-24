@@ -40,6 +40,11 @@ pub struct ConfigArgs {
     /// Keep sandboxes after actions finish, for debugging.
     #[arg(long)]
     pub keep_sandboxes: bool,
+
+    /// Append a trace of everything the server does to this file, as OTLP
+    /// JSON.
+    #[arg(long, value_name = "PATH")]
+    pub trace_file: Option<PathBuf>,
 }
 
 impl ConfigArgs {
@@ -52,6 +57,7 @@ impl ConfigArgs {
             sandbox_dir: self.sandbox_dir.clone(),
             max_concurrent_actions: self.max_concurrent_actions,
             keep_sandboxes: self.keep_sandboxes.then_some(true),
+            trace_file: self.trace_file.clone(),
         };
         config::load(self.config.as_deref(), overrides, &Environment::from_process())
     }

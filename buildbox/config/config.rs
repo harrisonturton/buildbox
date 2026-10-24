@@ -30,6 +30,10 @@ pub struct Config {
 
     /// Whether to keep sandboxes after actions finish, for debugging.
     pub keep_sandboxes: bool,
+
+    /// Where to append spans, as OTLP JSON. `None` means spans aren't
+    /// exported.
+    pub trace_file: Option<PathBuf>,
 }
 
 /// Settings that may be given in the config file or on the command line.
@@ -48,6 +52,7 @@ pub struct Settings {
     pub sandbox_dir: Option<PathBuf>,
     pub max_concurrent_actions: Option<usize>,
     pub keep_sandboxes: Option<bool>,
+    pub trace_file: Option<PathBuf>,
 }
 
 impl Settings {
@@ -61,6 +66,7 @@ impl Settings {
             sandbox_dir: overrides.sandbox_dir.or(self.sandbox_dir),
             max_concurrent_actions: overrides.max_concurrent_actions.or(self.max_concurrent_actions),
             keep_sandboxes: overrides.keep_sandboxes.or(self.keep_sandboxes),
+            trace_file: overrides.trace_file.or(self.trace_file),
         }
     }
 
@@ -72,6 +78,7 @@ impl Settings {
             cas_dir: resolve_optional_path(self.cas_dir, base, env)?,
             action_cache_dir: resolve_optional_path(self.action_cache_dir, base, env)?,
             sandbox_dir: resolve_optional_path(self.sandbox_dir, base, env)?,
+            trace_file: resolve_optional_path(self.trace_file, base, env)?,
             ..self
         })
     }
@@ -188,6 +195,7 @@ fn resolve(settings: Settings, env: &Environment) -> Result<Config, ConfigError>
         sandbox_dir: dir_or_default(settings.sandbox_dir, root, "sandbox", "sandbox_dir")?,
         max_concurrent_actions,
         keep_sandboxes: settings.keep_sandboxes.unwrap_or(false),
+        trace_file: settings.trace_file,
     })
 }
 
@@ -273,6 +281,7 @@ mod tests {
                 sandbox_dir: root.join("sandbox"),
                 max_concurrent_actions: 8,
                 keep_sandboxes: false,
+                trace_file: None,
             }
         );
     }
@@ -330,7 +339,11 @@ mod tests {
         let env = test_env(dir.path());
         let config_path = dir.path().join("etc/buildbox.toml");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(&config_path, "cas_dir = \"~/cas\"\naction_cache_dir = \"ac\"\n").unwrap();
+        std::fs::write(
+            &config_path,
+            "cas_dir = \"~/cas\"\naction_cache_dir = \"ac\"\ntrace_file = \"traces.jsonl\"\n",
+        )
+        .unwrap();
         let overrides = Settings {
             sandbox_dir: Some(PathBuf::from("sandbox")),
             ..Default::default()
@@ -341,6 +354,7 @@ mod tests {
         assert_eq!(config.cas_dir, dir.path().join("home/cas"));
         assert_eq!(config.action_cache_dir, dir.path().join("etc/ac"));
         assert_eq!(config.sandbox_dir, dir.path().join("cwd/sandbox"));
+        assert_eq!(config.trace_file, Some(dir.path().join("etc/traces.jsonl")));
     }
 
     #[test]

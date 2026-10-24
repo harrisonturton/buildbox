@@ -19,11 +19,12 @@ rust_binary(
         "//buildbox/admin:admin_rust_connect",
         "//buildbox/config",
         "//buildbox/server",
+        "//buildbox/telemetry",
         "@crates//:clap",
         "@crates//:connectrpc",
         "@crates//:tokio",
         "@crates//:toml",
-        "@crates//:tracing-subscriber",
+        "@crates//:tracing",
     ],
 )
 
