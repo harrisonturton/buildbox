@@ -15,6 +15,9 @@ use bazel_packages::{AttrValue, Target};
 use bazel_query::{QueryOptions, TargetSet, Universe};
 use bazel_starlark::depset::Depset;
 use futures::StreamExt;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
+use futures::stream::FuturesUnordered;
+use futures::future::BoxFuture;
 use intern::{PathId, Symbol};
 use skycodec::Fingerprint;
 use skyframe::Session;
@@ -143,11 +146,62 @@ pub async fn run(context: &CommandContext<'_>, session: &Session, options: &Pars
 }
 
 /// [`run`], for a command that tests, which reports its test targets.
+///
+/// Each target's files start building as soon as it's analyzed, while
+/// other targets are still being analyzed, as Bazel's do. The build waits
+/// for those evaluations in the order it reports them, so the head start
+/// changes only when actions run; and the command ends once they're done,
+/// even if it fails before it would have waited for them.
 pub async fn run_command(
     context: &CommandContext<'_>,
     session: &Session,
     options: &ParsedOptions,
     testing: bool,
+    out: &Output,
+) -> Result<Built, i32> {
+    let (analyzed, head_starts) = futures::channel::mpsc::unbounded();
+    let execute_actions = options.flag("build", true);
+    let analyzed = execute_actions.then_some(analyzed);
+    let (built, ()) = futures::join!(analyze_and_build(context, session, options, testing, analyzed, out), head_starts_of(session, head_starts));
+    built
+}
+
+/// Give each target received a [`head_start`], until there are no more.
+async fn head_starts_of(session: &Session, mut targets: UnboundedReceiver<Arc<ConfiguredTarget>>) {
+    let mut running: FuturesUnordered<BoxFuture<'_, ()>> = FuturesUnordered::new();
+    let mut receiving = true;
+    loop {
+        tokio::select! {
+            target = targets.next(), if receiving => match target {
+                Some(target) => running.push(Box::pin(head_start(session, target))),
+                None => receiving = false,
+            },
+            Some(()) = running.next(), if !running.is_empty() => {}
+            else => return,
+        }
+    }
+}
+
+/// Start building the files of an analyzed target.
+async fn head_start(session: &Session, target: Arc<ConfiguredTarget>) {
+    let key = TopLevelKey(ConfiguredTargetKey {
+        label: target.label,
+        config: target.config,
+    });
+    let Ok(top) = session.evaluate(&key).await else {
+        return;
+    };
+    let actions: BTreeSet<ActionKey> = generating_actions(session, &top.artifacts).await.into_iter().map(|(key, _)| key).collect();
+    let actions: Vec<ActionKey> = actions.into_iter().collect();
+    session.evaluate_many(&actions).await;
+}
+
+async fn analyze_and_build(
+    context: &CommandContext<'_>,
+    session: &Session,
+    options: &ParsedOptions,
+    testing: bool,
+    analyzed: Option<UnboundedSender<Arc<ConfiguredTarget>>>,
     out: &Output,
 ) -> Result<Built, i32> {
     let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
@@ -172,7 +226,7 @@ pub async fn run_command(
             return Err(exit::COMMAND_LINE_ERROR);
         }
     };
-    let (analyzed, mut errors) = analyze(session, &labels, config, &main_mapping, out).await;
+    let (analyzed, mut errors) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
     let incompatible = report_explicitly_incompatible(&analyzed, &explicit, &main_mapping, out).await;
     if errors && !keep_going {
         out.error("Analysis of target failed; build aborted").await;
@@ -597,15 +651,22 @@ fn action_env(context: &CommandContext<'_>, options: &ParsedOptions) -> Vec<(Str
 }
 
 /// Analyze targets, reporting the errors.
+/// Analyze the targets, sending each compatible one to `analyzed` as soon
+/// as it's done.
 async fn analyze(
     session: &Session,
     labels: &[Label],
     config: ConfigId,
     mapping: &RepoMappingTable,
+    analyzed: Option<UnboundedSender<Arc<ConfiguredTarget>>>,
     out: &Output,
 ) -> (Vec<(Label, Arc<ConfiguredTarget>)>, bool) {
-    let keys: Vec<ConfiguredTargetKey> = labels.iter().map(|label| ConfiguredTargetKey { label: *label, config }).collect();
-    let results = session.evaluate_many(&keys).await;
+    let mut analyses: Vec<BoxFuture<'_, _>> = Vec::with_capacity(labels.len());
+    for label in labels {
+        analyses.push(Box::pin(analyze_one(session, ConfiguredTargetKey { label: *label, config }, analyzed.clone())));
+    }
+    drop(analyzed);
+    let results = futures::future::join_all(analyses).await;
     let mut analyzed = Vec::new();
     let mut errors = false;
     for (label, result) in labels.iter().zip(results) {
@@ -619,6 +680,20 @@ async fn analyze(
         }
     }
     (analyzed, errors)
+}
+
+async fn analyze_one(
+    session: &Session,
+    key: ConfiguredTargetKey,
+    analyzed: Option<UnboundedSender<Arc<ConfiguredTarget>>>,
+) -> Result<Arc<ConfiguredTarget>, skyframe::SkyError> {
+    let result = session.evaluate(&key).await;
+    if let (Ok(target), Some(analyzed)) = (&result, analyzed) {
+        if target.incompatible.is_none() {
+            let _ = analyzed.unbounded_send(target.clone());
+        }
+    }
+    result
 }
 
 /// The files of a depset of files.
