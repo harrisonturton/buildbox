@@ -5,14 +5,16 @@ use std::io::{self, ErrorKind};
 use std::path::Path;
 
 /// Run blocking work, such as filesystem calls, on tokio's blocking thread
-/// pool rather than on the async runtime.
+/// pool rather than on the async runtime. The work runs in the current span,
+/// so anything it logs or traces is attributed to the caller.
 pub async fn run_blocking<T, E, F>(f: F) -> Result<T, E>
 where
     T: Send + 'static,
     E: Send + 'static,
     F: FnOnce() -> Result<T, E> + Send + 'static,
 {
-    match tokio::task::spawn_blocking(f).await {
+    let span = tracing::Span::current();
+    match tokio::task::spawn_blocking(move || span.in_scope(f)).await {
         Ok(result) => result,
         Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
         // Blocking tasks can only be cancelled by the runtime shutting down.

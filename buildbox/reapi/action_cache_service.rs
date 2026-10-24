@@ -32,8 +32,10 @@ impl v2::ActionCache for ActionCacheService {
         let request = request.to_owned_message();
         let action = Digest::from_required_proto(request.action_digest.as_option())
             .map_err(|error| status::invalid_digest("action_digest", error))?;
+        telemetry::set_attribute("action.digest", action.to_string());
 
         let result = cached_result::lookup(&*self.cas, &*self.action_cache, &action).await?;
+        telemetry::set_attribute("action.cached", result.is_some());
         match result {
             Some(result) => Response::ok(result),
             None => Err(ConnectError::not_found(format!("no cached result for action {action}"))),
@@ -48,6 +50,7 @@ impl v2::ActionCache for ActionCacheService {
         let request = request.to_owned_message();
         let action = Digest::from_required_proto(request.action_digest.as_option())
             .map_err(|error| status::invalid_digest("action_digest", error))?;
+        telemetry::set_attribute("action.digest", action.to_string());
         let Some(result) = request.action_result.into_option() else {
             return Err(ConnectError::invalid_argument("action_result is missing"));
         };

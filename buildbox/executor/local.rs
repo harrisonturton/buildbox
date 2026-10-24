@@ -8,7 +8,7 @@ mod sandbox;
 
 use async_trait::async_trait;
 use buffa_types::google::protobuf::Timestamp;
-use cas::Cas;
+use cas::{Cas, Digest};
 use executor::{Action, ExecuteError, Executor};
 use remote_execution_rust_connect::build::bazel::remote::execution::v2::{ActionResult, ExecutedActionMetadata};
 use sandbox::Sandbox;
@@ -54,10 +54,20 @@ impl LocalExecutor {
         .await?;
         Ok(LocalExecutor::new(cas, sandbox_root, keep_sandboxes))
     }
+
+    /// Store the command's stdout and stderr in the CAS, returning their
+    /// digests.
+    #[tracing::instrument(skip_all)]
+    async fn store_output_streams(&self, output: &process::ProcessOutput) -> Result<(Digest, Digest), ExecuteError> {
+        let stdout = self.cas.put_bytes(&output.stdout).await?;
+        let stderr = self.cas.put_bytes(&output.stderr).await?;
+        Ok((stdout, stderr))
+    }
 }
 
 #[async_trait]
 impl Executor for LocalExecutor {
+    #[tracing::instrument(name = "run_action", skip_all, fields(action = %action.digest))]
     async fn execute(&self, action: &Action) -> Result<ActionResult, ExecuteError> {
         let command = &action.command;
         let working_dir = paths::parse_relative_path(&command.working_directory).map_err(ExecuteError::InvalidAction)?;
@@ -77,8 +87,7 @@ impl Executor for LocalExecutor {
         let completed = SystemTime::now();
 
         let outputs = outputs::collect_outputs(&*self.cas, command, &working_dir).await?;
-        let stdout = self.cas.put_bytes(&process_output.stdout).await?;
-        let stderr = self.cas.put_bytes(&process_output.stderr).await?;
+        let (stdout, stderr) = self.store_output_streams(&process_output).await?;
 
         let metadata = ExecutedActionMetadata {
             worker: WORKER_NAME.to_string(),
@@ -102,7 +111,6 @@ impl Executor for LocalExecutor {
 mod tests {
     use super::*;
     use buffa::Message;
-    use cas::Digest;
     use cas_mem::MemCas;
     use remote_execution_rust_connect::build::bazel::remote::execution::v2::{Command, Directory, FileNode};
 

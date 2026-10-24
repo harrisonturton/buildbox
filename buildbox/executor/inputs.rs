@@ -7,6 +7,8 @@ use executor::ExecuteError;
 use remote_execution_rust_connect::build::bazel::remote::execution::v2::Directory;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use tracing::field::Empty;
+use tracing::Span;
 
 /// The entries of an input tree, with paths relative to the input root.
 /// Directories are listed before anything inside them.
@@ -35,13 +37,20 @@ struct InputSymlink {
 ///
 /// Fails with [`ExecuteError::MissingInputs`], listing every missing blob, if
 /// any part of the tree isn't in the CAS.
+#[tracing::instrument(skip_all, fields(dirs = Empty, files = Empty, symlinks = Empty))]
 pub async fn stage_inputs(cas: &dyn Cas, input_root: &Digest, sandbox: &Path) -> Result<(), ExecuteError> {
     let tree = resolve_tree(cas, input_root).await?;
+    let span = Span::current();
+    span.record("dirs", tree.dirs.len());
+    span.record("files", tree.files.len());
+    span.record("symlinks", tree.symlinks.len());
+
     check_files_present(cas, &tree).await?;
     create_entries(cas, &tree, sandbox).await
 }
 
 /// Fetch every `Directory` in the tree and flatten it into a list of entries.
+#[tracing::instrument(skip_all)]
 async fn resolve_tree(cas: &dyn Cas, input_root: &Digest) -> Result<InputTree, ExecuteError> {
     let mut tree = InputTree::default();
     let mut pending = vec![(PathBuf::new(), input_root.clone())];
@@ -108,6 +117,7 @@ fn parse_digest(
 
 /// Check for every missing file up front, so the client can upload them all
 /// at once.
+#[tracing::instrument(skip_all)]
 async fn check_files_present(cas: &dyn Cas, tree: &InputTree) -> Result<(), ExecuteError> {
     let digests: BTreeSet<Digest> = tree.files.iter().map(|file| file.digest.clone()).collect();
     let digests: Vec<Digest> = digests.into_iter().collect();
@@ -119,6 +129,7 @@ async fn check_files_present(cas: &dyn Cas, tree: &InputTree) -> Result<(), Exec
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 async fn create_entries(cas: &dyn Cas, tree: &InputTree, sandbox: &Path) -> Result<(), ExecuteError> {
     for dir in &tree.dirs {
         let path = sandbox.join(dir);

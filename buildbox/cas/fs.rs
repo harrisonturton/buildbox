@@ -108,8 +108,11 @@ fn store_empty_blob(cas: &FsCas) -> Result<(), CasError> {
     persist_blob(temp_path, &path)
 }
 
+// The spans here are at debug level: there is one for every blob an action
+// reads or writes, which is too many to trace by default.
 #[async_trait]
 impl Cas for FsCas {
+    #[tracing::instrument(level = "debug", name = "cas_find_missing", skip_all, fields(blobs = digests.len()))]
     async fn find_missing(&self, digests: &[Digest]) -> Result<Vec<Digest>, CasError> {
         let cas = self.clone();
         let digests = digests.to_vec();
@@ -125,6 +128,7 @@ impl Cas for FsCas {
         .await
     }
 
+    #[tracing::instrument(level = "debug", name = "cas_open_blob", skip_all, fields(digest = %digest))]
     async fn read(&self, digest: &Digest) -> Result<BlobReader, CasError> {
         let path = self.blob_path(digest);
         match tokio::fs::File::open(&path).await {
@@ -134,6 +138,7 @@ impl Cas for FsCas {
         }
     }
 
+    #[tracing::instrument(level = "debug", name = "cas_start_write", skip_all, fields(digest = %expected))]
     async fn write(&self, expected: &Digest) -> Result<Box<dyn BlobWriter>, CasError> {
         let tmp_dir = self.dirs.tmp.clone();
         let (file, temp_path) = run_blocking(move || new_temp_file(&tmp_dir)).await?;
@@ -148,12 +153,14 @@ impl Cas for FsCas {
         Ok(Box::new(writer))
     }
 
+    #[tracing::instrument(level = "debug", name = "cas_put_file", skip_all)]
     async fn put_file(&self, path: &Path) -> Result<Digest, CasError> {
         let cas = self.clone();
         let path = path.to_path_buf();
         run_blocking(move || put_file_blocking(&cas, &path)).await
     }
 
+    #[tracing::instrument(level = "debug", name = "cas_materialize", skip_all, fields(digest = %digest))]
     async fn materialize(&self, digest: &Digest, dest: &Path, executable: bool) -> Result<(), CasError> {
         let cas = self.clone();
         let digest = digest.clone();
@@ -211,6 +218,7 @@ fn materialize_blocking(cas: &FsCas, digest: &Digest, dest: &Path, executable: b
     if !can_copy_instead_of_linking(&error) {
         return Err(io_error("failed to link", dest, error));
     }
+    tracing::debug!("copying blob {digest}, since it can't be linked: {error}");
 
     let mode = if executable { EXECUTABLE_MODE } else { FILE_MODE };
     copy_file(&source, dest, mode)
@@ -286,6 +294,7 @@ impl BlobWriter for FsBlobWriter {
             .map_err(|error| io_error("failed to write", &self.temp_path, error))
     }
 
+    #[tracing::instrument(level = "debug", name = "cas_commit", skip_all, fields(digest = %self.expected))]
     async fn commit(self: Box<Self>) -> Result<(), CasError> {
         let FsBlobWriter {
             mut file,

@@ -102,6 +102,9 @@ max_concurrent_actions = 48
 
 # Keep each action's directory after it finishes, for debugging.
 keep_sandboxes = false
+
+# Append a trace of everything the server does to this file. Off by default.
+trace_file = "~/.cache/buildbox/traces.jsonl"
 ```
 
 `~` is your home directory, and relative paths are relative to the config file.
@@ -110,6 +113,37 @@ see `bb up --help`.
 
 Keep `cas_dir` and `sandbox_dir` on the same filesystem, so inputs can be hard
 linked into sandboxes rather than copied.
+
+## Tracing
+
+With `trace_file` set, the server records how long each part of its work
+takes, as OpenTelemetry spans, and appends them to the file as OTLP JSON, one
+batch per line. Every request Bazel makes during one invocation (one
+`bazel build`, say) is part of one trace, under a `bazel invocation` span,
+since Bazel tags requests with its invocation ID. Each request's span records
+the action it's for (`bazel.action_id`), and an `Execute` breaks down into
+checking the cache, waiting for a slot, staging inputs, running the command
+and collecting outputs. A client that sends a W3C `traceparent` header gets
+its requests in its own trace instead.
+
+An invocation's span is written once it has made no requests for a minute, or
+when the server stops; the rest are written within a few seconds of ending.
+The file isn't rotated.
+
+To find the slowest actions:
+
+```
+jq -c '.resourceSpans[].scopeSpans[].spans[]
+  | select(.name | endswith("Execution/Execute"))
+  | {action: (.attributes[] | select(.key == "action.digest") | .value.stringValue),
+     ms: (((.endTimeUnixNano | tonumber) - (.startTimeUnixNano | tonumber)) / 1e6)}' \
+  ~/.cache/buildbox/traces.jsonl | jq -s 'sort_by(-.ms) | .[:10]'
+```
+
+To browse traces in a UI, run an OpenTelemetry Collector with the
+`otlpjsonfile` receiver pointed at the file, exporting to Jaeger or similar.
+`TRACE_LEVEL=debug` adds a span for every blob the CAS reads and writes, and
+`LOG_LEVEL` sets the level of the log on stderr.
 
 ## How it works
 
@@ -151,6 +185,7 @@ component, with interfaces and implementations as separate targets:
 | `buildbox/executor` | The `Executor` trait, and the local executor. |
 | `buildbox/scheduler` | Limits and tracks running actions. |
 | `buildbox/fsutil` | Filesystem helpers. |
+| `buildbox/telemetry` | Logging, and recording spans to the trace file. |
 
 `bazel/` holds Bazel definitions (toolchains, the version number), and
 `third_party/` holds the external dependencies, one `*.MODULE.bazel` file

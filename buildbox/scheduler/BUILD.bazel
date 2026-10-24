@@ -13,6 +13,7 @@ rust_library(
         "//buildbox/executor",
         "//third_party/remoteapis:remote_execution_rust_connect",
         "@crates//:tokio",
+        "@crates//:tracing",
     ],
 )
 

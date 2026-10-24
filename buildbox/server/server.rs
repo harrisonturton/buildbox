@@ -9,7 +9,7 @@ use config::Config;
 use connectrpc::{ConnectRpcService, Limits, Router, Server};
 use executor::Executor;
 use executor_local::LocalExecutor;
-use reapi::MAX_MESSAGE_SIZE_BYTES;
+use reapi::{Invocations, RequestTracing, INVOCATION_IDLE_TIMEOUT, MAX_MESSAGE_SIZE_BYTES};
 use scheduler::Scheduler;
 use std::error::Error;
 use std::net::SocketAddr;
@@ -84,7 +84,11 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     let limits = Limits::default()
         .with_max_message_size(MAX_MESSAGE_SIZE_BYTES)
         .with_max_request_body_size(MAX_MESSAGE_SIZE_BYTES);
-    let service = ConnectRpcService::new(router).with_limits(limits);
+    let invocations = Invocations::new(INVOCATION_IDLE_TIMEOUT);
+    tokio::spawn(invocations.clone().close_idle_periodically());
+    let service = ConnectRpcService::new(router)
+        .with_limits(limits)
+        .with_interceptor(RequestTracing::new(invocations.clone()));
 
     let listener = Server::bind(config.listen)
         .await
@@ -102,13 +106,18 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     tokio::pin!(serve);
 
     tokio::select! {
-        result = &mut serve => return serve_result(config, result),
+        result = &mut serve => {
+            invocations.close_all();
+            return serve_result(config, result);
+        }
         () = shutdown_signal() => {}
     }
 
     // The receiver is held by the server, so this can't fail.
     let _ = stop.send(());
-    match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, serve).await {
+    let result = tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, serve).await;
+    invocations.close_all();
+    match result {
         Ok(result) => serve_result(config, result)?,
         Err(_) => tracing::warn!("requests still running after {SHUTDOWN_GRACE_PERIOD:?}; stopping them"),
     }

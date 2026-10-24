@@ -13,6 +13,8 @@ use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use tracing::field::Empty;
+use tracing::Span;
 
 /// The outputs an action produced, stored in the CAS.
 #[derive(Debug, Default)]
@@ -42,6 +44,7 @@ pub async fn create_output_parents(command: &Command, working_dir: &Path) -> Res
 
 /// Store the outputs the command produced in the CAS. Outputs that weren't
 /// produced are left out.
+#[tracing::instrument(skip_all, fields(files = Empty, directories = Empty))]
 pub async fn collect_outputs(cas: &dyn Cas, command: &Command, working_dir: &Path) -> Result<Outputs, ExecuteError> {
     let mut outputs = Outputs::default();
 
@@ -57,6 +60,9 @@ pub async fn collect_outputs(cas: &dyn Cas, command: &Command, working_dir: &Pat
         }
     }
 
+    let span = Span::current();
+    span.record("files", outputs.files.len());
+    span.record("directories", outputs.directories.len());
     Ok(outputs)
 }
 

@@ -36,6 +36,7 @@ rust_library(
         "//buildbox/fsutil",
         "@crates//:tempfile",
         "@crates//:tokio",
+        "@crates//:tracing",
     ],
 )
 

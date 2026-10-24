@@ -17,6 +17,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tracing::Instrument;
 
 /// The size of each chunk sent when reading a blob.
 const READ_CHUNK_SIZE: usize = 64 * 1024;
@@ -45,9 +46,13 @@ impl ByteStream for ByteStreamService {
             return Err(ConnectError::unimplemented("partial reads are not supported"));
         }
 
+        telemetry::set_attribute("blob.digest", digest.to_string());
+
         let reader = self.cas.read(&digest).await.map_err(status::from_cas_error)?;
         let (sender, receiver) = mpsc::channel(4);
-        tokio::spawn(send_chunks(reader, digest, sender));
+        // Sending outlasts this call, so it gets a span of its own.
+        let send_span = tracing::info_span!("send_blob", bytes = digest.size_bytes());
+        tokio::spawn(send_chunks(reader, digest, sender).instrument(send_span));
         let stream: ServiceStream<ReadResponse> = Box::pin(ReceiverStream::new(receiver));
         Response::ok(stream)
     }
@@ -63,6 +68,7 @@ impl ByteStream for ByteStreamService {
         let first = first?;
 
         let digest = parse_write_resource(first.view().resource_name)?;
+        telemetry::set_attribute("blob.digest", digest.to_string());
         let mut upload = Upload::start(&*self.cas, &digest).await?;
         let mut finished = upload.append(&first).await?;
 
@@ -88,6 +94,7 @@ impl ByteStream for ByteStreamService {
         request: ServiceRequest<'_, QueryWriteStatusRequest>,
     ) -> ServiceResult<QueryWriteStatusResponse> {
         let digest = parse_write_resource(request.resource_name)?;
+        telemetry::set_attribute("blob.digest", digest.to_string());
 
         let missing = self.cas.find_missing(&[digest.clone()]).await.map_err(status::from_cas_error)?;
         let response = if missing.is_empty() {

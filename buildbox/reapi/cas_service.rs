@@ -31,8 +31,10 @@ impl ContentAddressableStorageService {
 
     async fn find_missing(&self, request: FindMissingBlobsRequest) -> Result<FindMissingBlobsResponse, ConnectError> {
         let digests = parse_digests(&request.blob_digests, "blob_digests")?;
+        telemetry::set_attribute("blobs", digests.len());
 
         let missing = self.cas.find_missing(&digests).await.map_err(status::from_cas_error)?;
+        telemetry::set_attribute("missing_blobs", missing.len());
         Ok(FindMissingBlobsResponse {
             missing_blob_digests: missing.iter().map(Digest::to_proto).collect(),
             ..Default::default()
@@ -40,6 +42,10 @@ impl ContentAddressableStorageService {
     }
 
     async fn update_blobs(&self, request: BatchUpdateBlobsRequest) -> BatchUpdateBlobsResponse {
+        let total_size: usize = request.requests.iter().map(|blob| blob.data.len()).sum();
+        telemetry::set_attribute("blobs", request.requests.len());
+        telemetry::set_attribute("bytes", total_size);
+
         let mut responses = Vec::with_capacity(request.requests.len());
         for blob in &request.requests {
             let status = self.update_blob(blob).await;
@@ -77,6 +83,8 @@ impl ContentAddressableStorageService {
         let digests = parse_digests(&request.digests, "digests")?;
 
         let total_size: u64 = digests.iter().map(Digest::size_bytes).sum();
+        telemetry::set_attribute("blobs", digests.len());
+        telemetry::set_attribute("bytes", total_size);
         if total_size > MAX_BATCH_TOTAL_SIZE_BYTES {
             let message = format!("requested {total_size} bytes, more than the limit of {MAX_BATCH_TOTAL_SIZE_BYTES}");
             return Err(ConnectError::invalid_argument(message));
@@ -112,6 +120,7 @@ impl ContentAddressableStorageService {
             .map_err(|error| status::invalid_digest("root_digest", error))?;
 
         let directories = collect_tree(&*self.cas, root).await?;
+        telemetry::set_attribute("directories", directories.len());
         let pages = directories
             .chunks(GET_TREE_PAGE_SIZE)
             .map(|page| GetTreeResponse {

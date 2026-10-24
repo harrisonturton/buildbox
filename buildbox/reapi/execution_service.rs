@@ -16,6 +16,7 @@ use remote_execution_rust_connect::google::rpc::PreconditionFailure;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::Instrument;
 
 /// The violation type the protocol uses for blobs missing from the CAS.
 const MISSING_VIOLATION_TYPE: &str = "MISSING";
@@ -44,26 +45,32 @@ impl ExecutionService {
     async fn run(&self, request: &ExecuteRequest) -> Result<ExecuteResponse, ConnectError> {
         let action_digest = Digest::from_required_proto(request.action_digest.as_option())
             .map_err(|error| status::invalid_digest("action_digest", error))?;
+        telemetry::set_attribute("action.digest", action_digest.to_string());
 
         if !request.skip_cache_lookup {
             let cached = cached_result::lookup(&*self.cas, &*self.action_cache, &action_digest).await?;
             if let Some(result) = cached {
                 tracing::info!("using cached result for action {action_digest}");
+                telemetry::set_attribute("action.cached", true);
                 return Ok(cached_response(result));
             }
         }
+        telemetry::set_attribute("action.cached", false);
 
-        let action: Action = crate::read_message(&*self.cas, &action_digest).await?;
+        let read_action = crate::read_message(&*self.cas, &action_digest).instrument(tracing::info_span!("read_action"));
+        let action: Action = read_action.await?;
         let executable = self.resolve(&action_digest, &action).await?;
 
         let result = match self.executor.execute(&executable).await {
             Ok(result) => result,
             Err(error) => return Ok(error_response(error)),
         };
+        telemetry::set_attribute("action.exit_code", result.exit_code);
 
         if result.exit_code == 0 && !action.do_not_cache {
             self.action_cache
                 .put(&action_digest, &result)
+                .instrument(tracing::info_span!("update_action_cache"))
                 .await
                 .map_err(status::from_action_cache_error)?;
         }
@@ -71,6 +78,7 @@ impl ExecutionService {
     }
 
     /// Fetch everything the executor needs to run `action`.
+    #[tracing::instrument(name = "read_command", skip_all)]
     async fn resolve(&self, action_digest: &Digest, action: &Action) -> Result<executor::Action, ConnectError> {
         let command_digest = Digest::from_required_proto(action.command_digest.as_option())
             .map_err(|error| status::invalid_digest("command_digest", error))?;
@@ -155,6 +163,7 @@ fn executed_response(result: ActionResult) -> ExecuteResponse {
 
 fn error_response(error: ExecuteError) -> ExecuteResponse {
     tracing::info!("action failed: {error}");
+    telemetry::set_error(error.to_string());
     let details = match &error {
         ExecuteError::MissingInputs(digests) => vec![missing_blobs_details(digests)],
         _ => vec![],

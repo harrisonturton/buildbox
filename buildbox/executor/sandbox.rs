@@ -17,6 +17,7 @@ pub struct Sandbox {
 
 impl Sandbox {
     /// Create an empty sandbox directory inside `root`.
+    #[tracing::instrument(name = "create_sandbox", skip_all)]
     pub async fn create(root: &Path, keep: bool) -> Result<Sandbox, ExecuteError> {
         let root = root.to_path_buf();
         let path = run_blocking(move || {
@@ -62,9 +63,12 @@ impl Drop for Sandbox {
             return;
         }
 
-        // Deleting a large tree is slow, so do it in the background.
+        // Deleting a large tree is slow, so do it in the background. It is
+        // still traced as part of the action, so its cost shows up there.
         let path = std::mem::take(&mut self.path);
+        let span = tracing::info_span!("remove_sandbox");
         let remove = move || {
+            let _entered = span.enter();
             if let Err(error) = std::fs::remove_dir_all(&path) {
                 tracing::warn!("failed to remove sandbox {}: {error}", path.display());
             }

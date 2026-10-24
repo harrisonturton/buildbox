@@ -10,6 +10,7 @@ use remote_execution_rust_connect::build::bazel::remote::execution::v2::{ActionR
 /// Look up the cached result of an action, returning it only if every output
 /// it refers to is still in the CAS. Otherwise the client couldn't download
 /// the outputs, so the result is treated as missing.
+#[tracing::instrument(name = "check_action_cache", skip_all)]
 pub async fn lookup(cas: &dyn Cas, action_cache: &dyn ActionCache, action: &Digest) -> Result<Option<ActionResult>, ConnectError> {
     let result = action_cache.get(action).await.map_err(status::from_action_cache_error)?;
     let Some(result) = result else {

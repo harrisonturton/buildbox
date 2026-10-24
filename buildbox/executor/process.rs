@@ -8,6 +8,8 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Child;
+use tracing::field::Empty;
+use tracing::Span;
 
 /// How many times to try starting a process whose program is busy, and how
 /// long to wait before the first retry. Each retry waits longer.
@@ -27,11 +29,14 @@ pub struct ProcessOutput {
 /// The command gets exactly the environment variables it specifies. It runs
 /// in its own process group, and when it finishes, times out or is abandoned,
 /// every process still in the group is killed.
+#[tracing::instrument(name = "run_command", skip_all, fields(program = Empty, exit_code = Empty))]
 pub async fn run(command: &Command, working_dir: &Path, timeout: Option<Duration>) -> Result<ProcessOutput, ExecuteError> {
     let Some((program, args)) = command.arguments.split_first() else {
         return Err(ExecuteError::InvalidAction("command has no arguments".to_string()));
     };
     let program = resolve_program(program, working_dir);
+    let span = Span::current();
+    span.record("program", program.display().to_string());
 
     let mut process = tokio::process::Command::new(&program);
     process
@@ -53,13 +58,16 @@ pub async fn run(command: &Command, working_dir: &Path, timeout: Option<Duration
     })?;
 
     let finished = wait_for_output(child);
-    let Some(timeout) = timeout else {
-        return finished.await;
+    let output = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, finished)
+            .await
+            .unwrap_or(Err(ExecuteError::Timeout(timeout))),
+        None => finished.await,
     };
-    match tokio::time::timeout(timeout, finished).await {
-        Ok(output) => output,
-        Err(_elapsed) => Err(ExecuteError::Timeout(timeout)),
+    if let Ok(output) = &output {
+        span.record("exit_code", output.exit_code);
     }
+    output
 }
 
 /// Start a process, retrying while its program is "busy".

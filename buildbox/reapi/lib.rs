@@ -15,6 +15,12 @@ pub use cas_service::ContentAddressableStorageService;
 pub mod execution_service;
 pub use execution_service::ExecutionService;
 
+pub mod invocations;
+pub use invocations::{Invocations, INVOCATION_IDLE_TIMEOUT};
+
+pub mod request_tracing;
+pub use request_tracing::RequestTracing;
+
 mod cached_result;
 mod status;
 

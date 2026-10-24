@@ -4,7 +4,10 @@ rust_library(
     name = "fsutil",
     srcs = ["fsutil.rs"],
     visibility = ["//buildbox:__subpackages__"],
-    deps = ["@crates//:tokio"],
+    deps = [
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
 )
 
 rust_test(

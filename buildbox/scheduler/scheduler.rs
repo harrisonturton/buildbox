@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 use tokio::sync::Semaphore;
+use tracing::Instrument;
 
 /// An [`Executor`] that runs actions on another executor, at most
 /// `max_concurrent` at a time. Actions beyond that wait in a queue.
@@ -64,10 +65,12 @@ impl Scheduler {
 impl Executor for Scheduler {
     async fn execute(&self, action: &Action) -> Result<ActionResult, ExecuteError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let queued_ahead = self.tracker.queued();
         let entry = Entry::add(self.tracker.clone(), id, action);
 
         // The semaphore is never closed, so acquiring can't fail.
-        let Ok(_slot) = self.slots.acquire().await else {
+        let wait_span = tracing::info_span!("wait_for_slot", queued_ahead);
+        let Ok(_slot) = self.slots.acquire().instrument(wait_span).await else {
             return Err(ExecuteError::Internal("scheduler is shutting down".to_string()));
         };
         entry.mark_running();
@@ -85,6 +88,12 @@ struct Tracker {
 impl Tracker {
     fn snapshot(&self) -> Vec<ActionInfo> {
         self.lock().values().cloned().collect()
+    }
+
+    /// How many actions are waiting for a slot.
+    fn queued(&self) -> usize {
+        let actions = self.lock();
+        actions.values().filter(|info| info.state == ActionState::Queued).count()
     }
 
     /// The map is never left inconsistent, so a panic while it was held
