@@ -163,39 +163,42 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     Ok(())
 }
 
+/// How many Bazel actions are prepared at once for each one that can run,
+/// so that the next is ready when one finishes.
+const STAGED_PER_SLOT: usize = 2;
+
 /// Where Bazel-compatible builds run their actions: on the remote executor
 /// if one is configured; otherwise in this process, through the same
 /// stores and scheduler as remote execution requests, in front of the
 /// remote cache if there is one.
 fn build_backend(config: &Config, cas: Arc<dyn Cas>, action_cache: Arc<dyn ActionCache>, scheduler: Arc<Scheduler>) -> Result<Backend, ServerError> {
+    let max_staged = STAGED_PER_SLOT * config.max_concurrent_actions;
     let endpoint = |url: &str| {
         remote::Endpoint::parse(url, &config.remote_instance_name).map_err(|error| ServerError::Remote { error })
     };
     if let Some(url) = &config.remote_executor {
         tracing::info!("running Bazel actions on {url}");
         let endpoint = endpoint(url)?;
-        return Ok(Backend {
-            cas: Arc::new(remote::RemoteCas::new(endpoint.clone())),
-            action_cache: Arc::new(remote::RemoteActionCache::new(endpoint.clone())),
-            executor: Arc::new(remote::RemoteExecutor::new(endpoint)),
-        });
+        return Ok(Backend::new(
+            Arc::new(remote::RemoteCas::new(endpoint.clone())),
+            Arc::new(remote::RemoteActionCache::new(endpoint.clone())),
+            Arc::new(remote::RemoteExecutor::new(endpoint)),
+            max_staged,
+        ));
     }
     if let Some(url) = &config.remote_cache {
         tracing::info!("caching Bazel actions in {url}");
         let endpoint = endpoint(url)?;
         let remote_cas: Arc<dyn Cas> = Arc::new(remote::RemoteCas::new(endpoint.clone()));
         let remote_cache: Arc<dyn ActionCache> = Arc::new(remote::RemoteActionCache::new(endpoint));
-        return Ok(Backend {
-            cas: Arc::new(remote::TieredCas::new(cas, remote_cas)),
-            action_cache: Arc::new(remote::TieredActionCache::new(action_cache, remote_cache)),
-            executor: scheduler,
-        });
+        return Ok(Backend::new(
+            Arc::new(remote::TieredCas::new(cas, remote_cas)),
+            Arc::new(remote::TieredActionCache::new(action_cache, remote_cache)),
+            scheduler,
+            max_staged,
+        ));
     }
-    Ok(Backend {
-        cas,
-        action_cache,
-        executor: scheduler,
-    })
+    Ok(Backend::new(cas, action_cache, scheduler, max_staged))
 }
 
 fn serve_result(config: &Config, result: Result<(), Box<dyn Error + Send + Sync>>) -> Result<(), ServerError> {

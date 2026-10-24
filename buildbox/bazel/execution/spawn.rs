@@ -106,10 +106,13 @@ pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnRe
 
 /// Run a spawn action, or reuse its cached result.
 pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action, spawn: &Spawn) -> Result<ActionOutputs, SkyError> {
-    let (output_files, output_directories) = output_paths(action);
     let span = tracing::info_span!("action_inputs", inputs = action.inputs.len(), runfiles = action.runfiles.len());
+    let unique = unique_inputs(action);
+    ready(ctx, &unique).instrument(span).await?;
+    let _staged = backend.stage().await?;
+    let (output_files, output_directories) = output_paths(action);
     let request = SpawnRequest {
-        inputs: inputs(ctx, action).instrument(span).await?,
+        inputs: inputs(ctx, action, unique).await?,
         arguments: spawn.arguments.clone(),
         env: spawn.env.clone(),
         output_files,
@@ -132,18 +135,31 @@ fn progress(action: &Action, owner: ConfiguredTargetKey) -> String {
     }
 }
 
+/// Every artifact the action reads, once each.
+fn unique_inputs(action: &Action) -> Vec<Artifact> {
+    let mut unique: Vec<Artifact> = action.all_inputs().copied().collect();
+    unique.sort();
+    unique.dedup();
+    unique
+}
+
+/// Wait until every input has been generated, keeping none of their
+/// digests, so that an action waiting on others holds no input tree.
+async fn ready(ctx: &Ctx, unique: &[Artifact]) -> Result<(), SkyError> {
+    let waits = unique.iter().map(|artifact| async { input(ctx, *artifact).await.map(drop) });
+    futures::future::try_join_all(waits).await?;
+    Ok(())
+}
+
 /// Every input, by its path in the input tree: the action's inputs, and
 /// the entries of its tools' runfiles trees.
-async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<String, Input>, SkyError> {
+async fn inputs(ctx: &Ctx, action: &Action, unique: Vec<Artifact>) -> Result<BTreeMap<String, Input>, SkyError> {
     let mut paths: Vec<(String, Artifact)> = action.inputs.iter().map(|artifact| (artifact.exec_path.to_string(), *artifact)).collect();
     for tree in &action.runfiles {
         for (path, artifact) in &tree.entries {
             paths.push((format!("{}/{path}", tree.dir), *artifact));
         }
     }
-    let mut unique: Vec<Artifact> = paths.iter().map(|(_, artifact)| *artifact).collect();
-    unique.sort();
-    unique.dedup();
     let digests = futures::future::try_join_all(unique.iter().map(|artifact| input(ctx, *artifact))).await?;
     let by_artifact: BTreeMap<Artifact, Input> = unique.into_iter().zip(digests).collect();
     Ok(paths.into_iter().map(|(path, artifact)| (path, by_artifact[&artifact].clone())).collect())
