@@ -116,6 +116,7 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
         };
         own.push(attr_schema(name, attribute, &parser)?);
     }
+    own.sort_by(|a, b| a.name.cmp(&b.name));
     let mut class = native_rules::rule_class(kind, own, rule.test, rule.executable);
     class.outputs = predeclared_outputs(rule)?;
     Ok(class)

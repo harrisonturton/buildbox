@@ -11,7 +11,7 @@ mod recursive;
 mod rule_class;
 
 pub use bzl::{BzlLoadKey, BzlModule};
-pub use package::{LoadedPackage, PackageKey, PackageLookup, PackageLookupKey};
+pub use package::{LoadedPackage, PackageKey, PackageLookup, PackageLookupKey, display as display_package};
 pub use recursive::{PackagesUnderDirectory, PackagesUnderDirectoryKey, packages_beneath};
 pub use rule_class::{RuleClassKey, RuleClassValue, rule_class};
 

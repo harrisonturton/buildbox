@@ -60,7 +60,9 @@ pub fn executable_attrs() -> Vec<AttrSchema> {
     ]
 }
 
-/// Make a rule class from its own attributes and the common ones.
+/// Make a rule class from its own attributes and the common ones. The
+/// common attributes come first, then the class's own in the order given,
+/// which is the order `query --output=build` prints them in.
 pub fn rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool) -> RuleClass {
     let mut attrs = common_attrs();
     if test {
@@ -69,10 +71,11 @@ pub fn rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool
         attrs.extend(executable_attrs());
     }
     for attr in own {
-        attrs.retain(|existing| existing.name != attr.name);
-        attrs.push(attr);
+        match attrs.iter_mut().find(|existing| existing.name == attr.name) {
+            Some(existing) => *existing = attr,
+            None => attrs.push(attr),
+        }
     }
-    attrs.sort_by(|a, b| a.name.cmp(&b.name));
     RuleClass {
         kind: Symbol::intern(kind),
         attrs,

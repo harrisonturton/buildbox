@@ -121,11 +121,16 @@ fn call_site(eval: &Evaluator<'_, '_, '_>) -> (Location, Option<Generator>) {
     (location, Some(generator))
 }
 
+/// Where a call is, as Bazel reports it: at the call's opening
+/// parenthesis.
 fn location_of(span: &FileSpan) -> Location {
     let resolved = span.resolve_span();
+    let text = span.source_span();
+    let first_line = text.lines().next().unwrap_or("");
+    let paren = first_line.find('(').map(|offset| first_line[..offset].chars().count()).unwrap_or(0);
     Location {
         line: resolved.begin.line as u32 + 1,
-        column: resolved.begin.column as u32 + 1,
+        column: (resolved.begin.column + paren) as u32 + 1,
     }
 }
 

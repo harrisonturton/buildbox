@@ -1,0 +1,33 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "query",
+    srcs = [
+        "eval.rs",
+        "output.rs",
+        "parse.rs",
+        "query.rs",
+        "universe.rs",
+    ],
+    crate_name = "bazel_query",
+    crate_root = "query.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/bazel/fs",
+        "//buildbox/bazel/label",
+        "//buildbox/bazel/loading",
+        "//buildbox/bazel/packages",
+        "//buildbox/intern",
+        "//buildbox/skyframe",
+        "@crates//:futures",
+        "@crates//:regex",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "query_unit_test",
+    crate = ":query",
+)

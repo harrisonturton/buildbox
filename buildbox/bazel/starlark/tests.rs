@@ -104,7 +104,7 @@ fn rules_record_their_attributes() {
     };
     assert_eq!(parts[0], SelectorPart::Value(AttrValue::LabelList(vec![label("//pkg:x.c"), label("//pkg:y.c")])));
     assert!(matches!(&parts[1], SelectorPart::Select(select) if select.branches[0].0 == label("//pkg:opt")));
-    assert_eq!(a.location.line, 6);
+    assert_eq!((a.location.line, a.location.column), (6, 8));
     assert_eq!(a.outputs, [Symbol::intern("a.out")]);
 }
 

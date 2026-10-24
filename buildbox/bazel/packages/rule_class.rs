@@ -19,7 +19,8 @@ pub struct RuleClassRef {
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub struct RuleClass {
     pub kind: Symbol,
-    /// Sorted by name.
+    /// In the order Bazel lists them: the common attributes, then the
+    /// class's own.
     pub attrs: Vec<AttrSchema>,
     pub test: bool,
     pub executable: bool,
@@ -68,8 +69,7 @@ pub enum Cfg {
 
 impl RuleClass {
     pub fn attr(&self, name: Symbol) -> Option<&AttrSchema> {
-        let index = self.attrs.binary_search_by(|attr| attr.name.cmp(&name)).ok()?;
-        Some(&self.attrs[index])
+        self.attrs.iter().find(|attr| attr.name == name)
     }
 
     pub fn is_private(attr: Symbol) -> bool {

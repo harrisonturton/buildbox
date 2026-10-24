@@ -25,6 +25,8 @@ pub struct BzlModule {
     /// Every repository whose files this module, or a module it loads, came
     /// from, which builtins need the mappings of.
     pub repos: Vec<RepoName>,
+    /// The modules this one loads directly.
+    pub loads: Vec<Label>,
 }
 
 impl Value for BzlModule {
@@ -61,6 +63,7 @@ impl Key for BzlLoadKey {
         let repos = transitive_repos(label.repo(), loaded.iter().map(|(_, module)| &**module));
         let mappings = mappings(ctx, &repos).await?;
         let fingerprint = fingerprint(label, &source, &mapping.0, &loaded);
+        let load_labels = loaded.iter().map(|(_, module)| module.label).collect();
 
         let module = blocking(move || {
             let loads = Loads {
@@ -80,6 +83,7 @@ impl Key for BzlLoadKey {
             module,
             fingerprint,
             repos,
+            loads: load_labels,
         })
     }
 }
