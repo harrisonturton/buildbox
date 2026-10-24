@@ -140,7 +140,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 
 /// Whether a Starlark flag has a value: the command line's, or its default.
 async fn flag_matches(ctx: &Ctx, config: &BuildConfiguration, flag: Label, expected: &str) -> Result<bool, SkyError> {
-    let flag = follow_aliases(ctx, flag).await?;
+    let flag = crate::platform::actual(ctx, flag).await?;
     if let Some((_, value)) = config.options.starlark_flags.iter().find(|(label, _)| *label == flag) {
         return Ok(flag_value_matches(value, expected));
     }
@@ -168,21 +168,4 @@ fn flag_value_matches(actual: &str, expected: &str) -> bool {
     let actual = actual.trim_start_matches('@');
     let expected = expected.trim_start_matches('@');
     actual == expected
-}
-
-async fn follow_aliases(ctx: &Ctx, mut label: Label) -> Result<Label, SkyError> {
-    for _ in 0..16 {
-        let package = ctx.compute(&PackageKey(label.package)).await?;
-        let Some(Target::Rule(rule)) = package.0.target(label.name) else {
-            return Ok(label);
-        };
-        if package.0.rule_class(rule).kind.as_str() != "alias" {
-            return Ok(label);
-        }
-        let Some(AttrValue::Label(actual)) = rule.attr(Symbol::intern("actual")) else {
-            return Ok(label);
-        };
-        label = *actual;
-    }
-    Err(SkyError::new(format!("{label}: too many aliases")))
 }

@@ -80,7 +80,7 @@ impl Key for ConstraintValueKey {
     const KIND: &'static str = "CONSTRAINT_VALUE";
 
     async fn compute(&self, ctx: &Ctx) -> Result<ConstraintValue, SkyError> {
-        let rule = load_rule(ctx, self.0, "constraint_value").await?;
+        let (label, rule) = load_actual_rule(ctx, self.0, "constraint_value").await?;
         let Some(AttrValue::Label(setting)) = rule.attr(Symbol::intern("constraint_setting")).cloned() else {
             return Err(SkyError::new(format!("{}: constraint_value has no constraint_setting", self.0)));
         };
@@ -90,15 +90,40 @@ impl Key for ConstraintValueKey {
             _ => None,
         };
         Ok(ConstraintValue {
-            label: self.0,
+            label,
             setting,
-            is_default: default == Some(self.0),
+            is_default: default == Some(label),
         })
     }
 }
 
 /// A target that must be a rule, following aliases, of the kind given.
 pub async fn load_rule(ctx: &Ctx, label: Label, kind: &str) -> Result<Rule, SkyError> {
+    Ok(load_actual_rule(ctx, label, kind).await?.1)
+}
+
+/// The target an alias stands for, following aliases; other targets stand
+/// for themselves.
+pub async fn actual(ctx: &Ctx, label: Label) -> Result<Label, SkyError> {
+    let mut label = label;
+    for _ in 0..16 {
+        let package = ctx.compute(&PackageKey(label.package)).await?;
+        let Some(Target::Rule(rule)) = package.0.target(label.name) else {
+            return Ok(label);
+        };
+        if package.0.rule_class(rule).kind.as_str() != "alias" {
+            return Ok(label);
+        }
+        let Some(AttrValue::Label(actual)) = rule.attr(Symbol::intern("actual")) else {
+            return Ok(label);
+        };
+        label = *actual;
+    }
+    Err(SkyError::new(format!("{label}: too many aliases")))
+}
+
+/// [`load_rule`], with the label of the rule found.
+async fn load_actual_rule(ctx: &Ctx, label: Label, kind: &str) -> Result<(Label, Rule), SkyError> {
     let mut label = label;
     for _ in 0..16 {
         let package = ctx.compute(&PackageKey(label.package)).await?;
@@ -116,7 +141,7 @@ pub async fn load_rule(ctx: &Ctx, label: Label, kind: &str) -> Result<Rule, SkyE
         if class.as_str() != kind {
             return Err(SkyError::new(format!("{label} is a {class} rule, not a {kind}")));
         }
-        return Ok(rule.clone());
+        return Ok((label, rule.clone()));
     }
     Err(SkyError::new(format!("{label}: too many aliases")))
 }

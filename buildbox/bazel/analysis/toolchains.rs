@@ -36,10 +36,18 @@ pub async fn resolve(ctx: &Ctx, class: &RuleClass, config: &BuildConfiguration) 
     if class.toolchain_types.is_empty() {
         return Ok(ResolvedToolchains::default());
     }
+    let mut types = Vec::with_capacity(class.toolchain_types.len());
+    for toolchain_type in &class.toolchain_types {
+        types.push(crate::platform::actual(ctx, *toolchain_type).await?);
+    }
+    let mut optional = Vec::with_capacity(class.optional_toolchain_types.len());
+    for toolchain_type in &class.optional_toolchain_types {
+        optional.push(crate::platform::actual(ctx, *toolchain_type).await?);
+    }
     let key = ToolchainResolutionKey {
         config: config.id,
-        types: class.toolchain_types.clone(),
-        optional: class.optional_toolchain_types.clone(),
+        types,
+        optional,
     };
     let resolution = ctx.compute(&key).await?;
     let keys: Vec<ConfiguredTargetKey> = resolution
@@ -50,12 +58,14 @@ pub async fn resolve(ctx: &Ctx, class: &RuleClass, config: &BuildConfiguration) 
         .collect();
     let mut analyzed = ctx.compute_many(&keys).await.into_iter();
     let mut resolved = Vec::with_capacity(resolution.toolchains.len());
-    for (toolchain_type, toolchain) in &resolution.toolchains {
+    for ((_, toolchain), requested) in resolution.toolchains.iter().zip(&class.toolchain_types) {
         let target = match toolchain {
             Some(_) => Some(analyzed.next().ok_or_else(|| SkyError::new("toolchain analysis"))??),
             None => None,
         };
-        resolved.push((*toolchain_type, target));
+        // Rules look toolchains up by the type they asked for, which may be
+        // an alias.
+        resolved.push((*requested, target));
     }
     Ok(ResolvedToolchains { resolved })
 }
@@ -137,6 +147,7 @@ async fn declared_toolchain(ctx: &Ctx, label: Label) -> Result<DeclaredToolchain
     let Some(AttrValue::Label(toolchain_type)) = rule.attr(Symbol::intern("toolchain_type")).cloned() else {
         return Err(SkyError::new(format!("{label}: toolchain has no toolchain_type")));
     };
+    let toolchain_type = crate::platform::actual(ctx, toolchain_type).await?;
     Ok(DeclaredToolchain {
         label,
         toolchain_type,
@@ -299,12 +310,36 @@ impl<'v, V: ValueLike<'v>> fmt::Display for ToolchainContextGen<V> {
     }
 }
 
-fn toolchain_type_label(index: Value<'_>) -> Option<Label> {
-    if let Some(label) = index.downcast_ref::<LabelValue>() {
-        return Some(label.0);
+impl<'v, V: ValueLike<'v>> ToolchainContextGen<V> {
+    /// The position of the toolchain type an index names: a label, or a
+    /// string, which may name the type's repository by an apparent name.
+    fn position(&self, index: Value<'v>) -> Option<usize> {
+        if let Some(label) = index.downcast_ref::<LabelValue>() {
+            return self.types.iter().position(|toolchain_type| *toolchain_type == label.0);
+        }
+        let text = index.unpack_str()?;
+        if let Ok(label) = Label::parse_canonical(text) {
+            if let Some(position) = self.types.iter().position(|toolchain_type| *toolchain_type == label) {
+                return Some(position);
+            }
+        }
+        self.types.iter().position(|toolchain_type| names(*toolchain_type, text))
     }
-    let text = index.unpack_str()?;
-    Label::parse_canonical(text).ok()
+}
+
+/// Whether text such as `@rules_rust//rust:toolchain_type` names a label,
+/// taking its repository name as apparent: the canonical name or the module
+/// name it starts with.
+fn names(label: Label, text: &str) -> bool {
+    let Some((repo, rest)) = text.trim_start_matches('@').split_once("//") else {
+        return false;
+    };
+    let (package, name) = rest.split_once(':').unwrap_or((rest, rest.rsplit('/').next().unwrap_or(rest)));
+    if label.package.path.to_string() != package || label.name.as_str() != name {
+        return false;
+    }
+    let canonical = label.repo().as_str();
+    repo.is_empty() && label.repo().is_main() || canonical == repo || canonical.split('+').next() == Some(repo)
 }
 
 #[starlark_value(type = "ToolchainContext")]
@@ -313,9 +348,7 @@ where
     Self: ProvidesStaticType<'v>,
 {
     fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        let label = toolchain_type_label(index);
-        let found = self.types.iter().position(|toolchain_type| Some(*toolchain_type) == label);
-        match found {
+        match self.position(index) {
             Some(position) => Ok(self.values[position].to_value()),
             None => Err(starlark::Error::new_other(anyhow::anyhow!(
                 "toolchain type {} was requested but only types [{}] are configured",
@@ -326,7 +359,6 @@ where
     }
 
     fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
-        let label = toolchain_type_label(other);
-        Ok(self.types.iter().any(|toolchain_type| Some(*toolchain_type) == label))
+        Ok(self.position(other).is_some())
     }
 }
