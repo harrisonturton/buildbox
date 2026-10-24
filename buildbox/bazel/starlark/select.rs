@@ -101,6 +101,10 @@ where
         });
         Ok(concat(me, other, heap))
     }
+
+    fn rbit_or(&self, lhs: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
+        self.radd(lhs, heap)
+    }
 }
 
 #[starlark_value(type = "select")]
@@ -127,6 +131,10 @@ where
             parts: self.parts.iter().map(|p| p.to_value()).collect(),
         });
         Ok(concat(me, other, heap))
+    }
+
+    fn rbit_or(&self, lhs: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
+        self.radd(lhs, heap)
     }
 }
 

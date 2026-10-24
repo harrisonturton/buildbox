@@ -140,3 +140,16 @@ fn errors_keep_earlier_targets() {
     assert_eq!(package.errors.len(), 1);
     assert!(package.errors[0].contains("no such attribute 'nope'"), "{}", package.errors[0]);
 }
+
+#[test]
+fn accepts_bazels_dialect() {
+    let file = label("//pkg:dialect.bzl");
+    let source = r#"
+UNION = {"a": "1"} | select({"//conditions:default": {"b": "2"}})
+DEFAULT = {}.get("k", default = 3)
+"#;
+    let ast = parse(file, source.to_string()).unwrap();
+    let (module, _) = eval_bzl(ast, &BZL_GLOBALS, &Loads { modules: HashMap::new() }, EvalContext::new(FileKind::Bzl, file)).unwrap();
+    assert_eq!(module.get("UNION").unwrap().value().get_type(), "select");
+    assert_eq!(module.get("DEFAULT").unwrap().value().unpack_i32(), Some(3));
+}

@@ -60,6 +60,9 @@ impl<'v> StarlarkValue<'v> for Opaque {
         if self.type_name == "_builtins.toplevel.config_common.toolchain_type" {
             return builtins_toolchain_type(args, eval).map_err(starlark::Error::new_other);
         }
+        if self.type_name == "_builtins.internal.apple_common.dotted_version" {
+            return dotted_version_call(args, eval).map_err(starlark::Error::new_other);
+        }
         if is_flag_getter(&self.type_name) {
             return Ok(Value::new_bool(false));
         }
@@ -133,6 +136,15 @@ impl<'v> StarlarkValue<'v> for Namespace {
 fn is_flag_getter(type_name: &str) -> bool {
     let name = type_name.rsplit('.').next().unwrap_or(type_name);
     name.starts_with("incompatible_") || name.starts_with("experimental_")
+}
+
+/// `_builtins.internal.apple_common.dotted_version`, as the real function.
+fn dotted_version_call<'v>(args: &Arguments<'v, '_>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+    let positions: Vec<Value<'v>> = args.positions(eval.heap()).map_err(|error| anyhow::anyhow!("{error}"))?.collect();
+    let [version] = positions.as_slice() else {
+        anyhow::bail!("dotted_version() takes one version");
+    };
+    crate::dotted_version::dotted_version(*version, eval.heap())
 }
 
 /// `_builtins.toplevel.config_common.toolchain_type`, which the builtin

@@ -1,0 +1,5 @@
+# Patches to starlark-rust, for Bazel's dialect of Starlark:
+#
+# - A reflected `|` (`rbit_or`), so `dict | select(...)` reaches select.
+# - `dict.get` takes `default` by name, as `d.get(key, default = None)`.
+exports_files(["starlark.patch"])

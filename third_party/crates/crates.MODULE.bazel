@@ -242,6 +242,13 @@ crate.spec(
     version = "0.3",
 )
 
+# Bazel's dialect of Starlark, which starlark-rust doesn't accept as written.
+crate.annotation(
+    crate = "starlark",
+    patch_args = ["-p1"],
+    patches = ["//third_party/starlark:starlark.patch"],
+)
+
 # Resolved crate versions are pinned in these lockfiles. To update them, run:
 #   CARGO_BAZEL_REPIN=1 bazel build //...
 crate.from_specs(

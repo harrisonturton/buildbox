@@ -1,0 +1,88 @@
+diff --git a/src/eval/compiler/stmt.rs b/src/eval/compiler/stmt.rs
+index c6c7b65..18211d7 100644
+--- a/src/eval/compiler/stmt.rs
++++ b/src/eval/compiler/stmt.rs
+@@ -576,6 +576,11 @@ pub(crate) fn bit_or_assign<'v>(
+         if lhs.ptr_eq(rhs) {
+             // Nothing to do as union is idempotent
+         } else {
++            if DictRef::from_value(rhs).is_none() {
++                if let Some(result) = rhs.get_ref().rbit_or(lhs, heap) {
++                    return result;
++                }
++            }
+             let rhs = DictRef::from_value(rhs).map_or_else(
+                 || {
+                     ValueError::unsupported_owned(
+@@ -592,7 +597,7 @@ pub(crate) fn bit_or_assign<'v>(
+         }
+         Ok(lhs)
+     } else {
+-        lhs_aref.bit_or(rhs, heap)
++        lhs.bit_or(rhs, heap)
+     }
+ }
+ 
+diff --git a/src/values/layout/value.rs b/src/values/layout/value.rs
+index 7554138..0d71174 100644
+--- a/src/values/layout/value.rs
++++ b/src/values/layout/value.rs
+@@ -644,7 +644,10 @@ impl<'v> Value<'v> {
+ 
+     /// `x | other`.
+     pub fn bit_or(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
+-        self.get_ref().bit_or(other, heap)
++        match self.get_ref().bit_or(other, heap) {
++            Ok(value) => Ok(value),
++            Err(error) => other.get_ref().rbit_or(self, heap).unwrap_or(Err(error)),
++        }
+     }
+ 
+     /// `x ^ other`.
+diff --git a/src/values/layout/vtable.rs b/src/values/layout/vtable.rs
+index bd931ee..519d4ae 100644
+--- a/src/values/layout/vtable.rs
++++ b/src/values/layout/vtable.rs
+@@ -577,6 +577,11 @@ impl<'v> AValueDyn<'v> {
+         (self.vtable.starlark_value.radd)(self.value, other, heap)
+     }
+ 
++    #[inline]
++    pub(crate) fn rbit_or(self, other: Value<'v>, heap: Heap<'v>) -> Option<crate::Result<Value<'v>>> {
++        (self.vtable.starlark_value.rbit_or)(self.value, other, heap)
++    }
++
+     #[inline]
+     pub(crate) fn sub(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
+         (self.vtable.starlark_value.sub)(self.value, other, heap)
+diff --git a/src/values/traits.rs b/src/values/traits.rs
+index 3388366..f72ed01 100644
+--- a/src/values/traits.rs
++++ b/src/values/traits.rs
+@@ -832,6 +832,13 @@ pub trait StarlarkValue<'v>:
+         ValueError::unsupported_with(self, "|", other)
+     }
+ 
++    /// `|` with the arguments the other way around, for when the left
++    /// operand doesn't support the right, as with `dict | select(...)` in
++    /// Bazel. Return [`None`] to keep the left operand's error.
++    fn rbit_or(&self, _lhs: Value<'v>, _heap: Heap<'v>) -> Option<crate::Result<Value<'v>>> {
++        None
++    }
++
+     /// Bitwise `^` operator.
+     fn bit_xor(&self, other: Value<'v>, _heap: Heap<'v>) -> crate::Result<Value<'v>> {
+         ValueError::unsupported_with(self, "^", other)
+diff --git a/src/values/types/dict/methods.rs b/src/values/types/dict/methods.rs
+index e71c19f..43bff82 100644
+--- a/src/values/types/dict/methods.rs
++++ b/src/values/types/dict/methods.rs
+@@ -83,7 +83,7 @@ pub(crate) fn dict_methods(registry: &mut MethodsBuilder) {
+     fn get<'v>(
+         this: DictRef<'v>,
+         #[starlark(require = pos)] key: Value<'v>,
+-        #[starlark(require = pos)] default: Option<Value<'v>>,
++        default: Option<Value<'v>>,
+     ) -> starlark::Result<Value<'v>> {
+         match this.get(key)? {
+             None => Ok(default.unwrap_or_else(Value::new_none)),

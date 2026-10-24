@@ -1,5 +1,5 @@
 {
-  "checksum": "8438053bb04237180f758ba554f779eb63cb831af3fefa0a47a2b62c5ef936b8",
+  "checksum": "06237921ac961a0988149e17597dfd667c512881841a51b1dc67b87ddfc86813",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -11845,6 +11845,12 @@
       "package_url": "https://github.com/facebook/starlark-rust",
       "repository": {
         "Http": {
+          "patch_args": [
+            "-p1"
+          ],
+          "patches": [
+            "@@//third_party/starlark:starlark.patch"
+          ],
           "sha256": "9062e866918dc4c9701c98ac99f7f4fa9e4b3b4edce306e147393bc75458c4fc",
           "url": "https://static.crates.io/crates/starlark/0.14.2/download"
         }

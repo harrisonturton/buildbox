@@ -32,7 +32,6 @@ impl EvalError {
 /// Parse a file, named by its label so that builtins can tell which file
 /// called them.
 pub fn parse(file: Label, source: String) -> Result<AstModule, EvalError> {
-    let source = crate::compat::rewrite(&source);
     AstModule::parse(&file.canonical_form_for_file(), source, &dialect()).map_err(EvalError::new)
 }
 
