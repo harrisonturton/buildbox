@@ -182,8 +182,8 @@ impl Graph {
     }
 
     /// Mark keys as needing to be computed again, because something they
-    /// read outside the graph has changed, and start a new revision. Waits
-    /// for open sessions to finish.
+    /// read outside the graph has changed, and start a new revision if the
+    /// graph has any of them. Waits for open sessions to finish.
     pub async fn invalidate<K: Key>(&self, keys: &[K]) {
         if keys.is_empty() {
             return;
@@ -191,15 +191,19 @@ impl Graph {
         let _guard = self.0.sessions.write().await;
         let engine = &self.0.engine.0;
         let mut state = self.0.lock();
+        let mut dirtied = false;
         for key in keys {
             let Some(id) = engine.keys.get(key) else {
                 continue;
             };
             if let Some(node) = state.nodes.get_mut(&id.0) {
                 node.flags |= DIRTY;
+                dirtied = true;
             }
         }
-        self.0.revision.fetch_add(1, Ordering::AcqRel);
+        if dirtied {
+            self.0.revision.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     /// Every key of type `K` with a result in this graph, for finding which

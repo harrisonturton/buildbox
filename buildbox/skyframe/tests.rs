@@ -263,6 +263,20 @@ async fn invalidated_keys_are_recomputed() {
 }
 
 #[tokio::test]
+async fn invalidating_keys_the_graph_lacks_keeps_its_revision() {
+    let engine = Engine::default();
+    let counts = Arc::new(Counts::default());
+    let (graph, _disk) = workspace(&engine, &counts);
+    assert_eq!(total(&graph).await, 5);
+    let revision = graph.stats().revision;
+
+    graph.invalidate(&[File("never read".into())]).await;
+    assert_eq!(graph.stats().revision, revision);
+    graph.invalidate(&[File("a".into())]).await;
+    assert_eq!(graph.stats().revision, revision + 1);
+}
+
+#[tokio::test]
 async fn unchanged_values_stop_recomputation() {
     let engine = Engine::default();
     let counts = Arc::new(Counts::default());
