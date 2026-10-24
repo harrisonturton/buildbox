@@ -1,0 +1,50 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "artifacts",
+    srcs = ["artifacts.rs"],
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/cas",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "artifacts_test",
+    crate = ":artifacts",
+)
+
+rust_library(
+    name = "fs",
+    srcs = [
+        "fs.rs",
+        "unpack.rs",
+    ],
+    crate_name = "artifacts_fs",
+    crate_root = "fs.rs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox/server:__pkg__"],
+    deps = [
+        ":artifacts",
+        "//buildbox/cas",
+        "//buildbox/fsutil",
+        "//buildbox/oci",
+        "@crates//:flate2",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tar",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "fs_test",
+    crate = ":fs",
+    deps = ["//buildbox/cas:mem"],
+)

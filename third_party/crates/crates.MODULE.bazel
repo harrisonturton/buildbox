@@ -65,6 +65,17 @@ crate.spec(
     version = "2.8",
 )
 
+# Reading container image layers, which are tar files, often gzipped.
+crate.spec(
+    package = "tar",
+    version = "0.4",
+)
+
+crate.spec(
+    package = "flate2",
+    version = "1",
+)
+
 # Async runtime and RPC dependencies
 
 crate.spec(

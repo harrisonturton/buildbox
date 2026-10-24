@@ -1,0 +1,21 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "oci",
+    srcs = ["oci.rs"],
+    visibility = [
+        "//buildbox/artifacts:__pkg__",
+        "//buildbox/cli:__pkg__",
+    ],
+    deps = [
+        "//buildbox/cas",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "oci_test",
+    crate = ":oci",
+)

@@ -5,6 +5,7 @@ rust_library(
     srcs = ["fsutil.rs"],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
+        "@crates//:libc",
         "@crates//:tokio",
         "@crates//:tracing",
     ],

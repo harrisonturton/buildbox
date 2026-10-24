@@ -36,6 +36,32 @@ pub fn lock_dir(dir: &Path) -> io::Result<File> {
     }
 }
 
+/// Write everything buffered for the filesystem holding `path` to disk, so
+/// files written there survive a crash.
+pub fn sync_filesystem(path: &Path) -> io::Result<()> {
+    let file = File::open(path)?;
+    sync_filesystem_of(&file)
+}
+
+#[cfg(target_os = "linux")]
+fn sync_filesystem_of(file: &File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: syncfs only reads the file descriptor, which `file` keeps open.
+    let result = unsafe { libc::syncfs(file.as_raw_fd()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Other systems have no way to sync one filesystem, so sync them all.
+#[cfg(not(target_os = "linux"))]
+fn sync_filesystem_of(_file: &File) -> io::Result<()> {
+    // SAFETY: sync has no arguments and can't fail.
+    unsafe { libc::sync() };
+    Ok(())
+}
+
 /// Delete `dir` and everything in it if it exists, then create it empty.
 pub fn reset_dir(dir: &Path) -> io::Result<()> {
     match std::fs::remove_dir_all(dir) {

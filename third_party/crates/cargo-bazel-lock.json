@@ -1,5 +1,5 @@
 {
-  "checksum": "aa31f7e3c83a09e4b1e914b7681688fa4ed64f1680484b4fc705723a70f38abf",
+  "checksum": "fd2c2032a91e0aea79a722fe2a667c19264143d2f01492cceafd390382d3e722",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -44,7 +44,14 @@
     "cfg(all(target_os = \"emscripten\", wasm_bindgen_unstable_tokio))": [],
     "cfg(all(target_os = \"uefi\", getrandom_backend = \"efi_rng\"))": [],
     "cfg(any())": [],
+    "cfg(any(target_os = \"android\", target_os = \"linux\", target_os = \"macos\", target_os = \"hurd\"))": [
+      "aarch64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-nixos-gnu"
+    ],
     "cfg(any(target_os = \"dragonfly\", target_os = \"freebsd\", target_os = \"hurd\", target_os = \"illumos\", target_os = \"cygwin\", all(target_os = \"horizon\", target_arch = \"arm\")))": [],
+    "cfg(any(target_os = \"freebsd\", target_os = \"netbsd\"))": [],
     "cfg(any(target_os = \"haiku\", target_os = \"redox\", target_os = \"nto\", target_os = \"aix\"))": [],
     "cfg(any(target_os = \"ios\", target_os = \"visionos\", target_os = \"watchos\", target_os = \"tvos\"))": [],
     "cfg(any(target_os = \"macos\", target_os = \"openbsd\", target_os = \"vita\", target_os = \"emscripten\"))": [
@@ -106,6 +113,36 @@
     ]
   },
   "crates": {
+    "adler2 2.0.1": {
+      "common_attrs": {
+        "edition": "2021"
+      },
+      "library_target_name": "adler2",
+      "license": "0BSD OR MIT OR Apache-2.0",
+      "license_file": "LICENSE-0BSD",
+      "license_ids": [
+        "0BSD",
+        "Apache-2.0",
+        "MIT"
+      ],
+      "name": "adler2",
+      "package_url": "https://github.com/oyvindln/adler2",
+      "repository": {
+        "Http": {
+          "sha256": "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa",
+          "url": "https://static.crates.io/crates/adler2/2.0.1/download"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "adler2",
+            "crate_root": "src/lib.rs"
+          }
+        }
+      ],
+      "version": "2.0.1"
+    },
     "aho-corasick 1.1.5": {
       "common_attrs": {
         "edition": "2021"
@@ -1382,6 +1419,54 @@
       ],
       "version": "0.9.0"
     },
+    "crc32fast 1.5.3": {
+      "build_script_attrs": {},
+      "common_attrs": {
+        "crate_features": [
+          "std"
+        ],
+        "deps": [
+          {
+            "id": "cfg-if 1.0.5",
+            "target": "cfg_if"
+          }
+        ],
+        "edition": "2021",
+        "extra_deps": [
+          ":build_script_build"
+        ]
+      },
+      "library_target_name": "crc32fast",
+      "license": "MIT OR Apache-2.0",
+      "license_file": "LICENSE-APACHE",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "name": "crc32fast",
+      "package_url": "https://github.com/srijs/rust-crc32fast",
+      "repository": {
+        "Http": {
+          "sha256": "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055",
+          "url": "https://static.crates.io/crates/crc32fast/1.5.3/download"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "crc32fast",
+            "crate_root": "src/lib.rs"
+          }
+        },
+        {
+          "BuildScript": {
+            "crate_name": "build_script_build",
+            "crate_root": "build.rs"
+          }
+        }
+      ],
+      "version": "1.5.3"
+    },
     "data-encoding 2.11.1": {
       "common_attrs": {
         "crate_features": [
@@ -1600,6 +1685,10 @@
             "target": "data_encoding"
           },
           {
+            "id": "flate2 1.1.10",
+            "target": "flate2"
+          },
+          {
             "id": "futures 0.3.34",
             "target": "futures"
           },
@@ -1622,6 +1711,10 @@
           {
             "id": "serde_json 1.0.154",
             "target": "serde_json"
+          },
+          {
+            "id": "tar 0.4.46",
+            "target": "tar"
           },
           {
             "id": "tempfile 3.27.0",
@@ -1813,6 +1906,51 @@
       ],
       "version": "2.5.0"
     },
+    "filetime 0.2.29": {
+      "common_attrs": {
+        "deps": {
+          "common": [
+            {
+              "id": "cfg-if 1.0.5",
+              "target": "cfg_if"
+            }
+          ],
+          "selects": {
+            "cfg(unix)": [
+              {
+                "id": "libc 0.2.191",
+                "target": "libc"
+              }
+            ]
+          }
+        },
+        "edition": "2018"
+      },
+      "library_target_name": "filetime",
+      "license": "MIT/Apache-2.0",
+      "license_file": "LICENSE-APACHE",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "name": "filetime",
+      "package_url": "https://github.com/alexcrichton/filetime",
+      "repository": {
+        "Http": {
+          "sha256": "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759",
+          "url": "https://static.crates.io/crates/filetime/0.2.29/download"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "filetime",
+            "crate_root": "src/lib.rs"
+          }
+        }
+      ],
+      "version": "0.2.29"
+    },
     "find-msvc-tools 0.1.15": {
       "common_attrs": {
         "edition": "2021"
@@ -1847,9 +1985,21 @@
         "crate_features": [
           "any_impl",
           "any_zlib",
+          "default",
+          "miniz_oxide",
+          "runtime_detection",
+          "rust_backend",
           "zlib-rs"
         ],
         "deps": [
+          {
+            "id": "crc32fast 1.5.3",
+            "target": "crc32fast"
+          },
+          {
+            "id": "miniz_oxide 0.9.1",
+            "target": "miniz_oxide"
+          },
           {
             "id": "zlib-rs 0.6.8",
             "target": "zlib_rs"
@@ -3629,6 +3779,52 @@
       ],
       "version": "2.8.3"
     },
+    "miniz_oxide 0.9.1": {
+      "common_attrs": {
+        "crate_features": [
+          "default",
+          "simd",
+          "simd-adler32",
+          "with-alloc"
+        ],
+        "deps": [
+          {
+            "id": "adler2 2.0.1",
+            "target": "adler2"
+          },
+          {
+            "id": "simd-adler32 0.3.10",
+            "target": "simd_adler32"
+          }
+        ],
+        "edition": "2021"
+      },
+      "library_target_name": "miniz_oxide",
+      "license": "MIT OR Zlib OR Apache-2.0",
+      "license_file": "LICENSE",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT",
+        "Zlib"
+      ],
+      "name": "miniz_oxide",
+      "package_url": "https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide",
+      "repository": {
+        "Http": {
+          "sha256": "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c",
+          "url": "https://static.crates.io/crates/miniz_oxide/0.9.1/download"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "miniz_oxide",
+            "crate_root": "src/lib.rs"
+          }
+        }
+      ],
+      "version": "0.9.1"
+    },
     "mio 1.2.4": {
       "common_attrs": {
         "crate_features": [
@@ -5063,6 +5259,34 @@
       ],
       "version": "1.4.8"
     },
+    "simd-adler32 0.3.10": {
+      "common_attrs": {
+        "edition": "2018"
+      },
+      "library_target_name": "simd_adler32",
+      "license": "MIT",
+      "license_file": "LICENSE.md",
+      "license_ids": [
+        "MIT"
+      ],
+      "name": "simd-adler32",
+      "package_url": "https://github.com/mcountryman/simd-adler32",
+      "repository": {
+        "Http": {
+          "sha256": "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea",
+          "url": "https://static.crates.io/crates/simd-adler32/0.3.10/download"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "simd_adler32",
+            "crate_root": "src/lib.rs"
+          }
+        }
+      ],
+      "version": "0.3.10"
+    },
     "simdutf8 0.1.5": {
       "common_attrs": {
         "crate_features": [
@@ -5432,6 +5656,79 @@
         }
       ],
       "version": "1.0.2"
+    },
+    "tar 0.4.46": {
+      "common_attrs": {
+        "crate_features": [
+          "default",
+          "xattr"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "filetime 0.2.29",
+              "target": "filetime"
+            }
+          ],
+          "selects": {
+            "aarch64-apple-darwin": [
+              {
+                "id": "xattr 1.6.1",
+                "target": "xattr"
+              }
+            ],
+            "aarch64-unknown-linux-gnu": [
+              {
+                "id": "xattr 1.6.1",
+                "target": "xattr"
+              }
+            ],
+            "cfg(unix)": [
+              {
+                "id": "libc 0.2.191",
+                "target": "libc"
+              }
+            ],
+            "x86_64-unknown-linux-gnu": [
+              {
+                "id": "xattr 1.6.1",
+                "target": "xattr"
+              }
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              {
+                "id": "xattr 1.6.1",
+                "target": "xattr"
+              }
+            ]
+          }
+        },
+        "edition": "2021"
+      },
+      "library_target_name": "tar",
+      "license": "MIT OR Apache-2.0",
+      "license_file": "LICENSE-APACHE",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "name": "tar",
+      "package_url": "https://github.com/composefs/tar-rs",
+      "repository": {
+        "Http": {
+          "sha256": "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840",
+          "url": "https://static.crates.io/crates/tar/0.4.46/download"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "tar",
+            "crate_root": "src/lib.rs"
+          }
+        }
+      ],
+      "version": "0.4.46"
     },
     "tempfile 3.27.0": {
       "common_attrs": {
@@ -7690,10 +7987,61 @@
       ],
       "version": "0.7.15"
     },
+    "xattr 1.6.1": {
+      "common_attrs": {
+        "crate_features": [
+          "default",
+          "unsupported"
+        ],
+        "deps": {
+          "common": [],
+          "selects": {
+            "cfg(any(target_os = \"android\", target_os = \"linux\", target_os = \"macos\", target_os = \"hurd\"))": [
+              {
+                "id": "rustix 1.1.5",
+                "target": "rustix"
+              }
+            ],
+            "cfg(any(target_os = \"freebsd\", target_os = \"netbsd\"))": [
+              {
+                "id": "libc 0.2.191",
+                "target": "libc"
+              }
+            ]
+          }
+        },
+        "edition": "2021"
+      },
+      "library_target_name": "xattr",
+      "license": "MIT OR Apache-2.0",
+      "license_file": "LICENSE-APACHE",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "name": "xattr",
+      "package_url": "https://github.com/Stebalien/xattr",
+      "repository": {
+        "Http": {
+          "sha256": "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156",
+          "url": "https://static.crates.io/crates/xattr/1.6.1/download"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "xattr",
+            "crate_root": "src/lib.rs"
+          }
+        }
+      ],
+      "version": "1.6.1"
+    },
     "zlib-rs 0.6.8": {
       "common_attrs": {
         "crate_features": [
-          "rust-allocator"
+          "rust-allocator",
+          "std"
         ],
         "edition": "2021"
       },
@@ -7771,12 +8119,14 @@
     "connectrpc 0.9.1",
     "connectrpc-codegen 0.9.0",
     "data-encoding 2.11.1",
+    "flate2 1.1.10",
     "futures 0.3.34",
     "http 1.5.0",
     "libc 0.2.191",
     "ring 0.17.14",
     "serde 1.0.229",
     "serde_json 1.0.154",
+    "tar 0.4.46",
     "tempfile 3.27.0",
     "thiserror 2.0.21",
     "tokio 1.54.0",
