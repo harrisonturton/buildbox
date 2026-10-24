@@ -6,6 +6,7 @@ use bazel_label::RepoName;
 use bazel_loading::RepoMappingKey;
 use bazel_options::{OptionKind, OptionSpec};
 use bazel_query::{OutputFormat, QueryOptions, QueryRequest};
+use bazel_ui::Phase;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -46,6 +47,9 @@ pub(crate) fn query_spec() -> OptionSpec {
         ("loading_phase_threads", Value),
         ("experimental_graphless_query", Value),
         ("repo_env", Multi),
+        ("color", Value),
+        ("curses", Value),
+        ("show_progress", Bool),
     ])
 }
 
@@ -58,6 +62,7 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
             return exit::COMMAND_LINE_ERROR;
         }
     };
+    out.configure(&options).await;
     let expression = match query_expression(&options) {
         Ok(expression) => expression,
         Err(message) => {
@@ -81,8 +86,10 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
         keep_going: options.flag("keep_going", false),
     };
     let workspace = context.server.workspaces().get(&context.workspace_root);
+    out.track(workspace.progress.track()).await;
     workspace.refresh(crate::command::repo_environment(context, &options)).await;
     let session = workspace.graph.session().await;
+    out.phase(Phase::RepoMapping).await;
     let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
         Ok(mapping) => Arc::new(mapping.0.clone()),
         Err(error) => {
@@ -98,7 +105,9 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
         main_mapping,
         workspace_root: context.workspace_root.clone(),
     };
+    out.phase(Phase::Loading).await;
     let result = bazel_query::run(session, request).await;
+    out.phase(Phase::Idle).await;
     let result = match result {
         Ok(result) => result,
         Err(error) => {

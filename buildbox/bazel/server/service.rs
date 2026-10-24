@@ -2,6 +2,7 @@
 
 use crate::output::Output;
 use crate::{BazelServer, Invocation};
+use bazel_ui::Terminal;
 use bazel_rust_connect::buildbox::bazel::v1::{Bazel, RunRequest, RunResponse, run_response};
 use connectrpc::{RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
 use futures::Stream;
@@ -37,11 +38,18 @@ impl Bazel for BazelService {
             working_directory: PathBuf::from(request.working_directory),
             env: request.env.into_iter().map(|var| (var.name, var.value)).collect(),
         };
+        let terminal = Terminal {
+            interactive: request.interactive,
+            columns: request.terminal_columns,
+            term: invocation.env.get("TERM").cloned(),
+        };
         let (sender, receiver) = mpsc::channel(OUTPUT_BUFFER);
         let server = self.server.clone();
         let task = tokio::spawn(async move {
-            let out = Output::new(sender.clone());
+            let out = Output::new(sender.clone(), terminal);
             let code = server.run(invocation, &out).await;
+            out.finish().await;
+            drop(out);
             let done = RunResponse {
                 output: Some(run_response::Output::ExitCode(code)),
                 ..Default::default()

@@ -13,6 +13,7 @@ use bazel_loading::RepoMappingKey;
 use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
 use bazel_packages::{AttrValue, Target};
 use bazel_query::{QueryOptions, TargetSet, Universe};
+use bazel_ui::Phase;
 use bazel_starlark::depset::Depset;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -109,29 +110,51 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
         Err(code) => return failed(code, started, out).await,
     };
     report(context, &options, &built, out).await;
-    out.info(&format!("Elapsed time: {:.3}s", started.elapsed().as_secs_f64())).await;
+    report_stats(started, out).await;
     if built.errors {
         out.error("Build did NOT complete successfully").await;
         return exit::BUILD_FAILURE;
     }
-    out.info("Build completed successfully").await;
+    completed(0, out).await;
     exit::SUCCESS
 }
 
 /// End a command whose build failed before it finished, as Bazel does.
 pub async fn failed(code: i32, started: Instant, out: &Output) -> i32 {
     if code == exit::BUILD_FAILURE {
-        out.info(&format!("Elapsed time: {:.3}s", started.elapsed().as_secs_f64())).await;
+        report_stats(started, out).await;
         out.error("Build did NOT complete successfully").await;
     }
     code
+}
+
+/// Say how long the command took and how its actions ran.
+pub async fn report_stats(started: Instant, out: &Output) {
+    let snapshot = out.snapshot().await;
+    out.info(&format!("Elapsed time: {:.3}s", started.elapsed().as_secs_f64())).await;
+    out.info(&bazel_ui::processes(&snapshot)).await;
+}
+
+/// Say that the build completed, with how many tests failed, and how many
+/// actions it ran.
+pub async fn completed(failed_tests: usize, out: &Output) {
+    let outcome = match failed_tests {
+        0 => " successfully".to_string(),
+        1 => ", 1 test FAILED".to_string(),
+        count => format!(", {count} tests FAILED"),
+    };
+    let actions = bazel_ui::total_actions(&out.snapshot().await);
+    out.info(&format!("Build completed{outcome}, {actions}")).await;
 }
 
 /// Parse a build command's options.
 pub async fn parse(context: &CommandContext<'_>, command: &str, args: &[String], out: &Output) -> Result<ParsedOptions, i32> {
     let all_args = bazel_options::command_args(&context.rc, command, args);
     match bazel_options::parse(&all_args, &build_spec(), &context.rc, command) {
-        Ok(options) => Ok(options),
+        Ok(options) => {
+            out.configure(&options).await;
+            Ok(options)
+        }
         Err(error) => {
             out.error(&error.to_string()).await;
             Err(exit::COMMAND_LINE_ERROR)
@@ -158,6 +181,8 @@ pub async fn run_command(
     testing: bool,
     out: &Output,
 ) -> Result<Built, i32> {
+    let tracker = context.server.workspaces().get(&context.workspace_root).progress.track();
+    out.track(tracker).await;
     let (analyzed, head_starts) = futures::channel::mpsc::unbounded();
     let execute_actions = options.flag("build", true);
     let analyzed = execute_actions.then_some(analyzed);
@@ -203,6 +228,7 @@ async fn analyze_and_build(
     analyzed: Option<UnboundedSender<Arc<ConfiguredTarget>>>,
     out: &Output,
 ) -> Result<Built, i32> {
+    out.phase(Phase::RepoMapping).await;
     let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
         Ok(mapping) => Arc::new(mapping.0.clone()),
         Err(error) => {
@@ -211,6 +237,7 @@ async fn analyze_and_build(
         }
     };
     let keep_going = options.flag("keep_going", false);
+    out.phase(Phase::Loading).await;
     let (labels, explicit) = match targets(context, session, options, &main_mapping).await {
         Ok(requested) => requested,
         Err(message) => {
@@ -225,6 +252,8 @@ async fn analyze_and_build(
             return Err(exit::COMMAND_LINE_ERROR);
         }
     };
+    let what = analyzing(&labels, &main_mapping);
+    out.phase(Phase::Analyzing(what.clone())).await;
     let (analyzed, mut errors) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
     let incompatible = report_explicitly_incompatible(&analyzed, &explicit, &main_mapping, out).await;
     if errors && !keep_going {
@@ -235,7 +264,8 @@ async fn analyze_and_build(
         return Err(exit::BUILD_FAILURE);
     }
     errors |= incompatible;
-    report_analysis(&analyzed, &main_mapping, testing, out).await;
+    report_analysis(&what, &analyzed, testing, out).await;
+    out.phase(Phase::Executing).await;
 
     let exec_root = crate::commands::output_base_for(context.server, &context.workspace_root).join("execroot/_main");
     let backend = context.server.backend();
@@ -319,12 +349,18 @@ fn dependency_chain(reason: &Incompatibility, mapping: &RepoMappingTable) -> Str
     lines.join("\n")
 }
 
-/// Say what was analyzed, as Bazel does.
-async fn report_analysis(analyzed: &[(Label, Arc<ConfiguredTarget>)], mapping: &RepoMappingTable, testing: bool, out: &Output) {
-    match analyzed {
-        [(label, _)] => out.info(&format!("Analyzed target {}.", bazel_query::display_label(*label, mapping))).await,
-        _ => out.info(&format!("Analyzed {} targets.", analyzed.len())).await,
+/// What the analysis phase is said to analyze: `target //pkg:name`, or
+/// `3 targets`.
+fn analyzing(labels: &[Label], mapping: &RepoMappingTable) -> String {
+    match labels {
+        [label] => format!("target {}", bazel_query::display_label(*label, mapping)),
+        _ => format!("{} targets", bazel_ui::format_count(labels.len() as u64)),
     }
+}
+
+/// Say what was analyzed, as Bazel does.
+async fn report_analysis(what: &str, analyzed: &[(Label, Arc<ConfiguredTarget>)], testing: bool, out: &Output) {
+    out.info(&bazel_ui::analyzed(what, &out.snapshot().await)).await;
     let tests = analyzed.iter().filter(|(_, target)| target.is_test).count();
     let others = analyzed.len() - tests;
     match testing {
@@ -769,6 +805,7 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
     if built.targets.len() > show_result {
         return;
     }
+    let mut failures = false;
     for (label, target, files) in &built.targets {
         if target.incompatible.is_some() {
             continue;
@@ -779,13 +816,20 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
             out.stderr(&format!("Target {shown} up-to-date (nothing to build)\n")).await;
             continue;
         }
-        out.stderr(&format!("Target {shown} up-to-date:\n")).await;
-        for artifact in defaults {
-            let built = files.iter().any(|file| file.path == artifact.exec_path);
-            if built {
-                out.stderr(&format!("  {}\n", display_path(&artifact, prefix, &config.output_directory))).await;
-            }
+        let all_built = defaults.iter().all(|artifact| files.iter().any(|file| file.path == artifact.exec_path));
+        if !all_built {
+            out.stderr(&format!("Target {shown} failed to build\n")).await;
+            failures = true;
+            continue;
         }
+        let mut text = format!("Target {shown} up-to-date:\n");
+        for artifact in defaults {
+            text.push_str(&format!("  {}\n", display_path(&artifact, prefix, &config.output_directory)));
+        }
+        out.stderr(&text).await;
+    }
+    if failures && !options.flag("verbose_failures", false) {
+        out.stderr("Use --verbose_failures to see the command lines of failed build steps.\n").await;
     }
 }
 

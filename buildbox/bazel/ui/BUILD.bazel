@@ -1,0 +1,22 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "ui",
+    srcs = [
+        "bar.rs",
+        "screen.rs",
+        "summary.rs",
+        "ui.rs",
+    ],
+    crate_name = "bazel_ui",
+    crate_root = "ui.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = ["//buildbox/bazel/progress"],
+)
+
+rust_test(
+    name = "ui_test",
+    crate = ":ui",
+)

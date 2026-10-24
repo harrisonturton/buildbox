@@ -9,8 +9,10 @@ use bazel_loading::PackageKey;
 use intern::Symbol;
 use skyframe::Session;
 use std::path::PathBuf;
+use std::time::Instant;
 
 pub async fn run(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {
+    let started = Instant::now();
     let mut options = match build::parse(context, "run", args, out).await {
         Ok(options) => options,
         Err(code) => return code,
@@ -25,14 +27,15 @@ pub async fn run(context: &CommandContext<'_>, args: &[String], out: &Output) ->
     let session = workspace.graph.session().await;
     let built = match build::run(context, &session, &options, out).await {
         Ok(built) => built,
-        Err(code) => return code,
+        Err(code) => return build::failed(code, started, out).await,
     };
     build::report(context, &options, &built, out).await;
+    build::report_stats(started, out).await;
     if built.errors {
         out.error("Build failed. Not running target").await;
         return exit::BUILD_FAILURE;
     }
-    out.info("Build completed successfully").await;
+    build::completed(0, out).await;
     let argv = match command_line(&session, &built, &pattern, program_args).await {
         Ok(argv) => argv,
         Err(message) => {

@@ -72,6 +72,7 @@ rust_library(
         "//buildbox/bazel/progress",
         "//buildbox/bazel/query",
         "//buildbox/bazel/starlark",
+        "//buildbox/bazel/ui",
         "//buildbox/intern",
         "//buildbox/jemalloc",
         "//buildbox/persist",

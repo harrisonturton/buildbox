@@ -36,7 +36,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     };
     build::report(context, &options, &built, out).await;
     if built.errors {
-        out.info(&format!("Elapsed time: {:.3}s", started.elapsed().as_secs_f64())).await;
+        build::report_stats(started, out).await;
         out.error("Build did NOT complete successfully").await;
         return exit::BUILD_FAILURE;
     }
@@ -63,12 +63,8 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
 
     let failed: Vec<TestKey> = results.iter().filter(|(_, result)| !passed(result)).map(|(key, _)| *key).collect();
     workspace.graph.invalidate(&failed).await;
-    out.info(&format!("Elapsed time: {:.3}s", started.elapsed().as_secs_f64())).await;
-    match failed.len() {
-        0 => out.info("Build completed successfully").await,
-        1 => out.info("Build completed, 1 test FAILED").await,
-        count => out.info(&format!("Build completed, {count} tests FAILED")).await,
-    }
+    build::report_stats(started, out).await;
+    build::completed(failed.len(), out).await;
     summarize(&results, &skipped, &built, epoch, out).await;
     match failed.is_empty() {
         true => exit::SUCCESS,
