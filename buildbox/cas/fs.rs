@@ -339,11 +339,16 @@ fn persist_with_mode(temp_path: TempPath, path: &Path, mode: u32) -> Result<(), 
     std::fs::set_permissions(&temp_path, Permissions::from_mode(mode))
         .map_err(|error| io_error("failed to set permissions on", &temp_path, error))?;
 
-    // If the file already exists this replaces it with identical contents,
-    // which is harmless.
-    temp_path
-        .persist(path)
-        .map_err(|error| io_error("failed to rename into", path, error.error))
+    // An existing file already has the same contents, so is kept rather than
+    // replaced. Replacing it isn't harmless: it unlinks the old file, and
+    // hard linking a file that has just lost its last link fails with
+    // NotFound, so a concurrent materialize would fail.
+    match temp_path.persist_noclobber(path) {
+        Ok(()) => Ok(()),
+        // Dropping the temporary file deletes it.
+        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(io_error("failed to rename into", path, error.error)),
+    }
 }
 
 fn create_dir_all(path: &Path) -> Result<(), CasError> {
@@ -408,6 +413,42 @@ mod tests {
         assert_ne!(a.ino(), x.ino());
         assert_eq!(a.permissions().mode() & 0o777, BLOB_MODE);
         assert_eq!(x.permissions().mode() & 0o777, EXECUTABLE_BLOB_MODE);
+    }
+
+    /// Clients upload the same blob concurrently, for example when several
+    /// actions share an input, while other actions link it into their
+    /// sandboxes. Linking must never see the blob missing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn materialize_succeeds_while_the_blob_is_rewritten() {
+        const ROUNDS: usize = 300;
+        let dir = tempfile::tempdir().unwrap();
+        let cas = FsCas::open(&dir.path().join("cas")).await.unwrap();
+        let digest = cas.put_bytes(b"shared input").await.unwrap();
+        let dests = dir.path().join("dests");
+        std::fs::create_dir(&dests).unwrap();
+
+        let mut tasks = vec![];
+        for _ in 0..2 {
+            let cas = cas.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..ROUNDS {
+                    cas.put_bytes(b"shared input").await.unwrap();
+                }
+            }));
+        }
+        for task in 0..2 {
+            let (cas, digest, dests) = (cas.clone(), digest.clone(), dests.clone());
+            tasks.push(tokio::spawn(async move {
+                for round in 0..ROUNDS {
+                    let executable = round % 2 == 0;
+                    let dest = dests.join(format!("{task}-{round}"));
+                    cas.materialize(&digest, &dest, executable).await.unwrap();
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]
