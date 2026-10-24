@@ -50,12 +50,12 @@ impl Artifact {
     }
 
     /// The directory the artifact's path is relative to, as `File.root`
-    /// gives it: the repository's directory for source files, the output
-    /// directory for generated ones.
+    /// gives it: the execution root for source files, even another
+    /// repository's, and the output directory for generated ones.
     pub fn root(&self) -> PathId {
         match self.config {
             Some(config) => parse(&config.get().bin_dir()),
-            None => repo_dir(self.owner.package.repo),
+            None => PathId::ROOT,
         }
     }
 
