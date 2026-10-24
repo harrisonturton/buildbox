@@ -1,5 +1,7 @@
-//! The local server: finding it, starting it in the background, and
-//! stopping it.
+//! The local servers: finding one, starting it in the background, and
+//! stopping it. The default server listens at the configured address; a
+//! named server listens wherever it could, which it records in its address
+//! file.
 
 use bazel_rust_connect::buildbox::bazel::v1::{BazelClient, GetServerRequest, ShutdownRequest};
 use bazel_server::{PRODUCT, VERSION};
@@ -25,30 +27,68 @@ const QUIET_WAIT: Duration = Duration::from_secs(1);
 /// How often a server that's starting or stopping is checked on.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// The server the configuration names.
+/// The name the default server is listed by, which selects it too.
+pub const DEFAULT_NAME: &str = config::DEFAULT_SERVER_NAME;
+
+/// One of the servers the configuration describes.
 pub struct Daemon {
+    /// `None` for the default server.
+    name: Option<String>,
     listen: SocketAddr,
+    address_file: PathBuf,
     bazel_dir: PathBuf,
     /// The config file given, which a server started from here reads too.
     config_file: Option<PathBuf>,
 }
 
 impl Daemon {
-    /// The server the config file at `config_file`, or the default one,
-    /// describes.
-    pub fn new(config_file: Option<&Path>) -> Result<Daemon, Box<dyn Error>> {
-        let config = config::load(config_file, Settings::default(), &Environment::from_process())?;
+    /// The server named `name`, or `$BB_SERVER_NAME`, or the default one,
+    /// as the config file at `config_file`, or the default file, describes
+    /// it.
+    pub fn new(config_file: Option<&Path>, name: Option<&str>) -> Result<Daemon, Box<dyn Error>> {
+        let settings = Settings {
+            server_name: name.map(str::to_string),
+            ..Settings::default()
+        };
+        let config = config::load(config_file, settings, &Environment::from_process())?;
         Ok(Daemon {
+            name: config.name,
             listen: config.listen,
+            address_file: config.address_file,
             bazel_dir: config.bazel_dir,
             config_file: config_file.map(Path::to_path_buf),
         })
     }
 
+    /// Every server: the default one, then those with names that have
+    /// stored anything, by name.
+    pub fn all(config_file: Option<&Path>) -> Result<Vec<Daemon>, Box<dyn Error>> {
+        let config = config::load(config_file, Settings::default(), &Environment::from_process())?;
+        let names = config.servers_dir.as_deref().map(config::named_servers).unwrap_or_default();
+        let mut daemons = vec![Daemon::new(config_file, Some(DEFAULT_NAME))?];
+        for name in names {
+            daemons.push(Daemon::new(config_file, Some(&name))?);
+        }
+        Ok(daemons)
+    }
+
+    /// What the server is called: its name, or [`DEFAULT_NAME`].
+    pub fn name(&self) -> &str {
+        self.name.as_deref().unwrap_or(DEFAULT_NAME)
+    }
+
     /// A client for the server's Bazel service.
     pub fn client(&self) -> Result<BazelClient<HttpClient>, Box<dyn Error>> {
-        let uri = crate::client::url_for(self.listen).parse()?;
+        let uri = self.url()?.parse()?;
         Ok(BazelClient::new(HttpClient::plaintext(), ClientConfig::new(uri)))
+    }
+
+    /// The URL to reach the server at.
+    pub fn url(&self) -> Result<String, Box<dyn Error>> {
+        match self.address() {
+            Some(address) => Ok(format!("http://{address}")),
+            None => Err(format!("the {PRODUCT} server '{}' isn't running", self.name()).into()),
+        }
     }
 
     /// Where a server started from here writes its log.
@@ -56,9 +96,11 @@ impl Daemon {
         self.bazel_dir.join("server.log")
     }
 
-    /// Whether a server is listening.
+    /// Whether the server is listening.
     pub async fn is_running(&self) -> bool {
-        let address = self.address();
+        let Some(address) = self.address() else {
+            return false;
+        };
         matches!(tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(address)).await, Ok(Ok(_)))
     }
 
@@ -75,7 +117,7 @@ impl Daemon {
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
-        Err(format!("the server didn't start listening on {} within {START_TIMEOUT:?}", self.address()).into())
+        Err(format!("the {PRODUCT} server '{}' didn't start listening within {START_TIMEOUT:?}; see {}", self.name(), self.log_path().display()).into())
     }
 
     /// Ask the server to stop, once its commands have finished or
@@ -114,11 +156,12 @@ impl Daemon {
     /// Send SIGTERM to the server listening on the configured port, which
     /// couldn't be asked to stop because of `why`, returning its pid.
     fn terminate(&self, why: &str) -> Result<u32, Box<dyn Error>> {
-        let Some(pid) = listening_pid(self.listen.port()) else {
-            return Err(format!("the server can't be asked to stop ({why}), and no process of yours is listening on port {}", self.listen.port()).into());
+        let port = self.address().map_or(self.listen.port(), |address| address.port());
+        let Some(pid) = listening_pid(port) else {
+            return Err(format!("the server can't be asked to stop ({why}), and no process of yours is listening on port {port}").into());
         };
         if !is_server_process(pid) {
-            return Err(format!("the process listening on port {} (pid {pid}) isn't a {PRODUCT} server", self.listen.port()).into());
+            return Err(format!("the process listening on port {port} (pid {pid}) isn't a {PRODUCT} server").into());
         }
         // SAFETY: kill only sends a signal to the process.
         if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
@@ -139,6 +182,9 @@ impl Daemon {
         if let Some(config_file) = &self.config_file {
             command.arg("--config").arg(config_file);
         }
+        if let Some(name) = &self.name {
+            command.arg("--server-name").arg(name);
+        }
         command
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
@@ -148,13 +194,20 @@ impl Daemon {
         Ok(())
     }
 
-    /// The address to reach the server at: loopback, if it listens on
-    /// every interface.
-    fn address(&self) -> SocketAddr {
-        crate::client::url_for(self.listen)
-            .trim_start_matches("http://")
-            .parse()
-            .unwrap_or(self.listen)
+    /// The address to reach the server at, if it can be known: for a named
+    /// server, as its address file records, if the server that wrote it is
+    /// still running; for the default server, the configured address, or
+    /// loopback if that's every interface.
+    fn address(&self) -> Option<SocketAddr> {
+        if self.name.is_none() {
+            let url = crate::client::url_for(self.listen);
+            return Some(url.trim_start_matches("http://").parse().unwrap_or(self.listen));
+        }
+        let recorded = std::fs::read_to_string(&self.address_file).ok()?;
+        let mut lines = recorded.lines();
+        let address: SocketAddr = lines.next()?.parse().ok()?;
+        let pid: u32 = lines.next()?.parse().ok()?;
+        process_exists(pid).then_some(address)
     }
 }
 

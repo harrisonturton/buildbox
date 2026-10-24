@@ -7,7 +7,6 @@ use admin_rust_connect::buildbox::admin::v1::{
 };
 use bazel_rust_connect::buildbox::bazel::v1::{BazelClient, CancelRequest, GetServerRequest, GetServerResponse};
 use clap::Args;
-use config::{Environment, Settings};
 use connectrpc::client::{ClientConfig, HttpClient};
 use connectrpc::ConnectError;
 use std::error::Error;
@@ -17,11 +16,16 @@ use std::path::PathBuf;
 #[derive(Args, Debug)]
 pub struct ClientArgs {
     /// The server to connect to, e.g. http://[::1]:50051. Defaults to the
-    /// listen address in the configuration.
+    /// server `--server-name` names.
     #[arg(long, value_name = "URL")]
     server: Option<String>,
 
-    /// The config file to read the server's address from.
+    /// The name of the server to connect to. Defaults to $BB_SERVER_NAME,
+    /// or the default server.
+    #[arg(long = "server-name", value_name = "NAME")]
+    server_name: Option<String>,
+
+    /// The config file to read the server's settings from.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 }
@@ -59,9 +63,7 @@ impl ClientArgs {
     }
 
     fn configured_url(&self) -> Result<String, Box<dyn Error>> {
-        let env = Environment::from_process();
-        let config = config::load(self.config.as_deref(), Settings::default(), &env)?;
-        Ok(url_for(config.listen))
+        crate::daemon::Daemon::new(self.config.as_deref(), self.server_name.as_deref())?.url()
     }
 }
 

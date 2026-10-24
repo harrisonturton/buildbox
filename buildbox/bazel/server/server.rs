@@ -49,6 +49,8 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ServerConfig {
     pub bazel_dir: PathBuf,
+    /// Where downloads are kept, which may be shared with other servers.
+    pub repository_cache: PathBuf,
     pub home: Option<PathBuf>,
     /// Where actions run, or `None` if this server can't build.
     pub backend: Option<Arc<Backend>>,
@@ -205,7 +207,7 @@ impl BazelServer {
         let saved = Arc::new(SavedState::open(&config.bazel_dir.join("state")));
         let mut services = Globals::new()
             .with(Arc::new(Repositories(Arc::new(BzlmodRepositories))))
-            .with(Arc::new(BzlmodConfig::new(config.bazel_dir.clone(), bazel_tools)))
+            .with(Arc::new(BzlmodConfig::new(config.bazel_dir.clone(), config.repository_cache.clone(), bazel_tools)))
             .with(Arc::new(BuiltinsDir(builtins)))
             .with(saved.source_digests.clone())
             .with(saved.local_actions.clone());

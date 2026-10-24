@@ -2,6 +2,12 @@
 //!
 //! Settings come from three sources, each overriding the one before:
 //! built-in defaults, an optional TOML config file, and command-line flags.
+//!
+//! Many servers can run on one machine, each with a name, isolated from the
+//! others: a named server keeps its storage beneath `servers/<name>` in the
+//! root, and listens on a port of its own, which it records for clients.
+//! Only downloads, which are kept by their hashes, are shared. The server
+//! without a name, the default, uses the root and the configured address.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -11,11 +17,21 @@ use std::path::{Path, PathBuf};
 const DEFAULT_PORT: u16 = 50051;
 const CONFIG_FILE_NAME: &str = "config.toml";
 
+/// The name that selects the default server, as if none were given.
+pub const DEFAULT_SERVER_NAME: &str = "default";
+
 /// The fully resolved configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Config {
-    /// The address the server listens on.
+    /// The server's name, or `None` for the default server.
+    pub name: Option<String>,
+
+    /// The address the server listens on. Port 0 means any free port.
     pub listen: SocketAddr,
+
+    /// Where the server records the address it's listening on, for
+    /// clients.
+    pub address_file: PathBuf,
 
     /// Where blobs are stored.
     pub cas_dir: PathBuf,
@@ -29,9 +45,16 @@ pub struct Config {
     /// Where artifacts, such as container images, are stored.
     pub artifacts_dir: PathBuf,
 
-    /// Where the Bazel-compatible commands keep fetched repositories,
-    /// downloads and build outputs.
+    /// Where the Bazel-compatible commands keep fetched repositories and
+    /// build outputs.
     pub bazel_dir: PathBuf,
+
+    /// Where downloads are kept, by their hashes: shared by every server.
+    pub repository_cache_dir: PathBuf,
+
+    /// Where servers with names keep their storage, each in a directory
+    /// named after it.
+    pub servers_dir: Option<PathBuf>,
 
     /// How many actions may run at once.
     pub max_concurrent_actions: usize,
@@ -82,6 +105,10 @@ pub enum ExecutionEnvironment {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    /// The server to configure, by name. Usually given on the command line
+    /// or in `BB_SERVER_NAME`, rather than in the file.
+    pub server_name: Option<String>,
+
     pub listen: Option<SocketAddr>,
 
     /// The directory that holds the CAS, action cache, sandboxes and
@@ -106,6 +133,7 @@ impl Settings {
     /// Combine two sets of settings, preferring those in `overrides`.
     pub fn merge(self, overrides: Settings) -> Settings {
         Settings {
+            server_name: overrides.server_name.or(self.server_name),
             listen: overrides.listen.or(self.listen),
             root: overrides.root.or(self.root),
             cas_dir: overrides.cas_dir.or(self.cas_dir),
@@ -158,11 +186,16 @@ pub enum ConfigError {
 
     #[error("invalid environment name {0:?}: use only letters, digits, '.', '_' and '-'")]
     InvalidEnvironmentName(String),
+
+    #[error("invalid server name {0:?}: use only letters, digits, '.', '_' and '-'")]
+    InvalidServerName(String),
 }
 
 /// The parts of the process environment the configuration depends on.
 #[derive(Clone, Debug)]
 pub struct Environment {
+    /// `BB_SERVER_NAME`: the server to use when none is named otherwise.
+    pub server_name: Option<String>,
     pub home: Option<PathBuf>,
     pub xdg_config_home: Option<PathBuf>,
     pub xdg_cache_home: Option<PathBuf>,
@@ -173,6 +206,7 @@ pub struct Environment {
 impl Environment {
     pub fn from_process() -> Environment {
         Environment {
+            server_name: std::env::var("BB_SERVER_NAME").ok().filter(|name| !name.is_empty()),
             home: non_empty_env_path("HOME"),
             xdg_config_home: non_empty_env_path("XDG_CONFIG_HOME"),
             xdg_cache_home: non_empty_env_path("XDG_CACHE_HOME"),
@@ -243,21 +277,30 @@ fn resolve(settings: Settings, env: &Environment) -> Result<Config, ConfigError>
         return Err(ConfigError::NoConcurrency);
     }
 
-    let environments = settings.environments.unwrap_or_default();
+    let environments = settings.environments.clone().unwrap_or_default();
     if let Some(name) = environments.keys().find(|name| !is_valid_environment_name(name)) {
         return Err(ConfigError::InvalidEnvironmentName(name.clone()));
     }
 
-    let root = settings.root.or_else(|| env.default_root());
-    let root = root.as_deref();
+    let root = settings.root.clone().or_else(|| env.default_root());
+    let name = settings.server_name.clone().or_else(|| env.server_name.clone()).filter(|name| name != DEFAULT_SERVER_NAME);
+    let (layout, listen) = match &name {
+        Some(name) => named_layout(name, root.as_deref())?,
+        None => (default_layout(&settings, root.as_deref())?, settings.listen.unwrap_or(default_listen())),
+    };
+    let repository_cache_dir = dir_or_default(settings.bazel_dir.clone(), root.as_deref(), "bazel", "bazel_dir")?.join("repository_cache");
 
     Ok(Config {
-        listen: settings.listen.unwrap_or(default_listen()),
-        cas_dir: dir_or_default(settings.cas_dir, root, "cas", "cas_dir")?,
-        action_cache_dir: dir_or_default(settings.action_cache_dir, root, "ac", "action_cache_dir")?,
-        sandbox_dir: dir_or_default(settings.sandbox_dir, root, "sandbox", "sandbox_dir")?,
-        artifacts_dir: dir_or_default(settings.artifacts_dir, root, "artifacts", "artifacts_dir")?,
-        bazel_dir: dir_or_default(settings.bazel_dir, root, "bazel", "bazel_dir")?,
+        name,
+        listen,
+        address_file: layout.bazel_dir.join("server.address"),
+        cas_dir: layout.cas_dir,
+        action_cache_dir: layout.action_cache_dir,
+        sandbox_dir: layout.sandbox_dir,
+        artifacts_dir: layout.artifacts_dir,
+        bazel_dir: layout.bazel_dir,
+        repository_cache_dir,
+        servers_dir: root.as_ref().map(|root| root.join("servers")),
         max_concurrent_actions,
         keep_sandboxes: settings.keep_sandboxes.unwrap_or(false),
         trace_file: settings.trace_file,
@@ -266,6 +309,57 @@ fn resolve(settings: Settings, env: &Environment) -> Result<Config, ConfigError>
         remote_cache: settings.remote_cache,
         remote_instance_name: settings.remote_instance_name.unwrap_or_default(),
     })
+}
+
+/// Where a server keeps what it stores.
+struct Layout {
+    cas_dir: PathBuf,
+    action_cache_dir: PathBuf,
+    sandbox_dir: PathBuf,
+    artifacts_dir: PathBuf,
+    bazel_dir: PathBuf,
+}
+
+/// The default server's directories: as set, or beneath the root.
+fn default_layout(settings: &Settings, root: Option<&Path>) -> Result<Layout, ConfigError> {
+    Ok(Layout {
+        cas_dir: dir_or_default(settings.cas_dir.clone(), root, "cas", "cas_dir")?,
+        action_cache_dir: dir_or_default(settings.action_cache_dir.clone(), root, "ac", "action_cache_dir")?,
+        sandbox_dir: dir_or_default(settings.sandbox_dir.clone(), root, "sandbox", "sandbox_dir")?,
+        artifacts_dir: dir_or_default(settings.artifacts_dir.clone(), root, "artifacts", "artifacts_dir")?,
+        bazel_dir: dir_or_default(settings.bazel_dir.clone(), root, "bazel", "bazel_dir")?,
+    })
+}
+
+/// A named server's directories, all beneath `servers/<name>` in the root
+/// so that they're its own, whatever the other servers' are set to, and
+/// its address: any free loopback port.
+fn named_layout(name: &str, root: Option<&Path>) -> Result<(Layout, SocketAddr), ConfigError> {
+    if !is_valid_environment_name(name) {
+        return Err(ConfigError::InvalidServerName(name.to_string()));
+    }
+    let Some(root) = root else {
+        return Err(ConfigError::NoDefault { what: "root" });
+    };
+    let dir = root.join("servers").join(name);
+    let layout = Layout {
+        cas_dir: dir.join("cas"),
+        action_cache_dir: dir.join("ac"),
+        sandbox_dir: dir.join("sandbox"),
+        artifacts_dir: dir.join("artifacts"),
+        bazel_dir: dir.join("bazel"),
+    };
+    Ok((layout, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0)))
+}
+
+/// The names of the servers with storage in `servers_dir`.
+pub fn named_servers(servers_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(servers_dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries.flatten().filter_map(|entry| entry.file_name().into_string().ok()).filter(|name| is_valid_environment_name(name)).collect();
+    names.sort();
+    names
 }
 
 fn is_valid_environment_name(name: &str) -> bool {
@@ -324,6 +418,7 @@ mod tests {
 
     fn test_env(dir: &Path) -> Environment {
         Environment {
+            server_name: None,
             home: Some(dir.join("home")),
             xdg_config_home: None,
             xdg_cache_home: None,
@@ -349,12 +444,16 @@ mod tests {
         assert_eq!(
             config,
             Config {
+                name: None,
                 listen: "[::1]:50051".parse().unwrap(),
+                address_file: root.join("bazel/server.address"),
                 cas_dir: root.join("cas"),
                 action_cache_dir: root.join("ac"),
                 sandbox_dir: root.join("sandbox"),
                 artifacts_dir: root.join("artifacts"),
                 bazel_dir: root.join("bazel"),
+                repository_cache_dir: root.join("bazel/repository_cache"),
+                servers_dir: Some(root.join("servers")),
                 max_concurrent_actions: 8,
                 keep_sandboxes: false,
                 trace_file: None,
@@ -364,6 +463,38 @@ mod tests {
                 remote_instance_name: String::new(),
             }
         );
+    }
+
+    #[test]
+    fn named_servers_keep_their_own_storage_and_share_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = test_env(dir.path());
+        env.server_name = Some("agent2".to_string());
+        write_default_config(&env, "cas_dir = \"/shared/cas\"\nlisten = \"[::1]:50051\"\n");
+
+        let config = load(None, Settings::default(), &env).unwrap();
+
+        let root = dir.path().join("home/.cache/buildbox");
+        let own = root.join("servers/agent2");
+        assert_eq!(config.name.as_deref(), Some("agent2"));
+        assert_eq!(config.listen, "[::1]:0".parse().unwrap());
+        assert_eq!(config.cas_dir, own.join("cas"));
+        assert_eq!(config.bazel_dir, own.join("bazel"));
+        assert_eq!(config.address_file, own.join("bazel/server.address"));
+        assert_eq!(config.repository_cache_dir, root.join("bazel/repository_cache"));
+        assert_eq!(named_servers(&root.join("servers")), Vec::<String>::new());
+
+        let overrides = Settings {
+            server_name: Some("bad/name".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(load(None, overrides, &env), Err(ConfigError::InvalidServerName(_))));
+
+        let overrides = Settings {
+            server_name: Some(DEFAULT_SERVER_NAME.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(load(None, overrides, &env).unwrap().name, None, "the default server can be named");
     }
 
     #[test]

@@ -219,7 +219,7 @@ fn info_values(context: &CommandContext<'_>) -> Vec<(&'static str, String)> {
         "output_path" => output_path.display().to_string(),
         "package_path" => "%workspace%".to_string(),
         "release" => format!("release {VERSION}"),
-        "repository_cache" => bazel_dir.join("repository_cache").display().to_string(),
+        "repository_cache" => context.server.config().repository_cache.display().to_string(),
         "server_pid" => std::process::id().to_string(),
         "used-heap-size" => format!("{}MB", (engine.store.stored_bytes + engine.store.entry_bytes) >> 20),
         _ => context.workspace_root.display().to_string(),

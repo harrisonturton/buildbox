@@ -12,6 +12,12 @@ pub struct ConfigArgs {
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
+    /// Run the server with this name, which keeps its storage apart from
+    /// other servers' and listens on a port of its own. Defaults to
+    /// $BB_SERVER_NAME, or the default server.
+    #[arg(long = "server-name", value_name = "NAME")]
+    pub name: Option<String>,
+
     /// The address to listen on.
     #[arg(long, value_name = "ADDR")]
     pub listen: Option<SocketAddr>,
@@ -54,6 +60,7 @@ pub struct ConfigArgs {
 impl ConfigArgs {
     pub fn load(&self) -> Result<Config, ConfigError> {
         let overrides = Settings {
+            server_name: self.name.clone(),
             listen: self.listen,
             root: self.root.clone(),
             cas_dir: self.cas_dir.clone(),

@@ -88,6 +88,31 @@ Every other command line is run as Bazel would run it, `bb build //...` say,
 starting a server in the background if none is running. A server that's a
 different build from the client finishes its commands and is replaced.
 
+### Several servers
+
+Servers can run side by side, each isolated from the others, such as one
+per agent developing buildbox on the same machine. Name one with
+`--server_name`, before the command, or `BB_SERVER_NAME`:
+
+```
+$ bb --server_name=agent2 build //...
+$ BB_SERVER_NAME=agent2 bb test //...
+$ bb server status --server-name agent2
+$ bb server list
+NAME                STATE     PID       UPTIME    COMMANDS  URL
+default             running   3577846   2h 5m     0         http://[::1]:50051
+agent2              running   3601234   4m 12s    1         http://[::1]:41893
+$ bb server stop --all
+```
+
+A named server keeps everything it stores, its CAS, action cache,
+sandboxes, artifacts, fetched repositories, build graphs and outputs,
+beneath `servers/<name>` in the root, whatever the config file sets the
+default server's directories to. It listens on a free loopback port, which
+it records in `servers/<name>/bazel/server.address` for clients. Only
+downloads, which are kept by their hashes, are shared. The default server
+is the one with no name, or the name `default`.
+
 ## Running actions in containers
 
 By default actions run directly on the host. Buildbox can also run them in

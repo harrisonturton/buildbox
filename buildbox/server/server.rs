@@ -22,7 +22,7 @@ use scheduler::Scheduler;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
@@ -91,6 +91,7 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     let backend = Arc::new(build_backend(config, cas.clone(), action_cache.clone(), scheduler.clone())?);
     let bazel_server = Arc::new(BazelServer::new(ServerConfig {
         bazel_dir: config.bazel_dir.clone(),
+        repository_cache: config.repository_cache_dir.clone(),
         home: std::env::var_os("HOME").map(PathBuf::from),
         backend: Some(backend),
     }));
@@ -135,8 +136,10 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
             addr: config.listen,
             error,
         })?;
-    tracing::info!("listening on {}", config.listen);
+    let address = listener.local_addr().unwrap_or(config.listen);
+    tracing::info!("listening on {address}");
     tracing::info!("running up to {} actions at once", config.max_concurrent_actions);
+    let _address_file = AddressFile::write(&config.address_file, address);
 
     let (stop, stopped) = oneshot::channel::<()>();
     let serve = listener.serve_with_service_and_shutdown(service, async {
@@ -170,6 +173,40 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     }
     tracing::info!("shut down");
     Ok(())
+}
+
+/// The file that tells clients where the server is listening, removed when
+/// it's dropped, as the server stops.
+struct AddressFile {
+    path: PathBuf,
+    contents: String,
+}
+
+impl AddressFile {
+    /// Record `address`, and this process's id, at `path`, replacing it
+    /// whole so that a client never reads half of it. A server that can't
+    /// is still reachable at a configured address, so failing only warns.
+    fn write(path: &Path, address: SocketAddr) -> Option<AddressFile> {
+        let contents = format!("{address}\n{}\n", std::process::id());
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&temporary, &contents)).and_then(|()| std::fs::rename(&temporary, path));
+        if let Err(error) = written {
+            tracing::warn!("couldn't record the server's address in {}: {error}", path.display());
+            return None;
+        }
+        Some(AddressFile {
+            path: path.to_path_buf(),
+            contents,
+        })
+    }
+}
+
+impl Drop for AddressFile {
+    fn drop(&mut self) {
+        if std::fs::read_to_string(&self.path).is_ok_and(|contents| contents == self.contents) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// How many Bazel actions are prepared at once for each one that can run,

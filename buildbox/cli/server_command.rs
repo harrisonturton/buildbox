@@ -5,7 +5,7 @@ use crate::client::ClientArgs;
 use crate::daemon::Daemon;
 use crate::format;
 use admin_rust_connect::buildbox::admin::v1::StorageUsage;
-use bazel_rust_connect::buildbox::bazel::v1::{EngineMetrics, GetServerResponse};
+use bazel_rust_connect::buildbox::bazel::v1::{EngineMetrics, GetServerRequest, GetServerResponse};
 use bazel_server::PRODUCT;
 use clap::{Args, Subcommand};
 use std::error::Error;
@@ -45,8 +45,11 @@ enum ServerCommand {
     /// Print the log of a server started in the background.
     Logs(LogsArgs),
 
+    /// List the servers: the default one and those with names.
+    List(ConfigFileArgs),
+
     /// Start the server in the background, unless it's running.
-    Start(ConfigFileArgs),
+    Start(SelectionArgs),
 
     /// Stop the server, once the commands it's running have finished.
     Stop(StopArgs),
@@ -80,14 +83,32 @@ struct LogsArgs {
     follow: bool,
 
     #[command(flatten)]
-    config: ConfigFileArgs,
+    server: SelectionArgs,
 }
 
 #[derive(Args, Debug)]
 struct ConfigFileArgs {
-    /// The config file to read the server's settings from.
+    /// The config file to read the servers' settings from.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+}
+
+/// Which server a command is about.
+#[derive(Args, Debug)]
+struct SelectionArgs {
+    /// The server's name. Defaults to $BB_SERVER_NAME, or the default
+    /// server.
+    #[arg(long = "server-name", value_name = "NAME")]
+    server_name: Option<String>,
+
+    #[command(flatten)]
+    config: ConfigFileArgs,
+}
+
+impl SelectionArgs {
+    fn daemon(&self) -> Result<Daemon, Box<dyn Error>> {
+        Daemon::new(self.config.config.as_deref(), self.server_name.as_deref())
+    }
 }
 
 #[derive(Args, Debug)]
@@ -97,8 +118,12 @@ struct StopArgs {
     #[arg(long)]
     now: bool,
 
+    /// Stop every server that's running.
+    #[arg(long, conflicts_with = "server_name")]
+    all: bool,
+
     #[command(flatten)]
-    config: ConfigFileArgs,
+    server: SelectionArgs,
 }
 
 pub async fn run(args: ServerArgs) -> Result<(), Box<dyn Error>> {
@@ -109,8 +134,9 @@ pub async fn run(args: ServerArgs) -> Result<(), Box<dyn Error>> {
         ServerCommand::Metrics(client) => metrics(client).await,
         ServerCommand::Actions(args) => actions::run(args).await,
         ServerCommand::Logs(args) => logs(args).await,
-        ServerCommand::Start(args) => Daemon::new(args.config.as_deref())?.ensure_running().await,
-        ServerCommand::Stop(args) => Daemon::new(args.config.config.as_deref())?.stop(args.now).await,
+        ServerCommand::List(args) => list(args).await,
+        ServerCommand::Start(args) => args.daemon()?.ensure_running().await,
+        ServerCommand::Stop(args) => stop(args).await,
         ServerCommand::Restart(args) => restart(args).await,
     }
 }
@@ -250,7 +276,7 @@ fn print_workspaces(server: &GetServerResponse) {
 
 /// Print the end of the log, and with `--follow`, what's logged after.
 async fn logs(args: LogsArgs) -> Result<(), Box<dyn Error>> {
-    let path = Daemon::new(args.config.config.as_deref())?.log_path();
+    let path = args.server.daemon()?.log_path();
     let file = std::fs::File::open(&path).map_err(|error| format!("failed to open {}: {error}", path.display()))?;
     let mut reader = std::io::BufReader::new(file);
     let mut lines: Vec<String> = Vec::new();
@@ -273,8 +299,66 @@ async fn logs(args: LogsArgs) -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// Print each server, whether it's running, and if so, its pid and what
+/// it's doing.
+async fn list(args: ConfigFileArgs) -> Result<(), Box<dyn Error>> {
+    println!("{:<20}{:<10}{:<10}{:<10}{:<10}URL", "NAME", "STATE", "PID", "UPTIME", "COMMANDS");
+    for daemon in Daemon::all(args.config.as_deref())? {
+        println!("{}", server_line(&daemon).await);
+    }
+    Ok(())
+}
+
+async fn server_line(daemon: &Daemon) -> String {
+    let name = daemon.name();
+    if !daemon.is_running().await {
+        return format!("{name:<20}stopped");
+    }
+    let url = daemon.url().unwrap_or_default();
+    let described = match daemon.client() {
+        Ok(client) => client.get_server(GetServerRequest::default()).await.ok().map(|server| server.into_owned()),
+        Err(_) => None,
+    };
+    let Some(server) = described else {
+        return format!("{name:<20}{:<10}{:<10}{:<10}{:<10}{url}", "running", "?", "?", "?");
+    };
+    let uptime = format::duration(Duration::from_secs(server.uptime_seconds));
+    let state = if server.shutting_down { "stopping" } else { "running" };
+    format!("{name:<20}{state:<10}{:<10}{uptime:<10}{:<10}{url}", server.pid, server.commands.len())
+}
+
+/// Stop the server, or with `--all`, every server that's running.
+async fn stop(args: StopArgs) -> Result<(), Box<dyn Error>> {
+    if !args.all {
+        return args.server.daemon()?.stop(args.now).await;
+    }
+    for daemon in running(Daemon::all(args.server.config.config.as_deref())?).await {
+        daemon.stop(args.now).await?;
+        println!("Stopped {}.", daemon.name());
+    }
+    Ok(())
+}
+
+/// Restart the server, or with `--all`, every server that's running.
 async fn restart(args: StopArgs) -> Result<(), Box<dyn Error>> {
-    let daemon = Daemon::new(args.config.config.as_deref())?;
-    daemon.stop(args.now).await?;
-    daemon.ensure_running().await
+    let daemons = match args.all {
+        true => running(Daemon::all(args.server.config.config.as_deref())?).await,
+        false => vec![args.server.daemon()?],
+    };
+    for daemon in daemons {
+        daemon.stop(args.now).await?;
+        daemon.ensure_running().await?;
+    }
+    Ok(())
+}
+
+/// The servers of `daemons` that are running.
+async fn running(daemons: Vec<Daemon>) -> Vec<Daemon> {
+    let mut running = Vec::new();
+    for daemon in daemons {
+        if daemon.is_running().await {
+            running.push(daemon);
+        }
+    }
+    running
 }

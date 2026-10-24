@@ -48,7 +48,9 @@ pub async fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
         println!("{PRODUCT} {VERSION}");
         return Ok(ExitCode::SUCCESS);
     }
-    let daemon = Daemon::new(None)?;
+    let mut args = args;
+    let server_name = take_server_name(&mut args);
+    let daemon = Daemon::new(None, server_name.as_deref())?;
     let request = run_request(args)?;
     daemon.ensure_running().await?;
     if let Outcome::Exited(code) = run_once(&daemon.client()?, request.clone()).await? {
@@ -60,6 +62,18 @@ pub async fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
         Outcome::Exited(code) => Ok(code),
         Outcome::Restart(reason) => Err(format!("the server won't run the command: {reason}").into()),
     }
+}
+
+/// The startup option that names the server to run a command in.
+const SERVER_NAME_OPTION: &str = "--server_name=";
+
+/// Take `--server_name=NAME` from the startup options, which come before
+/// the command, returning the name.
+fn take_server_name(args: &mut Vec<String>) -> Option<String> {
+    let startup = args.iter().take_while(|arg| arg.starts_with("--")).count();
+    let index = args[..startup].iter().rposition(|arg| arg.starts_with(SERVER_NAME_OPTION))?;
+    let option = args.remove(index);
+    Some(option[SERVER_NAME_OPTION.len()..].to_string())
 }
 
 fn run_request(args: Vec<String>) -> Result<RunRequest, Box<dyn Error>> {
@@ -181,6 +195,15 @@ mod tests {
 
     fn args(text: &str) -> Vec<OsString> {
         text.split_whitespace().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn the_server_name_is_taken_from_the_startup_options() {
+        let mut command_line: Vec<String> = "--bazelrc=x --server_name=agent2 build --server_name=y //...".split(' ').map(str::to_string).collect();
+        assert_eq!(take_server_name(&mut command_line).as_deref(), Some("agent2"));
+        assert_eq!(command_line, ["--bazelrc=x", "build", "--server_name=y", "//..."]);
+        let mut none: Vec<String> = vec!["build".to_string()];
+        assert_eq!(take_server_name(&mut none), None);
     }
 
     #[test]

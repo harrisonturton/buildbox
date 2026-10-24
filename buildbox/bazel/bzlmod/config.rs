@@ -19,11 +19,12 @@ pub struct BzlmodConfig {
 }
 
 impl BzlmodConfig {
-    /// A configuration keeping everything beneath `dir`.
-    pub fn new(dir: PathBuf, bazel_tools: Option<PathBuf>) -> BzlmodConfig {
+    /// A configuration keeping downloads in `repository_cache`, and the rest
+    /// beneath `dir`.
+    pub fn new(dir: PathBuf, repository_cache: PathBuf, bazel_tools: Option<PathBuf>) -> BzlmodConfig {
         BzlmodConfig {
             registries: vec![BCR.to_string()],
-            downloads: DownloadCache::new(dir.join("repository_cache")),
+            downloads: DownloadCache::new(repository_cache),
             registry_cache: dir.join("registry_cache"),
             repos_dir: dir.join("repos"),
             bazel_tools,
