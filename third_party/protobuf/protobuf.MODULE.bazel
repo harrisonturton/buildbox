@@ -1,17 +1,7 @@
-"""Protobuf, proto rules, and a prebuilt protoc so it isn't compiled from source."""
+"""Protobuf and its proto rules.
 
-bazel_dep(name = "protobuf", version = "29.1")
-bazel_dep(name = "rules_proto", version = "7.1.0")
-bazel_dep(name = "toolchains_protoc", version = "0.6.1")
+Builds use protobuf's prebuilt protoc rather than compiling it, with
+--@protobuf//bazel/toolchains:prefer_prebuilt_protoc in .bazelrc.
+"""
 
-# Register the prebuilt protoc explicitly. Otherwise protobuf's own toolchain,
-# which compiles protoc from source, can take priority depending on the order
-# modules are declared.
-protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
-
-protoc.toolchain(
-    version = "v29.1",
-)
-
-use_repo(protoc, "toolchains_protoc_hub")
-register_toolchains("@toolchains_protoc_hub//:all")
+bazel_dep(name = "protobuf", version = "33.4")

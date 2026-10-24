@@ -1,7 +1,7 @@
 build --symlink_prefix=".bazel/bazel-"
 
-# Use protoc from toolchains_protoc to avoid building from source
-build --incompatible_enable_proto_toolchain_resolution
+# Use protobuf's prebuilt protoc, rather than compiling it from source.
+common --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
 
 # Treat warnings in our Rust code as errors. Third-party crates are built with
 # capped lints, so this only affects code in this repository.

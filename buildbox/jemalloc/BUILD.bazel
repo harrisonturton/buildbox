@@ -8,7 +8,7 @@ rust_library(
     crate_name = "jemalloc",
     crate_root = "jemalloc.rs",
     visibility = ["//buildbox:__subpackages__"],
-    deps = ["@jemalloc"],
+    link_deps = ["@jemalloc"],
 )
 
 rust_test(
