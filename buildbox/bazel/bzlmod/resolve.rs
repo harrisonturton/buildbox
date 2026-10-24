@@ -7,7 +7,7 @@ use crate::module_file::{self, BazelDep, IncludeReader, ModuleFile, Override};
 use crate::registry::RegistryModuleKey;
 use crate::repo_spec::{ArchiveSpec, RepoSpec};
 use crate::version::Version;
-use bazel_fs::{FileContentKey, Root, RootedPath, Workspace};
+use bazel_fs::{Root, RootedPath, Workspace};
 use bazel_label::{Label, LabelContext, PackageId, RepoMappingTable, RepoName};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
@@ -33,11 +33,10 @@ impl Key for RootModuleKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<ModuleFileValue, SkyError> {
         let path = RootedPath::new(Root::Workspace, PathId::parse("MODULE.bazel").expect("a valid path"));
-        let content = ctx.compute(&FileContentKey(path)).await?;
-        let Some(bytes) = &content.bytes else {
+        let Some(bytes) = bazel_fs::read_file(ctx, path).await? else {
             return Ok(ModuleFileValue(ModuleFile::default()));
         };
-        let source = String::from_utf8_lossy(bytes).into_owned();
+        let source = String::from_utf8_lossy(&bytes).into_owned();
         let reader = Includes {
             ctx: ctx.clone(),
             runtime: tokio::runtime::Handle::current(),
@@ -68,11 +67,11 @@ impl IncludeReader for Includes {
             anyhow::bail!("include() can only include files of the main repository");
         }
         let path = label.package.path.join_path(PathId::parse(label.name.as_str())?);
-        let content = self.runtime.block_on(self.ctx.compute(&FileContentKey(RootedPath::new(Root::Workspace, path))))?;
-        let Some(bytes) = &content.bytes else {
+        let content = self.runtime.block_on(bazel_fs::read_file(&self.ctx, RootedPath::new(Root::Workspace, path)))?;
+        let Some(bytes) = content else {
             anyhow::bail!("include(): {label} doesn't exist");
         };
-        Ok(String::from_utf8_lossy(bytes).into_owned())
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -362,8 +361,8 @@ async fn special_module(
 
 async fn read_module_file(ctx: &Ctx, root: Root, name: &str) -> Result<ModuleFile, SkyError> {
     let path = RootedPath::new(root, PathId::parse("MODULE.bazel").expect("a valid path"));
-    let content = ctx.compute(&FileContentKey(path)).await?;
-    let source = content.bytes.as_deref().map(String::from_utf8_lossy).unwrap_or_default().into_owned();
+    let content = bazel_fs::read_file(ctx, path).await?;
+    let source = content.as_deref().map(String::from_utf8_lossy).unwrap_or_default().into_owned();
     let mut file = module_file::evaluate(&format!("@@{name}//:MODULE.bazel"), &source, false, None)
         .map_err(|error| SkyError::new(format!("{name}: {error}")))?;
     if file.name.is_empty() {

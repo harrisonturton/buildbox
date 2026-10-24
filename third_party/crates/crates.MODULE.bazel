@@ -236,6 +236,12 @@ crate.spec(
     version = "0.4",
 )
 
+# Heap profiling, in a separate build of bb (//buildbox/cli:buildbox_dhat).
+crate.spec(
+    package = "dhat",
+    version = "0.3",
+)
+
 # Resolved crate versions are pinned in these lockfiles. To update them, run:
 #   CARGO_BAZEL_REPIN=1 bazel build //...
 crate.from_specs(

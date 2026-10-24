@@ -159,7 +159,7 @@ async fn main_repo_inputs(ctx: &Ctx, spec: &RepoRuleSpec) -> Result<Vec<u8>, Sky
     let mut fingerprinter = Fingerprinter::new();
     for path in labels {
         let content = ctx.compute(&FileContentKey(RootedPath::new(Root::Workspace, path))).await?;
-        fingerprinter.bytes(content.bytes.as_deref().unwrap_or(b""));
+        fingerprinter.bytes(content.digest.as_ref().map(|digest| &digest.as_bytes()[..]).unwrap_or(b""));
     }
     Ok(fingerprinter.finish().as_bytes().to_vec())
 }

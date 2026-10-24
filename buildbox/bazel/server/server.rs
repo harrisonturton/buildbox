@@ -8,12 +8,14 @@
 
 mod command;
 mod commands;
+mod memory;
 mod output;
 mod repos;
 mod service;
 mod workspace;
 
 pub use command::{BAZEL_VERSION, Invocation, exit};
+pub use memory::configure_allocator;
 pub use output::Output;
 pub use service::BazelService;
 pub use workspace::{Workspace, Workspaces, find_root};
@@ -37,6 +39,16 @@ pub struct BazelServer {
     workspaces: Workspaces,
 }
 
+/// The engine's configuration. `BB_CACHE_MB` sets how many megabytes of
+/// decoded values it keeps, for tuning.
+fn engine_config() -> EngineConfig {
+    let mut config = EngineConfig::default();
+    if let Some(megabytes) = std::env::var("BB_CACHE_MB").ok().and_then(|value| value.parse::<usize>().ok()) {
+        config.cache_bytes = megabytes << 20;
+    }
+    config
+}
+
 impl BazelServer {
     pub fn new(config: ServerConfig) -> BazelServer {
         let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), Some(BAZEL_VERSION));
@@ -55,7 +67,7 @@ impl BazelServer {
             .with(Arc::new(Repositories(Arc::new(BzlmodRepositories))))
             .with(Arc::new(BzlmodConfig::new(config.bazel_dir.clone(), bazel_tools)))
             .with(Arc::new(BuiltinsDir(builtins)));
-        let engine = Engine::new(EngineConfig::default());
+        let engine = Engine::new(engine_config());
         BazelServer {
             config,
             workspaces: Workspaces::new(engine, services),
@@ -73,6 +85,8 @@ impl BazelServer {
     /// Run a command line, writing its output to `out`, and return its exit
     /// code.
     pub async fn run(&self, invocation: Invocation, out: &Output) -> i32 {
-        command::run(self, invocation, out).await
+        let code = command::run(self, invocation, out).await;
+        tokio::task::spawn_blocking(memory::release_free_memory);
+        code
     }
 }

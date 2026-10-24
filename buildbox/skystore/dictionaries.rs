@@ -14,6 +14,10 @@ const SAMPLE_BYTES_TO_TRAIN: usize = 1 << 20;
 /// samples of the last.
 const MAX_ATTEMPTS: u32 = 4;
 
+/// The most sample bytes held at once, across every kind, so that kinds
+/// still collecting samples don't add up to much.
+const MAX_TOTAL_SAMPLE_BYTES: usize = 8 << 20;
+
 /// The smallest and largest dictionaries trained.
 const MIN_DICTIONARY_LEN: usize = 1024;
 const MAX_DICTIONARY_LEN: usize = 32 * 1024;
@@ -60,8 +64,9 @@ impl Dictionaries {
         if training.len() <= index {
             training.resize_with(index + 1, Training::default);
         }
+        let total: usize = training.iter().map(|state| state.sample_bytes).sum();
         let state = &mut training[index];
-        if !state.wants_samples() {
+        if !state.wants_samples() || total + bytes.len() > MAX_TOTAL_SAMPLE_BYTES {
             return None;
         }
         state.samples.push(bytes.to_vec());

@@ -55,7 +55,7 @@ async fn file_keys_read_the_disk() {
     assert_eq!(*missing, FileState::Missing);
 
     let content = session.evaluate(&FileContentKey(RootedPath::new(Root::Workspace, path("pkg/BUILD")))).await.unwrap();
-    assert_eq!(content.bytes.as_deref(), Some(&b"pkg/BUILD"[..]));
+    assert_eq!(content.digest, Some(Fingerprint::of(b"pkg/BUILD")));
 
     let listing = session.evaluate(&DirListingKey(RootedPath::new(Root::Workspace, path("pkg/sub")))).await.unwrap();
     assert_eq!(listing.get(Symbol::intern("deep")), Some(EntryKind::Directory));

@@ -2,7 +2,7 @@
 
 use crate::package::BUILD_FILE_NAMES;
 use crate::RepoRootKey;
-use bazel_fs::{DirListingKey, EntryKind, FileContentKey, RootedPath};
+use bazel_fs::{DirListingKey, EntryKind, RootedPath};
 use bazel_label::{PackageId, RepoName};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
@@ -100,11 +100,10 @@ impl Key for IgnoredDirectoriesKey {
     async fn compute(&self, ctx: &Ctx) -> Result<IgnoredDirectories, SkyError> {
         let root = ctx.compute(&RepoRootKey(self.0)).await?.0;
         let path = PathId::parse(".bazelignore").expect("a valid path");
-        let content = ctx.compute(&FileContentKey(RootedPath::new(root, path))).await?;
-        let Some(bytes) = &content.bytes else {
+        let Some(bytes) = bazel_fs::read_file(ctx, RootedPath::new(root, path)).await? else {
             return Ok(IgnoredDirectories(Vec::new()));
         };
-        let text = String::from_utf8_lossy(bytes);
+        let text = String::from_utf8_lossy(&bytes);
         let mut ignored = Vec::new();
         for line in text.lines() {
             let line = line.trim().trim_end_matches('/');

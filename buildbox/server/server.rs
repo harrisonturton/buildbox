@@ -86,6 +86,11 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
         bazel_dir: config.bazel_dir.clone(),
         home: std::env::var_os("HOME").map(PathBuf::from),
     }));
+    if std::env::var_os("BB_KEEP_STATE_ON_EXIT").is_some() {
+        // For heap profiling: keep the build graphs alive at exit, so the
+        // profile written then shows what they hold.
+        std::mem::forget(bazel_server.clone());
+    }
     let bazel_service = BazelService::new(bazel_server);
     let admin_service = AdminService::new(Components {
         cas: cas.clone(),

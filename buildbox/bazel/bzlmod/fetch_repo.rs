@@ -4,7 +4,7 @@ use crate::config::BzlmodConfig;
 use crate::repo_spec::{ArchiveSpec, RepoSpec};
 use crate::spec::RepoSpecKey;
 use bazel_fetch::{ArchiveType, DownloadCache, Integrity};
-use bazel_fs::{FileContentKey, Root, RootedPath};
+use bazel_fs::{Root, RootedPath};
 use bazel_label::{Label, LabelContext, PackageId, RepoMappingTable, RepoName};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode, Fingerprint};
@@ -157,11 +157,10 @@ async fn read_label_patches(ctx: &Ctx, archive: &ArchiveSpec) -> Result<HashMap<
         };
         let parsed = Label::parse(label, &context).map_err(|error| SkyError::new(error.to_string()))?;
         let path = parsed.package.path.join_path(PathId::parse(parsed.name.as_str()).map_err(|e| SkyError::new(e.to_string()))?);
-        let content = ctx.compute(&FileContentKey(RootedPath::new(Root::Workspace, path))).await?;
-        let Some(bytes) = &content.bytes else {
+        let Some(bytes) = bazel_fs::read_file(ctx, RootedPath::new(Root::Workspace, path)).await? else {
             return Err(SkyError::new(format!("patch {label} doesn't exist")));
         };
-        patches.insert(patch.url.clone(), bytes.clone());
+        patches.insert(patch.url.clone(), bytes);
     }
     Ok(patches)
 }

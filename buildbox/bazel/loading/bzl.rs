@@ -2,7 +2,7 @@
 
 use crate::package::{PackageLookup, PackageLookupKey};
 use crate::{RepoMappingKey, RepoRootKey, blocking};
-use bazel_fs::{FileContentKey, RootedPath};
+use bazel_fs::RootedPath;
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName};
 use bazel_starlark::{EvalContext, FileKind, Loads};
 use skycodec::{Decode, Encode, Fingerprint, Fingerprinter};
@@ -99,11 +99,10 @@ async fn read_bzl(ctx: &Ctx, label: Label) -> Result<String, SkyError> {
     }
     let root = ctx.compute(&RepoRootKey(label.repo())).await?;
     let path = label.package.path.join_path(intern::PathId::parse(label.name.as_str()).map_err(|error| SkyError::new(error.to_string()))?);
-    let content = ctx.compute(&FileContentKey(RootedPath::new(root.0, path))).await?;
-    let Some(bytes) = &content.bytes else {
+    let Some(bytes) = bazel_fs::read_file(ctx, RootedPath::new(root.0, path)).await? else {
         return Err(SkyError::new(format!("cannot load '{label}': no such file")));
     };
-    String::from_utf8(bytes.clone()).map_err(|_| SkyError::new(format!("cannot load '{label}': not valid UTF-8")))
+    String::from_utf8(bytes).map_err(|_| SkyError::new(format!("cannot load '{label}': not valid UTF-8")))
 }
 
 /// Resolve and load the modules a file's `load` statements name, in

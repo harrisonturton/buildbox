@@ -216,21 +216,21 @@ fn entry_kind(entry: &std::fs::DirEntry) -> EntryKind {
     }
 }
 
-/// A file's contents, or `None` if there is no file at the path.
+/// A file's contents, as their digest, or `None` if there is no file at
+/// the path.
+///
+/// The graph keeps only the digest: what depends on a file's contents
+/// changes when the digest does, and reads the contents itself with
+/// [`read_file`], which checks them against it. So the store and cache
+/// don't hold a copy of every BUILD and `.bzl` file.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct FileContent {
-    pub bytes: Option<Vec<u8>>,
+    pub digest: Option<Fingerprint>,
 }
 
 encoded_value!(FileContent);
 
-impl FileContent {
-    pub fn digest(&self) -> Option<Fingerprint> {
-        self.bytes.as_deref().map(Fingerprint::of)
-    }
-}
-
-/// Reads a file, such as a BUILD or `.bzl` file.
+/// Reads a file's digest, such as a BUILD or `.bzl` file's.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Encode, Decode)]
 pub struct FileContentKey(pub RootedPath);
 
@@ -252,10 +252,33 @@ impl Key for FileContentKey {
 }
 
 fn read(path: &Path) -> Result<FileContent, SkyError> {
+    Ok(FileContent {
+        digest: read_bytes(path)?.as_deref().map(Fingerprint::of),
+    })
+}
+
+fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, SkyError> {
     match std::fs::read(path) {
-        Ok(bytes) => Ok(FileContent { bytes: Some(bytes) }),
-        Err(error) if is_missing(&error) || error.kind() == ErrorKind::IsADirectory => Ok(FileContent { bytes: None }),
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if is_missing(&error) || error.kind() == ErrorKind::IsADirectory => Ok(None),
         Err(error) => Err(io_error("read", path, error)),
+    }
+}
+
+/// Read a file's contents, or `None` if it doesn't exist, recording that
+/// what's being computed depends on them. The contents must have the digest
+/// the graph has for them; if the file changed since, the read fails as a
+/// transient error, and the change is seen by the next evaluation.
+pub async fn read_file(ctx: &Ctx, path: RootedPath) -> Result<Option<Vec<u8>>, SkyError> {
+    let content = ctx.compute(&FileContentKey(path)).await?;
+    let Some(digest) = content.digest else {
+        return Ok(None);
+    };
+    let absolute = path.resolve(ctx)?;
+    let bytes = blocking(move || read_bytes(&absolute)).await?;
+    match bytes {
+        Some(bytes) if Fingerprint::of(&bytes) == digest => Ok(Some(bytes)),
+        _ => Err(SkyError::transient(format!("{} changed while it was being read", path.path))),
     }
 }
 

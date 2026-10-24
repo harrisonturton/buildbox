@@ -22,7 +22,7 @@ use bazel_label::{RepoMappingTable, RepoName};
 use futures::future::BoxFuture;
 use skycodec::{Decode, Encode};
 use skyframe::{encoded_value, Ctx, Key, SkyError};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// Where repositories are, and how each sees the others.
 ///
@@ -85,8 +85,21 @@ impl Key for RepoMappingKey {
     }
 }
 
-/// Run CPU-heavy work, such as evaluating Starlark, on a blocking thread.
+/// Limits how many Starlark evaluations run at once to the machine's
+/// parallelism: they're CPU-bound, and each evaluator holds a megabyte of
+/// stack, so running more only costs memory.
+static EVALUATIONS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| {
+    let parallelism = std::thread::available_parallelism().map(usize::from).unwrap_or(4);
+    tokio::sync::Semaphore::new(parallelism)
+});
+
+/// Run CPU-heavy work, such as evaluating Starlark, on a blocking thread,
+/// once one of the limited evaluation slots is free.
 pub(crate) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, SkyError> {
+    let _permit = EVALUATIONS
+        .acquire()
+        .await
+        .map_err(|error| SkyError::transient(format!("evaluation slots closed: {error}")))?;
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|error| SkyError::transient(format!("evaluation task failed: {error}")))

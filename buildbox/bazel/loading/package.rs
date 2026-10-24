@@ -2,7 +2,7 @@
 
 use crate::bzl::{load_all, mappings, transitive_repos};
 use crate::{RepoMappingKey, RepoRootKey, blocking};
-use bazel_fs::{FileContentKey, FileState, FileStateKey, Glob, GlobPattern, Root, RootedPath};
+use bazel_fs::{FileState, FileStateKey, Glob, GlobPattern, Root, RootedPath};
 use bazel_label::{Label, PackageId, RepoMapping, RepoName};
 use starlark::values::OwnedFrozenValue;
 use bazel_packages::Package;
@@ -82,11 +82,10 @@ impl Key for PackageKey {
             PackageLookup::NotFound { reason } => return Err(SkyError::new(format!("no such package '{}': {reason}", display(id)))),
         };
         let build_label = id.label(build_file);
-        let content = ctx.compute(&FileContentKey(RootedPath::new(root, id.path.join(build_file)))).await?;
-        let Some(bytes) = &content.bytes else {
+        let Some(bytes) = bazel_fs::read_file(ctx, RootedPath::new(root, id.path.join(build_file))).await? else {
             return Err(SkyError::transient(format!("no such package '{}': BUILD file disappeared", display(id))));
         };
-        let source = String::from_utf8(bytes.clone()).map_err(|_| SkyError::new(format!("{build_label}: not valid UTF-8")))?;
+        let source = String::from_utf8(bytes).map_err(|_| SkyError::new(format!("{build_label}: not valid UTF-8")))?;
 
         let mapping = ctx.compute(&RepoMappingKey(id.repo)).await?;
         let ast = match bazel_starlark::parse(build_label, source.clone()) {

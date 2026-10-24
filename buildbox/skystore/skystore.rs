@@ -129,6 +129,8 @@ pub struct StoreStats {
     pub dictionary_bytes: u64,
     /// The size live objects report for themselves.
     pub live_bytes: u64,
+    /// The memory zstd's pooled working state holds.
+    pub context_bytes: u64,
     /// The same, for each kind, indexed by kind.
     pub kinds: Vec<KindStats>,
 }
@@ -287,6 +289,7 @@ impl ValueStore {
         for shard in self.shards.iter() {
             self.lock_shard(shard).add_stats(&mut stats);
         }
+        stats.context_bytes = compress::context_bytes() as u64;
         for (index, kind) in stats.kinds.iter_mut().enumerate() {
             kind.dictionary_bytes = self.dictionaries.bytes(Kind(index as u16)) as u64;
             stats.dictionary_bytes += kind.dictionary_bytes;

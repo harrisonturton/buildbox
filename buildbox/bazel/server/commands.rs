@@ -223,7 +223,7 @@ pub async fn dump(context: &CommandContext<'_>, out: &Output) -> i32 {
     let stats = context.server.workspaces().engine().stats();
     let mut text = String::new();
     text.push_str(&format!(
-        "keys: {} ({} bytes)\nmemo: {} keys, {} traces\nstore: {} values, {} live\n  raw {} bytes, stored {} bytes ({:.1}x)\n  pages {} bytes, entries {} bytes, dictionaries {} bytes, live objects {} bytes\ncache: {} entries, {} bytes\n",
+        "keys: {} ({} bytes)\nmemo: {} keys, {} traces\nstore: {} values, {} live\n  raw {} bytes, stored {} bytes ({:.1}x)\n  pages {} bytes, entries {} bytes, dictionaries {} bytes, live objects {} bytes, zstd contexts {} bytes\ncache: {} entries, {} bytes\n",
         stats.keys,
         stats.key_bytes,
         stats.memo_keys,
@@ -237,6 +237,7 @@ pub async fn dump(context: &CommandContext<'_>, out: &Output) -> i32 {
         stats.store.entry_bytes,
         stats.store.dictionary_bytes,
         stats.store.live_bytes,
+        stats.store.context_bytes,
         stats.cache.entries,
         stats.cache.bytes,
     ));

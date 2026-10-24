@@ -1,8 +1,7 @@
 //! Compressing stored bytes with zstd, with or without a dictionary.
 
 use crate::StoreError;
-use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use zstd::zstd_safe::{self, CCtx, CDict, CParameter, DCtx, DDict, DParameter, FrameFormat};
 
 /// The zstd level values are compressed at: fast, since values are written as
@@ -55,6 +54,9 @@ impl Dictionary {
     }
 }
 
+/// zstd's working state for compressing and decompressing. Each can grow
+/// to megabytes, so a few are shared by every thread rather than each
+/// thread having its own.
 struct Contexts {
     plain: CCtx<'static>,
     with_dict: CCtx<'static>,
@@ -62,8 +64,36 @@ struct Contexts {
     decompress_with_dict: DCtx<'static>,
 }
 
-thread_local! {
-    static CONTEXTS: RefCell<Contexts> = RefCell::new(Contexts::new());
+// zstd contexts can move between threads; they're only used by one at a
+// time.
+unsafe impl Send for Contexts {}
+
+/// How many idle contexts to keep for reuse.
+const POOLED_CONTEXTS: usize = 4;
+
+static POOL: Mutex<Vec<Contexts>> = Mutex::new(Vec::new());
+
+fn pool() -> MutexGuard<'static, Vec<Contexts>> {
+    POOL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Run `f` with contexts from the pool, returning them afterwards.
+fn with_contexts<R>(f: impl FnOnce(&mut Contexts) -> R) -> R {
+    let mut contexts = pool().pop().unwrap_or_else(Contexts::new);
+    let result = f(&mut contexts);
+    let mut pool = pool();
+    if pool.len() < POOLED_CONTEXTS {
+        pool.push(contexts);
+    }
+    result
+}
+
+/// The memory the pooled contexts hold.
+pub(crate) fn context_bytes() -> usize {
+    pool()
+        .iter()
+        .map(|c| c.plain.sizeof() + c.with_dict.sizeof() + c.decompress_plain.sizeof() + c.decompress_with_dict.sizeof())
+        .sum()
 }
 
 impl Contexts {
@@ -105,12 +135,18 @@ pub(crate) fn compress(bytes: &[u8], dictionary: Option<&Arc<Dictionary>>) -> (C
     write_len(&mut out, bytes.len());
     let header = out.len();
     let mut frame = Vec::with_capacity(zstd_safe::compress_bound(bytes.len()));
-    let result = CONTEXTS.with_borrow_mut(|contexts| match dictionary {
+    let pledged = Some(bytes.len() as u64);
+    let result = with_contexts(|contexts| match dictionary {
         Some(dictionary) => {
             let cctx = &mut contexts.with_dict;
-            cctx.ref_cdict(&dictionary.cdict).and_then(|_| cctx.compress2(&mut frame, bytes))
+            cctx.ref_cdict(&dictionary.cdict)
+                .and_then(|_| cctx.set_pledged_src_size(pledged))
+                .and_then(|_| cctx.compress2(&mut frame, bytes))
         }
-        None => contexts.plain.compress2(&mut frame, bytes),
+        None => {
+            let cctx = &mut contexts.plain;
+            cctx.set_pledged_src_size(pledged).and_then(|_| cctx.compress2(&mut frame, bytes))
+        }
     });
 
     if result.is_err() || header + frame.len() >= bytes.len() {
@@ -143,7 +179,7 @@ pub(crate) fn decompress(codec: Codec, stored: &[u8], dictionary: Option<&Dictio
         return Err(StoreError::Corrupt("length too large"));
     }
     let mut out = Vec::with_capacity(len);
-    let result = CONTEXTS.with_borrow_mut(|contexts| match (codec, dictionary) {
+    let result = with_contexts(|contexts| match (codec, dictionary) {
         (Codec::ZstdDict, Some(dictionary)) => {
             let dctx = &mut contexts.decompress_with_dict;
             dctx.ref_ddict(&dictionary.ddict).and_then(|_| dctx.decompress(&mut out, frame))
