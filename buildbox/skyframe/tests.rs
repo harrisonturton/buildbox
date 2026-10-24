@@ -177,6 +177,54 @@ impl Key for Cycle {
     }
 }
 
+/// Waits a while, then is 1.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Slow;
+
+impl Encode for Slow {
+    fn encode(&self, _: &mut Encoder) {}
+}
+
+impl Decode for Slow {
+    fn decode(_: &mut Decoder<'_>) -> Result<Slow, DecodeError> {
+        Ok(Slow)
+    }
+}
+
+impl Key for Slow {
+    type Value = Number;
+    const KIND: &'static str = "SLOW";
+
+    async fn compute(&self, _: &Ctx) -> Result<Number, SkyError> {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(Number(1))
+    }
+}
+
+/// Depends on a cycle and, at the same time, on [`Slow`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BesideCycle;
+
+impl Encode for BesideCycle {
+    fn encode(&self, _: &mut Encoder) {}
+}
+
+impl Decode for BesideCycle {
+    fn decode(_: &mut Decoder<'_>) -> Result<BesideCycle, DecodeError> {
+        Ok(BesideCycle)
+    }
+}
+
+impl Key for BesideCycle {
+    type Value = Number;
+    const KIND: &'static str = "BESIDE_CYCLE";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<Number, SkyError> {
+        let (cycle, slow) = futures::join!(ctx.compute(&Cycle(0)), ctx.compute(&Slow));
+        Ok(Number(cycle?.0 + slow?.0))
+    }
+}
+
 fn workspace(engine: &Engine, counts: &Arc<Counts>) -> (Graph, Arc<Disk>) {
     let disk = Arc::new(Disk::default());
     disk.write("list", "a, b");
@@ -314,6 +362,17 @@ async fn cycles_are_errors() {
     let error = graph.session().await.evaluate(&Cycle(0)).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Cycle, "{error}");
     assert!(error.message().contains("CYCLE:Cycle(1)"), "{error}");
+}
+
+#[tokio::test]
+async fn cycles_are_found_once_other_work_finishes() {
+    let engine = Engine::default();
+    let counts = Arc::new(Counts::default());
+    let (graph, _) = workspace(&engine, &counts);
+    let session = graph.session().await;
+    let evaluation = tokio::time::timeout(std::time::Duration::from_secs(10), session.evaluate(&BesideCycle)).await;
+    let error = evaluation.expect("the cycle was never found").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Cycle, "{error}");
 }
 
 #[tokio::test]

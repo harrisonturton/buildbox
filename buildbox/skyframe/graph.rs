@@ -9,7 +9,7 @@ use crate::trace::{Trace, ERROR, TRANSIENT};
 use crate::SkyError;
 use futures::future::BoxFuture;
 use futures::FutureExt;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use skystore::ValueRef;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -91,6 +91,12 @@ struct InFlight {
 }
 
 impl InFlight {
+    /// End the computation's waits with `error`, as its result.
+    fn fail(&self, error: SkyError) {
+        let _ = self.outcome.set(Err(error));
+        self.done.notify_waiters();
+    }
+
     async fn wait(&self) -> Result<Outcome, SkyError> {
         loop {
             let notified = self.done.notified();
@@ -264,7 +270,7 @@ impl GraphInner {
     }
 
     /// The result of `key` at `revision`, evaluating it if needed. Fails
-    /// only if waiting for the key would close a cycle through `requester`.
+    /// if `key` is, or depends on, a key in a cycle.
     ///
     /// Boxed, since evaluation recurses through it.
     pub(crate) fn request(self: Arc<Self>, requester: Option<KeyId>, key: KeyId, revision: u32) -> BoxFuture<'static, Result<Outcome, SkyError>> {
@@ -272,7 +278,7 @@ impl GraphInner {
     }
 
     async fn request_unboxed(self: Arc<Self>, requester: Option<KeyId>, key: KeyId, revision: u32) -> Result<Outcome, SkyError> {
-        let (in_flight, started) = {
+        let (in_flight, started, cycle) = {
             let mut state = self.lock();
             if let Some(node) = state.nodes.get(&key.0) {
                 if node.verified_at == revision && node.flags & DIRTY == 0 {
@@ -283,25 +289,22 @@ impl GraphInner {
                 }
             }
             let existing = state.in_flight.get(&key.0).cloned();
-            if let (Some(_), Some(requester)) = (&existing, requester) {
-                if let Some(path) = state.cycle_path(key.0, requester.0) {
-                    let names: Vec<String> = path.into_iter().map(|id| self.engine.0.keys.describe(KeyId(id))).collect();
-                    return Err(SkyError::cycle(&names));
-                }
-            }
             if let Some(requester) = requester {
                 state.waiting_on.entry(requester.0).or_default().push(key.0);
             }
             match existing {
-                Some(in_flight) => (in_flight, false),
+                Some(in_flight) => (in_flight, false, state.stalled_cycle()),
                 None => {
                     let in_flight = Arc::new(InFlight::default());
                     state.in_flight.insert(key.0, in_flight.clone());
-                    (in_flight, true)
+                    (in_flight, true, None)
                 }
             }
         };
 
+        if let Some((path, broken)) = cycle {
+            self.break_cycle(path, &broken);
+        }
         if started {
             tokio::spawn(self.clone().evaluate(key, revision, in_flight.clone()));
         }
@@ -331,43 +334,37 @@ impl GraphInner {
     /// Record a resolved node and stop tracking it as in flight.
     fn finish(&self, key: KeyId, revision: u32, resolution: Result<Resolution, SkyError>) -> Result<Outcome, SkyError> {
         let engine = &self.engine.0;
-        let mut released = None;
-        let outcome = {
+        // Read a new trace before taking the lock, which every request takes.
+        let new = match resolution {
+            Err(error) => Err(error),
+            Ok(Resolution::Kept) => Ok(None),
+            Ok(Resolution::New(trace)) => Ok(Some((trace, engine.trace(trace)))),
+        };
+        let (outcome, released, cycle) = {
             let mut state = self.lock();
             state.in_flight.remove(&key.0);
             state.waiting_on.remove(&key.0);
-            match resolution {
-                Err(error) => Err(error),
-                Ok(Resolution::Kept) => match state.nodes.get_mut(&key.0) {
-                    Some(node) => {
-                        node.verified_at = revision;
-                        Ok(node.outcome())
-                    }
-                    None => Err(SkyError::new("a node being kept has been removed")),
-                },
-                Ok(Resolution::New(trace)) => {
-                    let decoded = engine.trace(trace);
-                    let (value, flags) = match &decoded {
-                        Ok(decoded) => (decoded.value, decoded.flags),
-                        Err(_) => (trace, ERROR | TRANSIENT),
-                    };
-                    let node = Node {
-                        trace,
-                        value,
-                        verified_at: revision,
-                        flags,
-                    };
-                    if let Some(old) = state.nodes.insert(key.0, node) {
-                        released = Some(old.trace);
-                    }
-                    decoded.map(|_| node.outcome())
-                }
-            }
+            let (outcome, released) = match new {
+                Err(error) => (Err(error), None),
+                Ok(None) => (state.keep(key, revision), None),
+                Ok(Some((trace, decoded))) => state.record(key, revision, trace, decoded),
+            };
+            (outcome, released, state.stalled_cycle())
         };
         if let Some(old) = released {
             engine.release_trace(old);
         }
+        if let Some((path, broken)) = cycle {
+            self.break_cycle(path, &broken);
+        }
         outcome
+    }
+
+    /// Fail the waits for a computation on a cycle, so that the keys on it
+    /// fail rather than wait forever.
+    fn break_cycle(&self, path: Vec<u32>, broken: &InFlight) {
+        let names: Vec<String> = path.into_iter().map(|id| self.engine.0.keys.describe(KeyId(id))).collect();
+        broken.fail(SkyError::cycle(&names));
     }
 
     /// Decide `key`'s result at `revision`: keep its current one if its
@@ -493,24 +490,76 @@ impl Node {
 }
 
 impl GraphState {
-    /// If `from` is waiting, directly or through others, for `to`, the keys
-    /// on the way from `to` back to `to` again.
-    fn cycle_path(&self, from: u32, to: u32) -> Option<Vec<u32>> {
-        if from == to {
-            return Some(vec![to, from]);
+    /// Keep a node's result, as checked at `revision`.
+    fn keep(&mut self, key: KeyId, revision: u32) -> Result<Outcome, SkyError> {
+        let Some(node) = self.nodes.get_mut(&key.0) else {
+            return Err(SkyError::new("a node being kept has been removed"));
+        };
+        node.verified_at = revision;
+        Ok(node.outcome())
+    }
+
+    /// Give a node a new result, from `trace`, returning the trace it had,
+    /// which the node no longer holds.
+    fn record(&mut self, key: KeyId, revision: u32, trace: ValueRef, decoded: Result<Arc<Trace>, SkyError>) -> (Result<Outcome, SkyError>, Option<ValueRef>) {
+        let (value, flags) = match &decoded {
+            Ok(decoded) => (decoded.value, decoded.flags),
+            Err(_) => (trace, ERROR | TRANSIENT),
+        };
+        let node = Node {
+            trace,
+            value,
+            verified_at: revision,
+            flags,
+        };
+        let released = self.nodes.insert(key.0, node).map(|old| old.trace);
+        (decoded.map(|_| node.outcome()), released)
+    }
+
+    /// A cycle of waits, if every key being computed is waiting for another,
+    /// so that none can finish: the keys on it, from one back to itself,
+    /// and the in-flight computation of the second, whose waiters are told
+    /// of the cycle. Waits are only searched for cycles when nothing can
+    /// make progress, so that most requests don't search at all.
+    fn stalled_cycle(&self) -> Option<(Vec<u32>, Arc<InFlight>)> {
+        if self.waiting_on.len() < self.in_flight.len() {
+            return None;
         }
-        let mut parents: FxHashMap<u32, u32> = FxHashMap::default();
-        let mut stack = vec![from];
-        while let Some(current) = stack.pop() {
-            for &next in self.waiting_on.get(&current).into_iter().flatten() {
-                if parents.contains_key(&next) || next == from {
+        let path = self.find_cycle()?;
+        let broken = self.in_flight.get(&path[1])?.clone();
+        Some((path, broken))
+    }
+
+    /// A cycle in the waits, found depth first: the keys on it, starting and
+    /// ending with the same key, each waiting for the next.
+    fn find_cycle(&self) -> Option<Vec<u32>> {
+        let mut finished: FxHashSet<u32> = FxHashSet::default();
+        for &start in self.waiting_on.keys() {
+            if finished.contains(&start) {
+                continue;
+            }
+            // The path from `start`, and how many of each key's waits have
+            // been followed.
+            let mut path = vec![start];
+            let mut followed = vec![0];
+            while let (Some(&current), Some(index)) = (path.last(), followed.last_mut()) {
+                let waits = self.waiting_on.get(&current).map(Vec::as_slice).unwrap_or_default();
+                let Some(&next) = waits.get(*index) else {
+                    finished.insert(current);
+                    path.pop();
+                    followed.pop();
                     continue;
+                };
+                *index += 1;
+                if let Some(position) = path.iter().position(|&key| key == next) {
+                    let mut cycle = path.split_off(position);
+                    cycle.push(next);
+                    return Some(cycle);
                 }
-                parents.insert(next, current);
-                if next == to {
-                    return Some(path_back(&parents, from, to));
+                if !finished.contains(&next) {
+                    path.push(next);
+                    followed.push(0);
                 }
-                stack.push(next);
             }
         }
         None
@@ -527,20 +576,6 @@ impl GraphState {
             self.waiting_on.remove(&waiter);
         }
     }
-}
-
-/// The path `to`, `from`, ..., `to` through the waits found by
-/// [`GraphState::cycle_path`].
-fn path_back(parents: &FxHashMap<u32, u32>, from: u32, to: u32) -> Vec<u32> {
-    let mut path = vec![to];
-    let mut current = to;
-    while current != from {
-        current = parents[&current];
-        path.push(current);
-    }
-    path.push(to);
-    path.reverse();
-    path
 }
 
 fn panic_message(panic: &(dyn Any + Send)) -> String {
