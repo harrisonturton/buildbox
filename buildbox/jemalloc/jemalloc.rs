@@ -42,6 +42,7 @@ unsafe extern "C" {
     fn _rjem_rallocx(ptr: *mut c_void, size: usize, flags: c_int) -> *mut c_void;
     fn _rjem_sdallocx(ptr: *mut c_void, size: usize, flags: c_int);
     fn _rjem_mallctl(name: *const c_char, old: *mut c_void, old_len: *mut usize, new: *mut c_void, new_len: usize) -> c_int;
+    fn _rjem_malloc_stats_print(write: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>, opaque: *mut c_void, options: *const c_char);
 }
 
 /// The global allocator.
@@ -125,6 +126,26 @@ pub fn stats() -> Option<Stats> {
         mapped: read_size(c"stats.mapped")?,
     };
     (stats.mapped > 0).then_some(stats)
+}
+
+/// jemalloc's full report of what it holds, merged across arenas: by size
+/// class, how many regions and pages are in use, which shows how much
+/// memory is held by pages that are only partly used.
+pub fn report() -> String {
+    let mut report = String::new();
+    // SAFETY: `append` is only called during this call, with `report` as
+    // its opaque pointer; "a" omits the per-arena sections.
+    unsafe {
+        _rjem_malloc_stats_print(Some(append), (&raw mut report).cast(), c"a".as_ptr());
+    }
+    report
+}
+
+unsafe extern "C" fn append(report: *mut c_void, text: *const c_char) {
+    // SAFETY: `report` is the String `report` passed, and jemalloc passes a
+    // NUL-terminated string.
+    let (report, text) = unsafe { (&mut *report.cast::<String>(), std::ffi::CStr::from_ptr(text)) };
+    report.push_str(&text.to_string_lossy());
 }
 
 /// Start threads that return freed pages to the system in the background,

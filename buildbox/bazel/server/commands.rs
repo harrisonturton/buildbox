@@ -276,8 +276,13 @@ pub async fn page_check(context: &CommandContext<'_>, out: &Output) -> i32 {
     exit::SUCCESS
 }
 
-/// `dump`: what the server holds in memory.
-pub async fn dump(context: &CommandContext<'_>, out: &Output) -> i32 {
+/// `dump`: what the server holds in memory; with `--allocator`, the
+/// allocator's full report instead.
+pub async fn dump(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {
+    if args.iter().any(|arg| arg == "--allocator") {
+        out.stdout(&crate::memory::allocator_report()).await;
+        return exit::SUCCESS;
+    }
     let stats = context.server.workspaces().engine().stats();
     let mut text = String::new();
     text.push_str(&format!(

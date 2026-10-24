@@ -23,3 +23,8 @@ pub fn release_free_memory() {
 pub fn allocator_stats() -> Option<AllocatorStats> {
     jemalloc::stats()
 }
+
+/// The allocator's full report, by size class.
+pub fn allocator_report() -> String {
+    jemalloc::report()
+}
