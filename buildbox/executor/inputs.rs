@@ -85,7 +85,7 @@ struct CachedDirectories {
 
 /// How many bytes of encoded directories the cache holds before it's
 /// emptied and starts again.
-const MAX_CACHED_DIRECTORY_BYTES: u64 = 64 << 20;
+const MAX_CACHED_DIRECTORY_BYTES: u64 = 16 << 20;
 
 impl DirectoryCache {
     async fn get(&self, cas: &dyn Cas, digest: &Digest) -> Result<Arc<Directory>, ExecuteError> {
