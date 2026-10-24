@@ -85,6 +85,7 @@ pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnRe
         .await
         .map_err(|error| SkyError::transient(format!("{}: {error}", request.description)))?;
     if request.cacheable && result.exit_code == 0 {
+        upload_outputs(backend, &result).await?;
         backend
             .action_cache
             .put(&action_digest, &result)
@@ -182,6 +183,20 @@ async fn upload_blobs(backend: &Backend, blobs: Vec<(cas::Digest, Vec<u8>)>) -> 
         if missing.contains(&digest) {
             backend.cas.put_bytes(&bytes).await.map_err(cas_error)?;
         }
+    }
+    Ok(())
+}
+
+/// Make sure a result's outputs are everywhere the CAS keeps blobs, such as
+/// a remote cache in front of which actions run locally, before the result
+/// is cached.
+async fn upload_outputs(backend: &Backend, result: &reapi::ActionResult) -> Result<(), SkyError> {
+    let file_digests = result.output_files.iter().filter_map(|file| file.digest.as_option());
+    let tree_digests = result.output_directories.iter().filter_map(|dir| dir.tree_digest.as_option());
+    let digests: Vec<cas::Digest> = file_digests.chain(tree_digests).filter_map(|digest| cas::Digest::from_proto(digest).ok()).collect();
+    for digest in backend.cas.find_missing(&digests).await.map_err(cas_error)? {
+        let data = backend.cas.read_bytes(&digest).await.map_err(cas_error)?;
+        backend.cas.put_bytes(&data).await.map_err(cas_error)?;
     }
     Ok(())
 }

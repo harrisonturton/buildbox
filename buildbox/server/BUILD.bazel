@@ -22,6 +22,7 @@ rust_library(
         "//buildbox/executor:local",
         "//buildbox/executor:sandboxed",
         "//buildbox/reapi",
+        "//buildbox/remote",
         "//buildbox/scheduler",
         "@crates//:connectrpc",
         "@crates//:thiserror",

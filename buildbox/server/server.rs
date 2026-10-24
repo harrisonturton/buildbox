@@ -52,6 +52,9 @@ pub enum ServerError {
     #[error("failed to prepare the sandbox directory {}: {error}", path.display())]
     Sandbox { path: PathBuf, error: std::io::Error },
 
+    #[error("invalid remote service: {error}")]
+    Remote { error: remote::EndpointError },
+
     #[error("failed to listen on {addr}: {error}")]
     Listen {
         addr: SocketAddr,
@@ -83,13 +86,7 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     let cas_service = reapi::ContentAddressableStorageService::new(cas.clone());
     let bytestream_service = reapi::ByteStreamService::new(cas.clone());
     let capabilities_service = reapi::CapabilitiesService::default();
-    // Builds run their actions in this process, through the same stores
-    // and scheduler as remote execution requests.
-    let backend = Arc::new(Backend {
-        cas: cas.clone(),
-        action_cache: action_cache.clone(),
-        executor: scheduler.clone(),
-    });
+    let backend = Arc::new(build_backend(config, cas.clone(), action_cache.clone(), scheduler.clone())?);
     let bazel_server = Arc::new(BazelServer::new(ServerConfig {
         bazel_dir: config.bazel_dir.clone(),
         home: std::env::var_os("HOME").map(PathBuf::from),
@@ -164,6 +161,41 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
 
     tracing::info!("shut down");
     Ok(())
+}
+
+/// Where Bazel-compatible builds run their actions: on the remote executor
+/// if one is configured; otherwise in this process, through the same
+/// stores and scheduler as remote execution requests, in front of the
+/// remote cache if there is one.
+fn build_backend(config: &Config, cas: Arc<dyn Cas>, action_cache: Arc<dyn ActionCache>, scheduler: Arc<Scheduler>) -> Result<Backend, ServerError> {
+    let endpoint = |url: &str| {
+        remote::Endpoint::parse(url, &config.remote_instance_name).map_err(|error| ServerError::Remote { error })
+    };
+    if let Some(url) = &config.remote_executor {
+        tracing::info!("running Bazel actions on {url}");
+        let endpoint = endpoint(url)?;
+        return Ok(Backend {
+            cas: Arc::new(remote::RemoteCas::new(endpoint.clone())),
+            action_cache: Arc::new(remote::RemoteActionCache::new(endpoint.clone())),
+            executor: Arc::new(remote::RemoteExecutor::new(endpoint)),
+        });
+    }
+    if let Some(url) = &config.remote_cache {
+        tracing::info!("caching Bazel actions in {url}");
+        let endpoint = endpoint(url)?;
+        let remote_cas: Arc<dyn Cas> = Arc::new(remote::RemoteCas::new(endpoint.clone()));
+        let remote_cache: Arc<dyn ActionCache> = Arc::new(remote::RemoteActionCache::new(endpoint));
+        return Ok(Backend {
+            cas: Arc::new(remote::TieredCas::new(cas, remote_cas)),
+            action_cache: Arc::new(remote::TieredActionCache::new(action_cache, remote_cache)),
+            executor: scheduler,
+        });
+    }
+    Ok(Backend {
+        cas,
+        action_cache,
+        executor: scheduler,
+    })
 }
 
 fn serve_result(config: &Config, result: Result<(), Box<dyn Error + Send + Sync>>) -> Result<(), ServerError> {

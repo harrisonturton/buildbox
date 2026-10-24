@@ -64,8 +64,12 @@ impl ConfigArgs {
             max_concurrent_actions: self.max_concurrent_actions,
             keep_sandboxes: self.keep_sandboxes.then_some(true),
             trace_file: self.trace_file.clone(),
-            // Environments can only be set in the config file.
+            // Environments and remote services can only be set in the
+            // config file.
             environments: None,
+            remote_executor: None,
+            remote_cache: None,
+            remote_instance_name: None,
         };
         config::load(self.config.as_deref(), overrides, &Environment::from_process())
     }

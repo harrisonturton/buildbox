@@ -45,6 +45,17 @@ pub struct Config {
 
     /// The environments actions can run in, by name.
     pub environments: BTreeMap<String, ExecutionEnvironment>,
+
+    /// The remote execution service Bazel-compatible builds run actions on,
+    /// as `grpc://host:port`. `None` runs them in this server.
+    pub remote_executor: Option<String>,
+
+    /// A remote cache that builds running actions in this server share
+    /// results through.
+    pub remote_cache: Option<String>,
+
+    /// The REAPI instance name of the remote service.
+    pub remote_instance_name: String,
 }
 
 /// Where and how actions run. Actions choose an environment by name.
@@ -86,6 +97,9 @@ pub struct Settings {
     pub keep_sandboxes: Option<bool>,
     pub trace_file: Option<PathBuf>,
     pub environments: Option<BTreeMap<String, ExecutionEnvironment>>,
+    pub remote_executor: Option<String>,
+    pub remote_cache: Option<String>,
+    pub remote_instance_name: Option<String>,
 }
 
 impl Settings {
@@ -103,6 +117,9 @@ impl Settings {
             keep_sandboxes: overrides.keep_sandboxes.or(self.keep_sandboxes),
             trace_file: overrides.trace_file.or(self.trace_file),
             environments: overrides.environments.or(self.environments),
+            remote_executor: overrides.remote_executor.or(self.remote_executor),
+            remote_cache: overrides.remote_cache.or(self.remote_cache),
+            remote_instance_name: overrides.remote_instance_name.or(self.remote_instance_name),
         }
     }
 
@@ -245,6 +262,9 @@ fn resolve(settings: Settings, env: &Environment) -> Result<Config, ConfigError>
         keep_sandboxes: settings.keep_sandboxes.unwrap_or(false),
         trace_file: settings.trace_file,
         environments,
+        remote_executor: settings.remote_executor,
+        remote_cache: settings.remote_cache,
+        remote_instance_name: settings.remote_instance_name.unwrap_or_default(),
     })
 }
 
@@ -339,6 +359,9 @@ mod tests {
                 keep_sandboxes: false,
                 trace_file: None,
                 environments: BTreeMap::new(),
+                remote_executor: None,
+                remote_cache: None,
+                remote_instance_name: String::new(),
             }
         );
     }

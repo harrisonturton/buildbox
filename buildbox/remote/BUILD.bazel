@@ -1,0 +1,36 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "remote",
+    srcs = [
+        "action_cache.rs",
+        "cas.rs",
+        "executor.rs",
+        "remote.rs",
+        "tiered.rs",
+    ],
+    crate_root = "remote.rs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/actioncache",
+        "//buildbox/cas",
+        "//buildbox/executor",
+        "//third_party/googleapis:bytestream_rust_connect",
+        "//third_party/remoteapis:remote_execution_rust_connect",
+        "@crates//:buffa",
+        "@crates//:connectrpc",
+        "@crates//:futures",
+        "@crates//:http",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "remote_test",
+    crate = ":remote",
+    deps = ["//buildbox/cas:mem"],
+)
