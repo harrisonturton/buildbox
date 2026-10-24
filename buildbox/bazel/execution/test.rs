@@ -276,6 +276,7 @@ async fn blob_input(ctx: &Ctx, contents: &[u8]) -> Result<Input, SkyError> {
         executable: false,
         is_directory: false,
         source: None,
+        tree: None,
     })
 }
 

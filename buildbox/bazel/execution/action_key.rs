@@ -2,9 +2,9 @@
 
 use crate::backend::Backend;
 use crate::digest::BlobDigest;
-use crate::source::SourceDigestKey;
+use crate::source::{SourceDigestKey, SourceTree, SourceTreeKey};
 use bazel_analysis::{Action, ActionKind, Artifact, ConfiguredTargetKey};
-use bazel_fs::RootedPath;
+use bazel_fs::{FileState, FileStateKey, RootedPath};
 use futures::StreamExt;
 use bazel_loading::RepoRootKey;
 use bazel_progress::Progress;
@@ -130,13 +130,30 @@ pub fn description(action: &Action, owner: ConfiguredTargetKey) -> String {
 }
 
 /// An input an action reads: its digest, and where it is on disk if it's a
-/// source file, to upload it from.
+/// source file or directory, to upload it from.
 #[derive(Clone, Debug)]
 pub struct Input {
     pub digest: BlobDigest,
     pub executable: bool,
     pub is_directory: bool,
     pub source: Option<PathBuf>,
+    /// A source directory's contents, which go in the input tree file by
+    /// file.
+    pub tree: Option<Arc<SourceTree>>,
+}
+
+impl Input {
+    /// The source files to upload for this input, if it's in the CAS as
+    /// `digest`: itself, or each file of its source tree.
+    fn sources(&self) -> Vec<(cas::Digest, Option<PathBuf>)> {
+        let Some(tree) = &self.tree else {
+            return vec![(self.digest.to_cas(), self.source.clone())];
+        };
+        let Some(dir) = &self.source else {
+            return Vec::new();
+        };
+        tree.files.iter().map(|(path, digest, _)| (digest.to_cas(), Some(dir.join(path)))).collect()
+    }
 }
 
 /// The digest of an input: a source file's, or the output of the action
@@ -170,6 +187,7 @@ pub async fn generated_input(ctx: &Ctx, artifact: Artifact) -> Result<(Input, Op
         executable: output.executable,
         is_directory: output.is_directory,
         source: None,
+        tree: None,
     };
     Ok((input, Some(key)))
 }
@@ -181,13 +199,31 @@ async fn source_input(ctx: &Ctx, artifact: Artifact) -> Result<Input, SkyError> 
     let rooted = RootedPath::new(root.0, path);
     let digest = ctx.compute(&SourceDigestKey(rooted)).await?;
     let Some(blob) = digest.digest else {
-        return Err(SkyError::new(format!("{MISSING_INPUT}'{label}'")));
+        return source_directory_input(ctx, rooted, label).await;
     };
     Ok(Input {
         digest: blob,
         executable: digest.executable,
         is_directory: false,
         source: Some(rooted.resolve(ctx)?),
+        tree: None,
+    })
+}
+
+/// A source input that isn't a file: a directory, read as a whole, or
+/// missing.
+async fn source_directory_input(ctx: &Ctx, rooted: RootedPath, label: bazel_label::Label) -> Result<Input, SkyError> {
+    let state = ctx.compute(&FileStateKey(rooted)).await?;
+    if *state != FileState::Directory {
+        return Err(SkyError::new(format!("{MISSING_INPUT}'{label}'")));
+    }
+    let tree = ctx.compute(&SourceTreeKey(rooted)).await?;
+    Ok(Input {
+        digest: tree.digest(),
+        executable: false,
+        is_directory: true,
+        source: Some(rooted.resolve(ctx)?),
+        tree: Some(tree),
     })
 }
 
@@ -196,15 +232,15 @@ pub const MISSING_INPUT: &str = "missing input file ";
 
 /// Make sure an input is in the CAS, uploading it if it's a source file.
 pub async fn upload(backend: &Backend, inputs: &[&Input]) -> Result<(), SkyError> {
-    let by_digest: HashMap<cas::Digest, &Input> = inputs.iter().map(|input| (input.digest.to_cas(), *input)).collect();
+    let by_digest: HashMap<cas::Digest, Option<PathBuf>> = inputs.iter().flat_map(|input| input.sources()).collect();
     let digests: Vec<cas::Digest> = by_digest.keys().cloned().collect();
     let missing = backend.cas.find_missing(&digests).await.map_err(cas_error)?;
     let mut uploads = Vec::with_capacity(missing.len());
     for digest in missing {
-        let Some(input) = by_digest.get(&digest) else {
+        let Some(source) = by_digest.get(&digest) else {
             continue;
         };
-        let Some(source) = &input.source else {
+        let Some(source) = source else {
             return Err(SkyError::transient(format!("an action's output {digest} is no longer in the CAS")));
         };
         uploads.push(backend.cas.put_file(source));

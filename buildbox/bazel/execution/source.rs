@@ -1,7 +1,7 @@
 //! The digests of source files.
 
 use crate::digest::BlobDigest;
-use bazel_fs::{FileChanges, RootedPath};
+use bazel_fs::{DirListingKey, EntryKind, FileChanges, RootedPath};
 use skycodec::{Decode, Encode};
 use skyframe::{Ctx, Key, SkyError, encoded_value};
 use std::io::Read;
@@ -124,4 +124,77 @@ fn hash_file(path: &Path, metadata: &std::fs::Metadata) -> Result<SourceDigest, 
 
 fn io_error(path: &Path, error: std::io::Error) -> SkyError {
     SkyError::transient(format!("failed to read {}: {error}", path.display()))
+}
+
+/// A source directory's contents: each file in it and its subdirectories,
+/// by its path relative to it, and the directories that are empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct SourceTree {
+    pub files: Vec<(String, BlobDigest, bool)>,
+    pub empty_directories: Vec<String>,
+}
+
+encoded_value!(SourceTree);
+
+impl SourceTree {
+    /// A digest of the whole tree, which changes when any file in it does.
+    pub fn digest(&self) -> BlobDigest {
+        let mut hasher = cas::Hasher::new();
+        for (path, digest, executable) in &self.files {
+            let digest = digest.to_cas();
+            hasher.update(format!("f {path} {} {} {executable}\n", digest.hash(), digest.size_bytes()).as_bytes());
+        }
+        for path in &self.empty_directories {
+            hasher.update(format!("d {path}\n").as_bytes());
+        }
+        BlobDigest::from_cas(&hasher.finish())
+    }
+
+    fn add(&mut self, prefix: &str, child: &SourceTree) {
+        if child.files.is_empty() && child.empty_directories.is_empty() {
+            self.empty_directories.push(prefix.to_string());
+            return;
+        }
+        for (path, digest, executable) in &child.files {
+            self.files.push((format!("{prefix}/{path}"), *digest, *executable));
+        }
+        for path in &child.empty_directories {
+            self.empty_directories.push(format!("{prefix}/{path}"));
+        }
+    }
+}
+
+/// Lists and hashes a source directory that an action reads as a whole,
+/// following symlinks, as Bazel tracks source directories.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct SourceTreeKey(pub RootedPath);
+
+impl Key for SourceTreeKey {
+    type Value = SourceTree;
+    const KIND: &'static str = "SOURCE_TREE";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<SourceTree, SkyError> {
+        let listing = ctx.compute(&DirListingKey(self.0)).await?;
+        let files = listing.entries.iter().filter(|(_, kind)| *kind == EntryKind::File).map(|(name, _)| async move {
+            let digest = ctx.compute(&SourceDigestKey(self.0.join(*name))).await?;
+            Ok::<_, SkyError>((*name, digest))
+        });
+        let directories = listing.entries.iter().filter(|(_, kind)| *kind == EntryKind::Directory).map(|(name, _)| async move {
+            let tree = ctx.compute(&SourceTreeKey(self.0.join(*name))).await?;
+            Ok::<_, SkyError>((*name, tree))
+        });
+        let (files, directories) = futures::future::try_join(futures::future::try_join_all(files), futures::future::try_join_all(directories)).await?;
+        let mut tree = SourceTree::default();
+        for (name, digest) in files {
+            if let Some(blob) = digest.digest {
+                tree.files.push((name.to_string(), blob, digest.executable));
+            }
+        }
+        for (name, child) in directories {
+            tree.add(name.as_str(), &child);
+        }
+        tree.files.sort_by(|a, b| a.0.cmp(&b.0));
+        tree.empty_directories.sort();
+        Ok(tree)
+    }
 }

@@ -6,6 +6,7 @@ use bazel_progress::{ActionFailure, ActionOutput, ActionProgress, Command, Event
 use crate::backend::Backend;
 use crate::digest::BlobDigest;
 use crate::inputs::InputTree;
+use crate::source::SourceTree;
 use bazel_analysis::{Action, Artifact, Spawn};
 use buffa::Message;
 use intern::PathId;
@@ -373,6 +374,10 @@ async fn input_tree(backend: &Backend, inputs: &BTreeMap<String, Input>, output_
         }
     }
     for (path, input) in inputs {
+        if let Some(source_tree) = &input.tree {
+            add_source_tree(&mut tree, &mut blobs, path, source_tree)?;
+            continue;
+        }
         let added = match input.is_directory {
             false => tree.add_file(path, input.digest, input.executable),
             true => {
@@ -386,6 +391,25 @@ async fn input_tree(backend: &Backend, inputs: &BTreeMap<String, Input>, output_
     let mut merkle = tree.finish();
     merkle.blobs.extend(blobs);
     Ok(merkle)
+}
+
+/// Add a source directory at `path` in the input tree, file by file.
+fn add_source_tree(tree: &mut InputTree, blobs: &mut Vec<(cas::Digest, Vec<u8>)>, path: &str, source_tree: &SourceTree) -> Result<(), SkyError> {
+    let mut empty_directories: Vec<String> = source_tree.empty_directories.iter().map(|empty| format!("{path}/{empty}")).collect();
+    if source_tree.files.is_empty() && empty_directories.is_empty() {
+        empty_directories.push(path.to_string());
+    }
+    if !empty_directories.is_empty() {
+        let empty = cas::Digest::of_bytes(&[]);
+        blobs.push((empty.clone(), Vec::new()));
+        for directory in &empty_directories {
+            tree.add_directory(directory, BlobDigest::from_cas(&empty)).map_err(SkyError::new)?;
+        }
+    }
+    for (file, digest, executable) in &source_tree.files {
+        tree.add_file(&format!("{path}/{file}"), *digest, *executable).map_err(SkyError::new)?;
+    }
+    Ok(())
 }
 
 /// The root of a `Tree` and every `Directory` in it, as blobs.
