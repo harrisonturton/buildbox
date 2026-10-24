@@ -6,6 +6,7 @@ pub mod build_api;
 pub mod bzl_api;
 pub mod context;
 pub mod convert;
+pub mod depset;
 pub mod eval;
 pub mod instantiate;
 pub mod label_value;
@@ -13,8 +14,10 @@ pub mod native_rules;
 pub mod opaque;
 pub mod package_builder;
 pub mod provider;
+pub mod repo_api;
 pub mod rule_value;
 pub mod select;
+pub mod symbolic_macro;
 
 pub use context::{EvalContext, FileKind, Globber};
 pub use eval::{EvalError, Loads, eval_bzl, eval_build, loads, parse};
@@ -68,8 +71,15 @@ pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
         .with(label_value::label_constructor)
         .with(rule_value::rule_function)
         .with(provider::provider_function)
-        .with(bzl_api::bzl_functions);
+        .with(bzl_api::bzl_functions)
+        .with(bzl_api::macro_function)
+        .with(depset::depset_function)
+        .with(repo_api::repo_functions);
     attr_module::register(&mut builder);
+    for name in opaque::BUILTIN_NAMESPACES {
+        let value = builder.alloc(opaque::Opaque::new(name));
+        builder.set(name, value);
+    }
     builder.namespace("native", |native| {
         build_api::build_functions(native);
         native_rules::register(native);

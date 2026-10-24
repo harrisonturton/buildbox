@@ -1,51 +1,6 @@
-//! Where repositories are, before Bzlmod resolves them: the main repository
-//! and Bazel's built-in `@bazel_tools`.
+//! Finding Bazel's built-in `@bazel_tools`.
 
-use bazel_fs::Root;
-use bazel_label::{RepoMappingTable, RepoName};
-use bazel_loading::RepositoryResolver;
-use futures::future::BoxFuture;
-use intern::Symbol;
-use skyframe::{Ctx, SkyError};
 use std::path::{Path, PathBuf};
-
-/// Resolves the main repository, and `@bazel_tools` if its files were found.
-pub struct BuiltinRepositories {
-    pub bazel_tools: Option<PathBuf>,
-}
-
-impl BuiltinRepositories {
-    fn bazel_tools_root(&self) -> Result<Root, SkyError> {
-        match &self.bazel_tools {
-            Some(dir) => Ok(Root::Dir(Symbol::intern(&dir.display().to_string()))),
-            None => Err(SkyError::new(
-                "@bazel_tools isn't available: no Bazel installation was found to take it from; set BB_BAZEL_TOOLS",
-            )),
-        }
-    }
-}
-
-impl RepositoryResolver for BuiltinRepositories {
-    fn root<'a>(&'a self, _ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<Root, SkyError>> {
-        Box::pin(async move {
-            match repo.as_str() {
-                "" => Ok(Root::Workspace),
-                "bazel_tools" => self.bazel_tools_root(),
-                other => Err(SkyError::new(format!("no repository named '@@{other}'"))),
-            }
-        })
-    }
-
-    fn mapping<'a>(&'a self, _ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<RepoMappingTable, SkyError>> {
-        Box::pin(async move {
-            let entries = vec![
-                (Symbol::intern(""), RepoName::MAIN),
-                (Symbol::intern("bazel_tools"), RepoName::new("bazel_tools")),
-            ];
-            Ok(RepoMappingTable::new(repo, entries))
-        })
-    }
-}
 
 /// Find `@bazel_tools`'s files: in `BB_BAZEL_TOOLS`, or the `embedded_tools`
 /// of an installed Bazel, preferring the version the workspace asks for in

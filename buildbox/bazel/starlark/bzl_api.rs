@@ -53,3 +53,17 @@ pub(crate) fn bzl_functions(builder: &mut GlobalsBuilder) {
         Ok(crate::opaque::Opaque::new("Subrule"))
     }
 }
+
+#[starlark_module]
+pub(crate) fn macro_function(builder: &mut GlobalsBuilder) {
+    /// `macro(implementation, attrs = {}, inherit_attrs = None, ...)`: a
+    /// symbolic macro. Called, it runs its implementation with `name`,
+    /// `visibility` and the attributes it was given.
+    fn r#macro<'v>(
+        #[starlark(require = named)] implementation: Value<'v>,
+        #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
+    ) -> anyhow::Result<crate::symbolic_macro::SymbolicMacro<'v>> {
+        let _ = kwargs;
+        Ok(crate::symbolic_macro::SymbolicMacro { implementation })
+    }
+}

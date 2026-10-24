@@ -29,7 +29,7 @@ impl Key for RuleClassKey {
     async fn compute(&self, ctx: &Ctx) -> Result<RuleClassValue, SkyError> {
         let module = ctx.compute(&BzlLoadKey(self.bzl)).await?;
         let missing = || SkyError::new(format!("{} doesn't export a rule named '{}'", self.bzl, self.name));
-        let value = module.module.get(self.name.as_str()).map_err(|_| missing())?;
+        let (value, _) = module.module.get_any_visibility(self.name.as_str()).map_err(|_| missing())?;
         let rule = StarlarkRule::from_value(value.value()).ok_or_else(missing)?;
         let class = rule.exported.get().ok_or_else(missing)?;
         Ok(RuleClassValue((**class).clone()))

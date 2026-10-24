@@ -1,7 +1,6 @@
 //! The workspaces the server knows, each with its own graph.
 
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
-use bazel_loading::Repositories;
 use skyframe::{Engine, Globals, Graph};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,15 +51,17 @@ impl Workspace {
 /// engine, so they share what they compute.
 pub struct Workspaces {
     engine: Engine,
-    repositories: Arc<Repositories>,
+    /// The services every workspace's graph has, such as where repositories
+    /// come from.
+    services: Globals,
     workspaces: Mutex<HashMap<PathBuf, Arc<Workspace>>>,
 }
 
 impl Workspaces {
-    pub fn new(engine: Engine, repositories: Arc<Repositories>) -> Workspaces {
+    pub fn new(engine: Engine, services: Globals) -> Workspaces {
         Workspaces {
             engine,
-            repositories,
+            services,
             workspaces: Mutex::new(HashMap::new()),
         }
     }
@@ -76,10 +77,7 @@ impl Workspaces {
             return workspace.clone();
         }
         let changes = FileChanges::new();
-        let globals = Globals::new()
-            .with(bazel_fs::workspace(root))
-            .with(changes.clone())
-            .with(self.repositories.clone());
+        let globals = self.services.clone().with(bazel_fs::workspace(root)).with(changes.clone());
         let workspace = Arc::new(Workspace {
             root: root.to_path_buf(),
             graph: self.engine.graph(globals),

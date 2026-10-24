@@ -127,7 +127,7 @@ fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelParser<'_>) 
     let default = match attribute.default {
         None => AttrDefault::Value(AttrValue::default_for(ty)),
         Some(value) if is_computed(value) => AttrDefault::Computed,
-        Some(value) if value.get_type() == "LateBoundDefault" => AttrDefault::LateBound(None),
+        Some(value) if is_late_bound(value) => AttrDefault::LateBound(None),
         Some(value) => AttrDefault::Value(
             convert::attr_value(value, ty, parser, name).map_err(|error| anyhow::anyhow!("default of attribute '{name}': {error}"))?,
         ),
@@ -154,6 +154,12 @@ fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelParser<'_>) 
         is_dependency: ty.has_labels(),
         values,
     })
+}
+
+fn is_late_bound(value: Value<'_>) -> bool {
+    value
+        .downcast_ref::<crate::opaque::Opaque>()
+        .is_some_and(|opaque| opaque.type_name == "LateBoundDefault")
 }
 
 fn is_computed(value: Value<'_>) -> bool {

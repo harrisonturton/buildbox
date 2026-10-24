@@ -14,6 +14,9 @@ pub enum DownloadError {
     #[error("no URLs to download from")]
     NoUrls,
 
+    #[error("{0} not found")]
+    NotFound(String),
+
     #[error("failed to download {url}: {message}")]
     Http { url: String, message: String },
 
@@ -67,12 +70,20 @@ impl DownloadCache {
         }
 
         let mut failures = Vec::new();
+        let mut all_missing = true;
         for url in urls {
             match self.download_one(url, integrity, dest) {
                 Ok(result) => return Ok(result),
                 Err(error @ DownloadError::Checksum { .. }) => return Err(error),
-                Err(error) => failures.push(error.to_string()),
+                Err(DownloadError::NotFound(url)) => failures.push(format!("{url} not found")),
+                Err(error) => {
+                    all_missing = false;
+                    failures.push(error.to_string());
+                }
             }
+        }
+        if all_missing {
+            return Err(DownloadError::NotFound(urls.join(", ")));
         }
         Err(DownloadError::All(failures.join("; ")))
     }
@@ -82,8 +93,15 @@ impl DownloadCache {
         let algorithm = integrity.map(Integrity::algorithm).unwrap_or(HashAlgorithm::Sha256);
         let partial = dest.with_extension("partial");
         let mut file = File::create(&partial).map_err(io(format!("failed to create {}", partial.display())))?;
-        let (sha256, actual) = fetch_into(url, &mut file, algorithm)?;
+        let fetched = fetch_into(url, &mut file, algorithm);
         drop(file);
+        let (sha256, actual) = match fetched {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                let _ = std::fs::remove_file(&partial);
+                return Err(error);
+            }
+        };
 
         if let Some(expected) = integrity {
             if &actual != expected {
@@ -127,7 +145,11 @@ impl DownloadCache {
 /// `algorithm`.
 fn fetch_into(url: &str, out: &mut File, algorithm: HashAlgorithm) -> Result<(Integrity, Integrity), DownloadError> {
     if let Some(path) = url.strip_prefix("file://") {
-        let mut input = File::open(path).map_err(io(format!("failed to open {path}")))?;
+        let mut input = match File::open(path) {
+            Ok(input) => input,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(DownloadError::NotFound(url.to_string())),
+            Err(error) => return Err(io(format!("failed to open {path}"))(error)),
+        };
         return copy_hashing(&mut input, out, algorithm, url);
     }
     let agent = ureq::AgentBuilder::new()
@@ -135,10 +157,16 @@ fn fetch_into(url: &str, out: &mut File, algorithm: HashAlgorithm) -> Result<(In
         .timeout_read(READ_TIMEOUT)
         .try_proxy_from_env(true)
         .build();
-    let response = agent.get(url).call().map_err(|error| DownloadError::Http {
-        url: url.to_string(),
-        message: error.to_string(),
-    })?;
+    let response = match agent.get(url).call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(404, _)) | Err(ureq::Error::Status(410, _)) => return Err(DownloadError::NotFound(url.to_string())),
+        Err(error) => {
+            return Err(DownloadError::Http {
+                url: url.to_string(),
+                message: error.to_string(),
+            })
+        }
+    };
     let mut reader = response.into_reader();
     copy_hashing(&mut reader, out, algorithm, url)
 }

@@ -37,6 +37,8 @@ pub struct EvalContext {
     /// The package a BUILD file is defining.
     pub package: Option<RefCell<PackageBuilder>>,
     pub globber: Option<Box<dyn Globber>>,
+    /// The repositories a module extension defines.
+    pub repos: Option<RefCell<Vec<crate::repo_api::RepoDefinition>>>,
     /// What `print()` printed.
     pub printed: RefCell<Vec<String>>,
 }
@@ -49,6 +51,7 @@ impl EvalContext {
             mappings: HashMap::new(),
             package: None,
             globber: None,
+            repos: None,
             printed: RefCell::new(Vec::new()),
         }
     }

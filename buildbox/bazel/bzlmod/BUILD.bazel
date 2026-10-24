@@ -1,0 +1,54 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "bzlmod",
+    srcs = [
+        "attrs.rs",
+        "bzlmod.rs",
+        "config.rs",
+        "extension.rs",
+        "fetch_repo.rs",
+        "graph_access.rs",
+        "io.rs",
+        "module_ctx.rs",
+        "module_file.rs",
+        "path_value.rs",
+        "registry.rs",
+        "repo_ctx.rs",
+        "repo_spec.rs",
+        "resolve.rs",
+        "resolver.rs",
+        "spec.rs",
+        "star_value.rs",
+        "version.rs",
+    ],
+    crate_name = "bazel_bzlmod",
+    crate_root = "bzlmod.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/bazel/fetch",
+        "//buildbox/bazel/fs",
+        "//buildbox/bazel/label",
+        "//buildbox/bazel/loading",
+        "//buildbox/bazel/packages",
+        "//buildbox/bazel/starlark",
+        "//buildbox/intern",
+        "//buildbox/skycodec",
+        "//buildbox/skyframe",
+        "@crates//:allocative",
+        "@crates//:anyhow",
+        "@crates//:futures",
+        "@crates//:serde_json",
+        "@crates//:starlark",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "bzlmod_test",
+    crate = ":bzlmod",
+)

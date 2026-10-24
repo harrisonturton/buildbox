@@ -18,8 +18,9 @@ pub use output::Output;
 pub use service::BazelService;
 pub use workspace::{Workspace, Workspaces, find_root};
 
-use bazel_loading::{Repositories, RepositoryResolver};
-use skyframe::{Engine, EngineConfig};
+use bazel_bzlmod::{BzlmodConfig, BzlmodRepositories};
+use bazel_loading::Repositories;
+use skyframe::{Engine, EngineConfig, Globals};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -43,17 +44,13 @@ impl BazelServer {
             Some(dir) => tracing::info!("using @bazel_tools from {}", dir.display()),
             None => tracing::warn!("no @bazel_tools found; set BB_BAZEL_TOOLS"),
         }
-        let resolver: Arc<dyn RepositoryResolver> = Arc::new(repos::BuiltinRepositories { bazel_tools });
-        BazelServer::with_repositories(config, resolver)
-    }
-
-    /// A server whose repositories come from `resolver`.
-    pub fn with_repositories(config: ServerConfig, resolver: Arc<dyn RepositoryResolver>) -> BazelServer {
+        let services = Globals::new()
+            .with(Arc::new(Repositories(Arc::new(BzlmodRepositories))))
+            .with(Arc::new(BzlmodConfig::new(config.bazel_dir.clone(), bazel_tools)));
         let engine = Engine::new(EngineConfig::default());
-        let repositories = Arc::new(Repositories(resolver));
         BazelServer {
             config,
-            workspaces: Workspaces::new(engine, repositories),
+            workspaces: Workspaces::new(engine, services),
         }
     }
 

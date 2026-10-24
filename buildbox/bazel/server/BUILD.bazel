@@ -37,6 +37,7 @@ rust_library(
     ],
     deps = [
         ":bazel_rust_connect",
+        "//buildbox/bazel/bzlmod",
         "//buildbox/bazel/fs",
         "//buildbox/bazel/label",
         "//buildbox/bazel/loading",
