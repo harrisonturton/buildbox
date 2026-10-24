@@ -163,6 +163,14 @@ crate.spec(
     version = "0.16",
 )
 
+# Compressing stored values with dictionaries trained on values of the same
+# kind, which small values need to compress well.
+crate.spec(
+    package = "zstd",
+    version = "0.13",
+    features = ["experimental"],
+)
+
 crate.spec(
     package = "rustc-hash",
     version = "2",
