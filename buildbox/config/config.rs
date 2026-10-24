@@ -49,6 +49,17 @@ pub struct Config {
 pub enum ExecutionEnvironment {
     /// Directly on this machine, with no isolation.
     Local,
+
+    /// In a container, made from a container image in the artifact store.
+    Container {
+        /// The image's name in the artifact store.
+        image: String,
+
+        /// Whether actions can reach the network. Without it, they only
+        /// have a loopback interface of their own.
+        #[serde(default)]
+        network: bool,
+    },
 }
 
 /// Settings that may be given in the config file or on the command line.
@@ -473,5 +484,31 @@ mod tests {
         let err = load(None, Settings::default(), &env).unwrap_err();
 
         assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
+    }
+
+    #[test]
+    fn container_environments_name_an_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = test_env(dir.path());
+        let content = "[environments.gcc]\nkind = \"container\"\nimage = \"gcc:13\"\n\n\
+                       [environments.online]\nkind = \"container\"\nimage = \"gcc:13\"\nnetwork = true\n";
+        write_default_config(&env, content);
+
+        let config = load(None, Settings::default(), &env).unwrap();
+
+        assert_eq!(
+            config.environments["gcc"],
+            ExecutionEnvironment::Container {
+                image: "gcc:13".to_string(),
+                network: false,
+            }
+        );
+        assert_eq!(
+            config.environments["online"],
+            ExecutionEnvironment::Container {
+                image: "gcc:13".to_string(),
+                network: true,
+            }
+        );
     }
 }

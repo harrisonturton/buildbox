@@ -13,6 +13,7 @@ mod up;
 
 use clap::{Parser, Subcommand};
 use std::error::Error;
+use std::ffi::OsString;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -47,6 +48,14 @@ enum Command {
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
+    // The server runs this binary as its container helper, which must stay
+    // single-threaded, so this comes before anything that might start
+    // threads.
+    let args: Vec<OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|arg| arg == container_namespaces::HELPER_COMMAND) {
+        return container_namespaces::helper_main(&args[2..]);
+    }
+
     let cli = Cli::parse();
     // The server sets up logging itself, once it has read its config, which
     // says where to send traces.

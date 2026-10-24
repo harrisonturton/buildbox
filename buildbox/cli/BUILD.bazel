@@ -22,6 +22,7 @@ rust_binary(
         "//buildbox/admin:admin_rust_connect",
         "//buildbox/cas",
         "//buildbox/config",
+        "//buildbox/container:namespaces",
         "//buildbox/oci",
         "//buildbox/server",
         "//buildbox/telemetry",

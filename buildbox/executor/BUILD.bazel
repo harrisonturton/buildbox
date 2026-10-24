@@ -72,3 +72,29 @@ rust_test(
         "@crates//:tokio",
     ],
 )
+
+# Runs commands in containers, through any container runtime.
+rust_library(
+    name = "container",
+    srcs = ["container.rs"],
+    crate_name = "executor_container",
+    crate_root = "container.rs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox/server:__pkg__"],
+    deps = [
+        ":executor",
+        ":sandboxed",
+        "//buildbox/artifacts",
+        "//buildbox/container",
+    ],
+)
+
+rust_test(
+    name = "container_test",
+    crate = ":container",
+    deps = [
+        "//buildbox/cas",
+        "//third_party/remoteapis:remote_execution_rust_connect",
+        "@crates//:tokio",
+    ],
+)

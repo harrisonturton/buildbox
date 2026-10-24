@@ -9,9 +9,12 @@ use cas::{Cas, CasError};
 use cas_fs::FsCas;
 use config::{Config, ExecutionEnvironment};
 use connectrpc::{ConnectRpcService, Limits, Router, Server};
+use container::{ContainerError, ContainerRuntime, Network};
+use container_namespaces::{Helper, NamespaceRuntime};
 use executor::Executor;
+use executor_container::ContainerRunner;
 use executor_local::HostRunner;
-use executor_sandboxed::SandboxedExecutor;
+use executor_sandboxed::{Runner, SandboxedExecutor};
 use reapi::{Invocations, RequestTracing, INVOCATION_IDLE_TIMEOUT, MAX_MESSAGE_SIZE_BYTES};
 use scheduler::Scheduler;
 use std::collections::BTreeMap;
@@ -37,6 +40,12 @@ pub enum ServerError {
 
     #[error("failed to open the artifact store: {error}")]
     Artifacts { error: ArtifactError },
+
+    #[error("environment {name:?} can't run containers: {error}")]
+    Containers { name: String, error: ContainerError },
+
+    #[error("environment {name:?}: {error}")]
+    InvalidImage { name: String, error: ArtifactError },
 
     #[error("failed to prepare the sandbox directory {}: {error}", path.display())]
     Sandbox { path: PathBuf, error: std::io::Error },
@@ -64,7 +73,7 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     let cas: Arc<dyn Cas> = Arc::new(open_cas(config).await?);
     let action_cache: Arc<dyn ActionCache> = Arc::new(open_action_cache(config).await?);
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(open_artifacts(config, cas.clone()).await?);
-    let environments = open_environments(config, cas.clone()).await?;
+    let environments = open_environments(config, cas.clone(), artifacts.clone()).await?;
     let scheduler = Arc::new(Scheduler::new(environments, config.max_concurrent_actions));
 
     let execution_service = reapi::ExecutionService::new(cas.clone(), action_cache.clone(), scheduler.clone());
@@ -169,6 +178,7 @@ async fn open_artifacts(config: &Config, cas: Arc<dyn Cas>) -> Result<FsArtifact
 async fn open_environments(
     config: &Config,
     cas: Arc<dyn Cas>,
+    artifacts: Arc<dyn ArtifactStore>,
 ) -> Result<BTreeMap<String, Arc<dyn Executor>>, ServerError> {
     tracing::info!("using sandbox directory {}", config.sandbox_dir.display());
     executor_sandboxed::prepare_sandbox_root(&config.sandbox_dir, config.keep_sandboxes)
@@ -183,22 +193,84 @@ async fn open_environments(
         .entry(scheduler::DEFAULT_ENVIRONMENT.to_string())
         .or_insert(ExecutionEnvironment::Local);
 
+    let mut builder = EnvironmentBuilder {
+        config,
+        cas,
+        artifacts,
+        container_runtime: None,
+    };
     let mut executors = BTreeMap::new();
     for (name, environment) in environments {
         tracing::info!("environment {name:?}: {environment:?}");
-        let executor = match environment {
-            ExecutionEnvironment::Local => local_executor(config, cas.clone()),
-        };
+        let executor = builder.executor(&name, environment).await?;
         executors.insert(name, executor);
     }
     Ok(executors)
 }
 
-fn local_executor(config: &Config, cas: Arc<dyn Cas>) -> Arc<dyn Executor> {
-    let runner = Arc::new(HostRunner);
-    let worker_name = "buildbox-local".to_string();
-    let executor = SandboxedExecutor::new(cas, config.sandbox_dir.clone(), config.keep_sandboxes, runner, worker_name);
-    Arc::new(executor)
+/// Creates the executors for environments, sharing what they can.
+struct EnvironmentBuilder<'a> {
+    config: &'a Config,
+    cas: Arc<dyn Cas>,
+    artifacts: Arc<dyn ArtifactStore>,
+
+    /// Opened when the first container environment needs it.
+    container_runtime: Option<Arc<dyn ContainerRuntime>>,
+}
+
+impl EnvironmentBuilder<'_> {
+    async fn executor(&mut self, name: &str, environment: ExecutionEnvironment) -> Result<Arc<dyn Executor>, ServerError> {
+        match environment {
+            ExecutionEnvironment::Local => Ok(self.sandboxed(Arc::new(HostRunner), "buildbox-local")),
+            ExecutionEnvironment::Container { image, network } => self.container_executor(name, image, network).await,
+        }
+    }
+
+    async fn container_executor(&mut self, name: &str, image: String, network: bool) -> Result<Arc<dyn Executor>, ServerError> {
+        artifacts::validate_name(&image).map_err(|error| ServerError::InvalidImage {
+            name: name.to_string(),
+            error,
+        })?;
+        // The image can be imported later, but say so now.
+        if let Err(ArtifactError::NotFound(_)) = self.artifacts.container_image(&image).await {
+            tracing::warn!("environment {name:?} uses the container image {image:?}, which hasn't been imported");
+        }
+
+        let runtime = self.container_runtime(name).await?;
+        let network = if network { Network::Host } else { Network::Isolated };
+        let runner = ContainerRunner::new(self.artifacts.clone(), image, network, runtime);
+        Ok(self.sandboxed(Arc::new(runner), "buildbox-container"))
+    }
+
+    async fn container_runtime(&mut self, name: &str) -> Result<Arc<dyn ContainerRuntime>, ServerError> {
+        if let Some(runtime) = &self.container_runtime {
+            return Ok(runtime.clone());
+        }
+
+        // Inside the sandbox directory, whose cleanup leaves it alone.
+        let state_dir = self.config.sandbox_dir.join("containers");
+        let runtime = NamespaceRuntime::open(Helper::this_binary(), &state_dir)
+            .await
+            .map_err(|error| ServerError::Containers {
+                name: name.to_string(),
+                error,
+            })?;
+        let runtime: Arc<dyn ContainerRuntime> = Arc::new(runtime);
+        self.container_runtime = Some(runtime.clone());
+        Ok(runtime)
+    }
+
+    fn sandboxed(&self, runner: Arc<dyn Runner>, worker_name: &str) -> Arc<dyn Executor> {
+        let config = self.config;
+        let executor = SandboxedExecutor::new(
+            self.cas.clone(),
+            config.sandbox_dir.clone(),
+            config.keep_sandboxes,
+            runner,
+            worker_name.to_string(),
+        );
+        Arc::new(executor)
+    }
 }
 
 /// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM. Running
