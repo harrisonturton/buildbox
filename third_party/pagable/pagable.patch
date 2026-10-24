@@ -1,0 +1,29 @@
+diff --git a/src/storage/traits.rs b/src/storage/traits.rs
+index 55746de..03fac14 100644
+--- a/src/storage/traits.rs
++++ b/src/storage/traits.rs
+@@ -127,6 +127,13 @@ pub trait PagableStorage: Send + Sync + 'static {
+         self.arc_cache().on_arc_deserialized(typeid, key, arc)
+     }
+ 
++    /// The key of an arc that this storage already has, or keeps live in
++    /// memory rather than storing, if `arc` is one. Paging out refers to it
++    /// by this key instead of serializing it.
++    fn pinned_key(&self, _arc: &dyn ArcEraseDyn) -> Option<DataKey> {
++        None
++    }
++
+     /// Schedules a type-erased arc for background paging to storage.
+     ///
+     /// Called when a pagable arc becomes fully unpinned and eligible for eviction.
+@@ -199,6 +206,10 @@ pub trait PagableStorage: Send + Sync + 'static {
+                         }
+                         continue;
+                     }
++                    if let Some(key) = self.pinned_key(&*v) {
++                        slot.set_success(key);
++                        continue;
++                    }
+ 
+                     let mut serializer = SerializerForPaging::new(session_context);
+                     let (data, arcs) = match v.serialize(&mut serializer) {

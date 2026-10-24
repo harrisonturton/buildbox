@@ -1,0 +1,4 @@
+# A patch to pagable, starlark-rust's serialization framework: a storage
+# backend can name an arc it keeps live, such as a compiled .bzl module's
+# heap, which paging out then refers to by key rather than serializing.
+exports_files(["pagable.patch"])

@@ -1,5 +1,5 @@
 {
-  "checksum": "0a7745d59b699d50697bbfe4d6c5915ac72d58c8c22e1ebd468be4d803c69867",
+  "checksum": "cbca60fa1bd468ae00400b0cd48f53b37576b5958a225a8c8413794917519d3b",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -3674,6 +3674,10 @@
           {
             "id": "connectrpc-codegen 0.9.0",
             "target": "connectrpc_codegen"
+          },
+          {
+            "id": "dashmap 6.2.1",
+            "target": "dashmap"
           },
           {
             "id": "data-encoding 2.11.1",
@@ -8770,6 +8774,12 @@
       "package_url": "https://github.com/facebook/starlark-rust",
       "repository": {
         "Http": {
+          "patch_args": [
+            "-p1"
+          ],
+          "patches": [
+            "@@//third_party/pagable:pagable.patch"
+          ],
           "sha256": "f2b6c3024f51bd32fc2fbadedb27783151515348f24cdf2e0ad83270b844f449",
           "url": "https://static.crates.io/crates/pagable/0.4.2/download"
         }
@@ -16394,6 +16404,7 @@
     "clap 4.6.7",
     "connectrpc 0.9.1",
     "connectrpc-codegen 0.9.0",
+    "dashmap 6.2.1",
     "data-encoding 2.11.1",
     "dhat 0.3.3",
     "flate2 1.1.10",

@@ -196,10 +196,22 @@ crate.spec(
     version = "2",
 )
 
+# For paging frozen heaps out, the version pagable uses.
+crate.spec(
+    package = "dashmap",
+    version = "6",
+)
+
 # Starlark's serialization framework, for paging frozen heaps out.
 crate.spec(
     package = "pagable",
     version = "0.4",
+)
+
+crate.annotation(
+    crate = "pagable",
+    patch_args = ["-p1"],
+    patches = ["//third_party/pagable:pagable.patch"],
 )
 
 # `pagable`: frozen heaps can be serialized, so analysis can be paged out.

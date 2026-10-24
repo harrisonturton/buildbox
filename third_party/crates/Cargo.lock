@@ -768,6 +768,7 @@ dependencies = [
  "clap",
  "connectrpc",
  "connectrpc-codegen",
+ "dashmap",
  "data-encoding",
  "dhat",
  "flate2",
