@@ -1,35 +1,4 @@
-load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 load("//bazel/connect:defs.bzl", "rust_connect_library")
-
-rust_prost_library(
-    name = "bytestream_rust_proto",
-    proto = "@googleapis//google/bytestream:bytestream_proto",
-    visibility = ["//buildbox:__subpackages__"],
-)
-
-rust_prost_library(
-    name = "operations_rust_proto",
-    proto = "@googleapis//google/longrunning:operations_proto",
-    visibility = ["//buildbox:__subpackages__"],
-)
-
-rust_prost_library(
-    name = "status_rust_proto",
-    proto = "@googleapis//google/rpc:status_proto",
-    visibility = ["//buildbox:__subpackages__"],
-)
-
-rust_prost_library(
-    name = "any_rust_proto",
-    proto = "@protobuf//:any_proto",
-    visibility = ["//buildbox:__subpackages__"],
-)
-
-rust_prost_library(
-    name = "error_details_rust_proto",
-    proto = "@googleapis//google/rpc:error_details_proto",
-    visibility = ["//buildbox:__subpackages__"],
-)
 
 rust_connect_library(
     name = "bytestream_rust_connect",

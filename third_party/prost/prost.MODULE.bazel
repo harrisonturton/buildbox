@@ -1,5 +1,0 @@
-"""Rust code generation for protos, using prost and tonic."""
-
-bazel_dep(name = "rules_rust_prost", version = "0.74.0")
-
-register_toolchains("//bazel/toolchains/prost:prost_toolchain")

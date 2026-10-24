@@ -1,17 +1,11 @@
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
-load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 load("//bazel:version.bzl", "VERSION")
 load("//bazel/connect:defs.bzl", "rust_connect_library")
 
 proto_library(
     name = "admin_proto",
     srcs = ["admin.proto"],
-)
-
-rust_prost_library(
-    name = "admin_rust_proto",
-    proto = ":admin_proto",
 )
 
 rust_connect_library(

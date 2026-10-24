@@ -1,5 +1,4 @@
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
-load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 load("//bazel/connect:defs.bzl", "rust_connect_library")
 
 proto_library(
@@ -25,18 +24,6 @@ proto_library(
         "@protobuf//:timestamp_proto",
         "@protobuf//:wrappers_proto",
     ],
-)
-
-rust_prost_library(
-    name = "semver_rust_proto",
-    proto = ":semver_proto",
-    visibility = ["//buildbox:__subpackages__"],
-)
-
-rust_prost_library(
-    name = "remote_execution_rust_proto",
-    proto = ":remote_execution_proto",
-    visibility = ["//buildbox:__subpackages__"],
 )
 
 # The REAPI protos and the Google APIs whose types they refer to. Imports must
