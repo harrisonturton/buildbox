@@ -71,7 +71,7 @@ pub async fn run(invocation: &Invocation, timeout: Option<Duration>) -> Result<P
         // Stop the process if it is abandoned, e.g. on timeout.
         .kill_on_drop(true);
 
-    let child = spawn(&mut process).await.map_err(|error| ProcessError::Start {
+    let child = spawn(process).await.map_err(|error| ProcessError::Start {
         program: invocation.program.clone(),
         error,
     })?;
@@ -95,10 +95,20 @@ pub async fn run(invocation: &Invocation, timeout: Option<Duration>) -> Result<P
 /// writing. That happens briefly, and harmlessly, when another thread forks
 /// just as the file is written: the child holds a copy of the file
 /// descriptor until it calls exec. Retrying shortly afterwards succeeds.
-async fn spawn(process: &mut tokio::process::Command) -> std::io::Result<Child> {
+///
+/// Starting a process blocks until the child has called exec, which can
+/// take milliseconds, so it happens on a blocking thread.
+async fn spawn(mut process: tokio::process::Command) -> std::io::Result<Child> {
     let mut attempt = 1;
     loop {
-        let error = match process.spawn() {
+        let started = tokio::task::spawn_blocking(move || {
+            let child = process.spawn();
+            (process, child)
+        })
+        .await;
+        let (returned, child) = started.map_err(|error| std::io::Error::other(format!("process start task failed: {error}")))?;
+        process = returned;
+        let error = match child {
             Ok(child) => return Ok(child),
             Err(error) => error,
         };
