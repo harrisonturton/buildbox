@@ -25,6 +25,7 @@ rust_binary(
         "//buildbox/bazel/server:bazel_rust_connect",
         "//buildbox/cas",
         "//buildbox/config",
+        "//buildbox/jemalloc",
         "//buildbox/container:namespaces",
         "//buildbox/oci",
         "//buildbox/server",

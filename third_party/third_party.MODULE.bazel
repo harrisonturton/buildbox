@@ -6,6 +6,7 @@ priority order of the toolchains they register.
 
 include("//third_party/apple_support:apple_support.MODULE.bazel")
 include("//third_party/llvm:llvm.MODULE.bazel")
+include("//third_party/jemalloc:jemalloc.MODULE.bazel")
 include("//third_party/rust:rust.MODULE.bazel")
 include("//third_party/protobuf:protobuf.MODULE.bazel")
 include("//third_party/crates:crates.MODULE.bazel")

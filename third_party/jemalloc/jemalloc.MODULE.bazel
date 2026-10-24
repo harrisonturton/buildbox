@@ -1,0 +1,19 @@
+"""jemalloc, bb's allocator.
+
+The commit tikv-jemalloc-sys 0.6.1 builds. Its build script runs configure
+and make, which aren't hermetic, so jemalloc is built with cc_library and
+the headers configure generated for x86_64 Linux against the pinned sysroot,
+checked in under include/.
+"""
+
+bazel_dep(name = "rules_cc", version = "0.2.17")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "jemalloc",
+    build_file = "//third_party/jemalloc:jemalloc.BUILD.bazel",
+    sha256 = "0e88b41ad5af520219c6415274370fefe93094a9127ac7d32099bc00f45c7c6c",
+    strip_prefix = "jemalloc-e13ca993e8ccb9ba9847cc330696e02839f328f7",
+    urls = ["https://github.com/tikv/jemalloc/archive/e13ca993e8ccb9ba9847cc330696e02839f328f7.tar.gz"],
+)

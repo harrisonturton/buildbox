@@ -48,6 +48,10 @@ enum Command {
 #[global_allocator]
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
 
+#[cfg(not(feature = "dhat-heap"))]
+#[global_allocator]
+static ALLOCATOR: jemalloc::Jemalloc = jemalloc::Jemalloc;
+
 /// How long to wait, on exit, for blocking work such as a large file copy,
 /// which can't be cancelled.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
