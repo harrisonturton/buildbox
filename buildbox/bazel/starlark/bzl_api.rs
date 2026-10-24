@@ -8,7 +8,7 @@ use starlark::starlark_module;
 use starlark::values::none::NoneType;
 use allocative::Allocative;
 use starlark::starlark_simple_value;
-use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, StringValue, Value, starlark_value};
+use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, StringValue, Value, starlark_value};
 
 #[starlark_module]
 pub(crate) fn bzl_functions(builder: &mut GlobalsBuilder) {
@@ -74,7 +74,7 @@ pub(crate) fn macro_function(builder: &mut GlobalsBuilder) {
 
 /// What `configuration_field()` returns: a default label the build's
 /// configuration chooses, such as `--proto_compiler`'s value.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct LateBoundDefault {
     pub fragment: String,
     pub name: String,

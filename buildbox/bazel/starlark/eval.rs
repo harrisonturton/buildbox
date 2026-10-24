@@ -85,6 +85,7 @@ pub fn heap_name(what: &str, label: impl std::fmt::Display, fingerprint: impl st
 pub fn eval_bzl(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: EvalContext, name: FrozenHeapName) -> Result<(FrozenModule, Vec<String>), EvalError> {
     debug_assert_eq!(context.kind, FileKind::Bzl);
     Module::with_temp_heap(|module| {
+        module.frozen_heap().add_reference(crate::provider::builtin_providers_heap());
         {
             let printer = Printer(&context);
             let mut eval = Evaluator::new(&module);

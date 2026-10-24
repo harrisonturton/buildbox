@@ -8,13 +8,14 @@ use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_complex_value;
 use starlark::starlark_module;
 use starlark::values::{
-    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value, ValueLifetimeless,
+    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
 };
 use std::fmt;
 
 /// A set of runfiles: files, and symlinks to files at chosen paths.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct RunfilesGen<V: ValueLifetimeless> {
     /// A depset of files, each at its runfiles path.
@@ -140,7 +141,8 @@ fn runfiles_methods(builder: &mut MethodsBuilder) {
 }
 
 /// What an executable needs to run, as `DefaultInfo.files_to_run`.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct FilesToRunGen<V: ValueLifetimeless> {
     /// The executable `File`, or `None`.

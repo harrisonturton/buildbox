@@ -20,6 +20,7 @@ mod file_value;
 mod fragments;
 mod inputs;
 mod native;
+pub mod paging;
 mod platform;
 mod providers;
 mod rule_ctx;

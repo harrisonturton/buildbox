@@ -12,7 +12,7 @@ use starlark::starlark_module;
 use starlark::values::dict::DictRef;
 use starlark::values::tuple::AllocTuple;
 use starlark::values::{
-    Freeze, FrozenHeap, FrozenHeapRef, FrozenValue, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value,
+    Freeze, FrozenHeap, FrozenHeapRef, FrozenValue, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value,
     ValueLifetimeless, ValueLike, starlark_value,
 };
 use std::sync::{LazyLock, OnceLock};
@@ -20,7 +20,8 @@ use std::fmt;
 
 /// A provider defined with `provider()`, or built in. Calling it makes an
 /// instance; it takes its name from the global it's assigned to.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct ProviderGen<V: ValueLifetimeless> {
     /// The allowed fields, if restricted.
@@ -30,9 +31,11 @@ pub struct ProviderGen<V: ValueLifetimeless> {
     pub raw: bool,
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
     pub definition: Option<Label>,
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_once_lock", deserialize_with = "crate::paging::deserialize_once_lock")]
     pub name: OnceLock<String>,
 }
 
@@ -145,7 +148,8 @@ fn named<'v>(args: &Arguments<'v, '_>) -> starlark::Result<Vec<(&'v str, Value<'
 }
 
 /// An instance of a provider: its fields.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct ProviderInstanceGen<V: ValueLifetimeless> {
     pub provider: V,
@@ -284,6 +288,13 @@ static BUILTIN_PROVIDER_VALUES: LazyLock<BuiltinProviders> = LazyLock::new(|| {
         platform_common,
     }
 });
+
+/// The heap the builtin providers are in. Every heap that may refer to one
+/// adds a reference to it, so that its values can be found when the heap is
+/// serialized.
+pub fn builtin_providers_heap() -> &'static FrozenHeapRef {
+    &BUILTIN_PROVIDER_VALUES.heap
+}
 
 /// A builtin provider, such as `DefaultInfo` or `ToolchainInfo`, and the
 /// heap it's in, which a heap that refers to it must keep alive.

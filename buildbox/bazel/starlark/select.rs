@@ -7,13 +7,14 @@ use starlark::starlark_complex_value;
 use starlark::starlark_module;
 use starlark::values::dict::DictRef;
 use starlark::values::{
-    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value, ValueLifetimeless,
+    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
 };
 use std::fmt;
 
 /// `select({condition: value, ...})`: a value chosen by configuration.
-#[derive(Clone, Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Clone, Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 pub struct SelectGen<V: ValueLifetimeless> {
     /// The conditions, as given (strings or labels), and their values.
     pub branches: Vec<(V, V)>,
@@ -25,7 +26,8 @@ unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<
 starlark_complex_value!(pub Select);
 
 /// Values and selects concatenated with `+` or `|`.
-#[derive(Clone, Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Clone, Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 pub struct SelectorListGen<V: ValueLifetimeless> {
     pub parts: Vec<V>,
 }

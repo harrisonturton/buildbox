@@ -224,6 +224,40 @@ pub async fn clean(context: &CommandContext<'_>, args: &[String], out: &Output) 
     exit::SUCCESS
 }
 
+/// `page-check`: whether every analyzed target in the workspace can be
+/// serialized for paging, and what can't. A diagnostic.
+pub async fn page_check(context: &CommandContext<'_>, out: &Output) -> i32 {
+    let workspace = context.server.workspaces().get(&context.workspace_root);
+    let keys = workspace.graph.keys::<bazel_analysis::ConfiguredTargetKey>();
+    let session = workspace.graph.session().await;
+    let targets = session.evaluate_many(&keys).await;
+    let mut serialized = 0;
+    let mut bytes = 0;
+    let mut failures: std::collections::BTreeMap<String, (usize, String)> = std::collections::BTreeMap::new();
+    for (key, target) in keys.iter().zip(targets) {
+        let Ok(target) = target else {
+            continue;
+        };
+        match bazel_analysis::paging::round_trip(&target.value) {
+            Ok(len) => {
+                serialized += 1;
+                bytes += len;
+            }
+            Err(error) => {
+                let reason = error.lines().next().unwrap_or_default().to_string();
+                let entry = failures.entry(reason).or_insert((0, key.label.to_string()));
+                entry.0 += 1;
+            }
+        }
+    }
+    let mut text = format!("{serialized} targets serialized, {bytes} bytes\n");
+    for (reason, (count, example)) in &failures {
+        text.push_str(&format!("{count:>6}  {reason}  (e.g. {example})\n"));
+    }
+    out.stdout(&text).await;
+    exit::SUCCESS
+}
+
 /// `dump`: what the server holds in memory.
 pub async fn dump(context: &CommandContext<'_>, out: &Output) -> i32 {
     let stats = context.server.workspaces().engine().stats();

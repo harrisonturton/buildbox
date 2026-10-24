@@ -7,7 +7,7 @@ use intern::Symbol;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::{Arguments, Evaluator};
 use starlark::starlark_simple_value;
-use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, starlark_value};
+use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, starlark_value};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, LazyLock};
@@ -260,9 +260,10 @@ pub static NATIVE_RULES: LazyLock<HashMap<Symbol, Arc<RuleClass>>> = LazyLock::n
 });
 
 /// A native rule, as a callable Starlark value.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct NativeRule {
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
     pub class: Arc<RuleClass>,
 }
 

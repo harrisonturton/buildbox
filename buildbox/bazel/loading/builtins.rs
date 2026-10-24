@@ -108,16 +108,18 @@ fn evaluate(dir: &Path, mapping: RepoMappingTable) -> anyhow::Result<Builtins> {
             rule_classes.insert(Symbol::intern(name), class.clone());
         }
     }
+    let fingerprint = Fingerprint::of(dir.display().to_string().as_bytes());
     let starlark_builtins = StarlarkBuiltins {
         rules,
         toplevels,
         heap: exports.frozen_heap(),
+        id: fingerprint.to_string(),
     };
     Ok(Builtins {
         bzl: bazel_starlark::bzl_globals(&starlark_builtins),
         build: bazel_starlark::build_globals(&starlark_builtins),
         rule_classes,
-        fingerprint: Fingerprint::of(dir.display().to_string().as_bytes()),
+        fingerprint,
         _exports: Some(exports),
     })
 }

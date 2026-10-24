@@ -17,7 +17,7 @@ use starlark::starlark_complex_value;
 use starlark::starlark_module;
 use starlark::values::dict::DictRef;
 use starlark::values::{
-    Freeze, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, StringValue, Trace, Value,
+    Freeze, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, StringValue, Trace, Value,
     ValueLifetimeless, ValueLike, starlark_value,
 };
 use std::sync::OnceLock;
@@ -26,7 +26,8 @@ use std::sync::Arc;
 
 /// A rule class defined with `rule()`. It takes its name from the global
 /// it's assigned to, and can only be instantiated once it has one.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct StarlarkRuleGen<V: ValueLifetimeless> {
     pub implementation: V,
@@ -39,14 +40,17 @@ pub struct StarlarkRuleGen<V: ValueLifetimeless> {
     /// default labels.
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
     pub definition: Label,
     /// The rule's schema and the `.bzl` file that exported it, which
     /// identifies the rule class; set when it's assigned to a global.
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_once_lock", deserialize_with = "crate::paging::deserialize_once_lock")]
     pub exported: OnceLock<Arc<RuleClass>>,
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_once_lock", deserialize_with = "crate::paging::deserialize_once_lock")]
     pub exported_from: OnceLock<Label>,
 }
 

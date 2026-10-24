@@ -184,6 +184,25 @@ impl<T: Encode> Encode for Vec<T> {
     }
 }
 
+impl<K: Encode, V: Encode> Encode for std::collections::BTreeMap<K, V> {
+    fn encode(&self, e: &mut Encoder) {
+        e.usize(self.len());
+        for (key, value) in self {
+            key.encode(e);
+            value.encode(e);
+        }
+    }
+}
+
+impl<T: Encode> Encode for std::collections::BTreeSet<T> {
+    fn encode(&self, e: &mut Encoder) {
+        e.usize(self.len());
+        for value in self {
+            value.encode(e);
+        }
+    }
+}
+
 impl<T: Encode + ?Sized> Encode for Box<T> {
     fn encode(&self, e: &mut Encoder) {
         (**self).encode(e);

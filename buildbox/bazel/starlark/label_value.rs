@@ -8,7 +8,7 @@ use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::{
-    NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value,
+    NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, ValueLike, starlark_value,
 };
 use std::cmp::Ordering;
 use std::fmt;
@@ -16,8 +16,8 @@ use std::hash::Hash;
 
 /// A label, as a Starlark value. Converts to its canonical form,
 /// `@@repo//package:name`, with `str()`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
-pub struct LabelValue(#[allocative(skip)] pub Label);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
+pub struct LabelValue(#[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")] #[allocative(skip)] pub Label);
 
 starlark_simple_value!(LabelValue);
 

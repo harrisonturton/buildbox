@@ -7,7 +7,8 @@
 use allocative::Allocative;
 use intern::Symbol;
 use starlark::coerce::Coerce;
-use starlark::values::{Freeze, Trace, Value, ValueLifetimeless};
+use starlark::pagable::{StarlarkDeserializeContext, StarlarkSerializeContext};
+use starlark::values::{Freeze, StarlarkPagable, Trace, Value, ValueLifetimeless};
 use std::collections::HashSet;
 use std::hash::BuildHasher;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -19,12 +20,14 @@ const SHARDS: usize = 16;
 static NAME_LISTS: LazyLock<[Mutex<HashSet<Arc<[Symbol]>>>; SHARDS]> = LazyLock::new(|| std::array::from_fn(|_| Mutex::new(HashSet::new())));
 
 /// Field names, in the order they were given, and their values.
-#[derive(Debug, Trace, Freeze, Allocative)]
+#[derive(Debug, Trace, Freeze, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct FieldsGen<V: ValueLifetimeless> {
     #[trace(static)]
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "serialize_names", deserialize_with = "deserialize_names")]
     names: Arc<[Symbol]>,
     values: Box<[V]>,
 }
@@ -83,6 +86,17 @@ impl<V: ValueLifetimeless> FieldsGen<V> {
     pub fn keys(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.names.iter().map(|name| name.as_str())
     }
+}
+
+fn serialize_names(names: &Arc<[Symbol]>, ctx: &mut dyn StarlarkSerializeContext) -> starlark::Result<()> {
+    crate::paging::serialize_encoded(&names.to_vec(), ctx)
+}
+
+/// Names [`serialize_names`] serialized, shared with every value that has
+/// the same names.
+fn deserialize_names(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> starlark::Result<Arc<[Symbol]>> {
+    let names: Vec<Symbol> = crate::paging::deserialize_encoded(ctx)?;
+    Ok(shared_names(names))
 }
 
 /// The interned copy of a list of names.

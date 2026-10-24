@@ -7,10 +7,11 @@ use allocative::Allocative;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::eval::{Arguments, Evaluator};
+use starlark::pagable::{StarlarkDeserialize, StarlarkDeserializeContext, StarlarkSerialize, StarlarkSerializeContext};
 use starlark::starlark_complex_value;
 use starlark::starlark_simple_value;
 use starlark::values::{
-    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value, ValueLifetimeless,
+    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
 };
 use std::fmt;
@@ -18,10 +19,12 @@ use std::sync::Arc;
 
 /// A value of the C++ API with named fields, such as a `CcInfo`, a
 /// `LinkerInput` or a `LibraryToLink`. `kind` names its type.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct CcStructGen<V: ValueLifetimeless> {
     #[freeze(identity)]
+    #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_static_str", deserialize_with = "bazel_starlark::paging::deserialize_static_str")]
     pub kind: &'static str,
     pub fields: SmallMap<String, V>,
 }
@@ -88,7 +91,7 @@ pub type Constructor = for<'v> fn(&Arguments<'v, '_>, &mut Evaluator<'v, '_, '_>
 
 /// A provider built into Bazel whose instances are values of their own,
 /// such as `CcInfo`, rather than plain provider instances.
-#[derive(ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(ProvidesStaticType, NoSerialize, Allocative)]
 pub struct NativeProvider {
     pub name: &'static str,
     #[allocative(skip)]
@@ -96,6 +99,24 @@ pub struct NativeProvider {
 }
 
 starlark_simple_value!(NativeProvider);
+
+/// A native provider is serialized as its name; its constructor is found
+/// again by name.
+impl StarlarkSerialize for NativeProvider {
+    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> starlark::Result<()> {
+        bazel_starlark::paging::serialize_static_str(&self.name, ctx)
+    }
+}
+
+impl StarlarkDeserialize for NativeProvider {
+    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> starlark::Result<NativeProvider> {
+        let name = bazel_starlark::paging::deserialize_static_str(ctx)?;
+        Ok(NativeProvider {
+            name,
+            constructor: super::api::native_constructor(name),
+        })
+    }
+}
 
 impl fmt::Debug for NativeProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -131,11 +152,13 @@ impl<'v> StarlarkValue<'v> for NativeProvider {
 
 /// A C++ toolchain, as `CcToolchainInfo` gives it: its configuration, and
 /// the files its tools need.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct CcToolchainGen<V: ValueLifetimeless> {
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
     pub config: Arc<CcToolchainConfig>,
     /// Depsets of files, such as `all_files` and `compiler_files`, by name.
     pub files: SmallMap<String, V>,
@@ -182,8 +205,8 @@ where
 }
 
 /// A `FeatureConfiguration`.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
-pub struct FeatureConfigurationValue(#[allocative(skip)] pub Arc<FeatureConfiguration>);
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
+pub struct FeatureConfigurationValue(#[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")] #[allocative(skip)] pub Arc<FeatureConfiguration>);
 
 starlark_simple_value!(FeatureConfigurationValue);
 
@@ -197,8 +220,8 @@ impl fmt::Display for FeatureConfigurationValue {
 impl<'v> StarlarkValue<'v> for FeatureConfigurationValue {}
 
 /// Build variables, as `cc_common.create_compile_variables` makes them.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
-pub struct VariablesValue(#[allocative(skip)] pub Arc<Variables>);
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
+pub struct VariablesValue(#[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")] #[allocative(skip)] pub Arc<Variables>);
 
 starlark_simple_value!(VariablesValue);
 
@@ -212,8 +235,8 @@ impl fmt::Display for VariablesValue {
 impl<'v> StarlarkValue<'v> for VariablesValue {}
 
 /// A toolchain configuration, as `CcToolchainConfigInfo` gives it.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
-pub struct ToolchainConfigValue(#[allocative(skip)] pub Arc<CcToolchainConfig>);
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
+pub struct ToolchainConfigValue(#[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")] #[allocative(skip)] pub Arc<CcToolchainConfig>);
 
 starlark_simple_value!(ToolchainConfigValue);
 

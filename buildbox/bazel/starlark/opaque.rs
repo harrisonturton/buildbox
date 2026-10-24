@@ -3,7 +3,7 @@
 use allocative::Allocative;
 use starlark::eval::{Arguments, Evaluator};
 use starlark::starlark_simple_value;
-use starlark::values::{FrozenValue, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
+use starlark::values::{FrozenValue, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, ValueLike, starlark_value};
 use std::fmt;
 
 /// A value of a Bazel API that loading doesn't look inside, such as an
@@ -13,7 +13,7 @@ use std::fmt;
 /// so code that only passes these values around at the top level of a
 /// `.bzl` file, or in the definitions of rules, loads. Using them in a
 /// rule's implementation needs the real API.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct Opaque {
     pub type_name: String,
 }
@@ -92,7 +92,7 @@ impl<'v> StarlarkValue<'v> for Opaque {
 
 /// A namespace of the Bazel API with some real members, such as
 /// `platform_common`. Members it doesn't have are opaque.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct Namespace {
     pub name: String,
     #[allocative(skip)]

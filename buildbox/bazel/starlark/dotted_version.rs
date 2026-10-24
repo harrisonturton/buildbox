@@ -3,14 +3,14 @@
 
 use allocative::Allocative;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
-use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
+use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, ValueLike, starlark_value};
 use starlark::{starlark_module, starlark_simple_value};
 use std::cmp::Ordering;
 use std::fmt;
 
 /// A dotted version. Components compare numerically where they're numbers,
 /// and missing components count as zero, so `1.2` equals `1.2.0`.
-#[derive(Debug, Clone, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Clone, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct DottedVersion {
     pub text: String,
 }

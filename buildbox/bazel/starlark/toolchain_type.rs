@@ -7,14 +7,15 @@ use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
+use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, ValueLike, starlark_value};
 use std::fmt;
 
 /// A toolchain type a rule needs, and whether it must find a toolchain of
 /// that type.
-#[derive(Debug, Clone, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Clone, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct ToolchainType {
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
     pub label: Label,
     pub mandatory: bool,
 }

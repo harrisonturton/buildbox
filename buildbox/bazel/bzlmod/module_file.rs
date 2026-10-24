@@ -193,7 +193,7 @@ fn evaluate_into(file_name: &str, source: &str, context: &ModuleContext<'_>) -> 
 static MODULE_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
     GlobalsBuilder::extended_by(&[LibraryExtension::StructType, LibraryExtension::Json, LibraryExtension::Print])
         .with(module_functions)
-        .build()
+        .build_named(starlark::environment::GlobalFrozenHeapName { name: "bb module" })
 });
 
 /// The usage index of a proxy for a dev-only use in a non-root module,

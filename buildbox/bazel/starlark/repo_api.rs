@@ -12,7 +12,7 @@ use starlark::starlark_complex_value;
 use starlark::starlark_module;
 use starlark::values::dict::DictRef;
 use starlark::values::{
-    Freeze, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, StringValue, Trace, Value,
+    Freeze, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, StringValue, Trace, Value,
     ValueLifetimeless, ValueLike, starlark_value,
 };
 use std::fmt;
@@ -74,7 +74,8 @@ impl StarlarkAttr {
 }
 
 /// A repository rule defined with `repository_rule()`.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct RepositoryRuleGen<V: ValueLifetimeless> {
     pub implementation: V,
@@ -83,9 +84,11 @@ pub struct RepositoryRuleGen<V: ValueLifetimeless> {
     pub environ: Vec<String>,
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
     pub definition: Label,
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_once_lock", deserialize_with = "crate::paging::deserialize_once_lock")]
     pub name: OnceLock<String>,
 }
 
@@ -164,7 +167,8 @@ fn is_common_repo_attr(name: &str) -> bool {
 }
 
 /// A module extension defined with `module_extension()`.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct ModuleExtensionGen<V: ValueLifetimeless> {
     pub implementation: V,
@@ -186,7 +190,8 @@ impl<'v, V: ValueLike<'v>> fmt::Display for ModuleExtensionGen<V> {
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ModuleExtensionGen<V> where Self: ProvidesStaticType<'v> {}
 
 /// A tag class defined with `tag_class()`: the attributes its tags take.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct TagClassGen<V: ValueLifetimeless> {
     pub attrs: Vec<(String, V)>,

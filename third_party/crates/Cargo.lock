@@ -776,6 +776,7 @@ dependencies = [
  "http",
  "libc",
  "lz4_flex",
+ "pagable",
  "proc-macro2",
  "quote",
  "regex",

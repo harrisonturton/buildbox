@@ -17,7 +17,7 @@ use starlark::values::dict::{AllocDict, DictRef};
 use starlark::values::list::AllocList;
 use starlark::values::none::NoneType;
 use starlark::values::tuple::AllocTuple;
-use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
+use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, ValueLike, starlark_value};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -307,7 +307,7 @@ fn implicit_features(eval: &Evaluator<'_, '_, '_>) -> Vec<String> {
 }
 
 /// `cc_common`: the C++ API, with members bb doesn't implement opaque.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct CcCommon;
 
 starlark_simple_value!(CcCommon);
@@ -849,13 +849,21 @@ pub fn library_variable(kind: &str, name: &str, objects: &[String], whole_archiv
     Variable::Structure(fields)
 }
 
+/// The constructor of the native provider named `name`, if it has one.
+pub fn native_constructor(name: &str) -> Option<super::values::Constructor> {
+    match name {
+        "CcInfo" => Some(construct_cc_info),
+        _ => None,
+    }
+}
+
 /// Add `cc_common`, `CcInfo` and `CcToolchainConfigInfo` to `.bzl` files.
 pub fn register(builder: &mut GlobalsBuilder) {
     let cc_common = builder.alloc(CcCommon);
     builder.set("cc_common", cc_common);
     let cc_info = builder.alloc(NativeProvider {
         name: "CcInfo",
-        constructor: Some(construct_cc_info),
+        constructor: native_constructor("CcInfo"),
     });
     builder.set("CcInfo", cc_info);
     if let Ok(provider) = crate::providers::builtin("CcToolchainConfigInfo") {

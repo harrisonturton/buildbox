@@ -2,17 +2,18 @@
 //! lines and environments they give actions, as Bazel's
 //! `CcToolchainFeatures` computes them.
 
+use skycodec::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// The features and action configs of a toolchain, in its order.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct ToolchainFeatures {
     pub features: Vec<Feature>,
     pub action_configs: Vec<ActionConfig>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct Feature {
     pub name: String,
     pub enabled: bool,
@@ -25,7 +26,7 @@ pub struct Feature {
 }
 
 /// How an action is run: its tools, and flags of its own.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct ActionConfig {
     pub action_name: String,
     pub enabled: bool,
@@ -34,7 +35,7 @@ pub struct ActionConfig {
     pub implies: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct Tool {
     /// The tool's path: absolute, or relative to the execution root.
     pub path: String,
@@ -42,7 +43,7 @@ pub struct Tool {
     pub execution_requirements: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct FlagSet {
     /// The actions it applies to; for an action config's, its own.
     pub actions: Vec<String>,
@@ -52,13 +53,13 @@ pub struct FlagSet {
 }
 
 /// Features that must be enabled, and features that must not be.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct WithFeatureSet {
     pub features: Vec<String>,
     pub not_features: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct FlagGroup {
     pub flags: Vec<String>,
     pub flag_groups: Vec<FlagGroup>,
@@ -70,14 +71,14 @@ pub struct FlagGroup {
     pub expand_if_equal: Option<(String, String)>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct EnvSet {
     pub actions: Vec<String>,
     pub with_features: Vec<WithFeatureSet>,
     pub env_entries: Vec<EnvEntry>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct EnvEntry {
     pub key: String,
     pub value: String,
@@ -85,7 +86,7 @@ pub struct EnvEntry {
 }
 
 /// The value of a build variable, which flags expand.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub enum Variable {
     String(String),
     Bool(bool),
@@ -94,7 +95,7 @@ pub enum Variable {
 }
 
 /// Build variables, by name.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct Variables {
     pub values: BTreeMap<String, Variable>,
 }
@@ -104,7 +105,7 @@ pub struct Variables {
 pub struct FeatureError(pub String);
 
 /// Which features are enabled for a rule.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub struct FeatureConfiguration {
     pub toolchain: Arc<ToolchainFeatures>,
     pub enabled: BTreeSet<String>,

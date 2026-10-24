@@ -7,14 +7,14 @@ use starlark::starlark_complex_value;
 use starlark::starlark_module;
 use starlark::values::list::AllocList;
 use starlark::values::{
-    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value, ValueLifetimeless,
+    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
 };
 use std::collections::HashMap;
 use std::fmt;
 
 /// The order a depset's elements are listed in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Allocative)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Allocative, skycodec::Encode, skycodec::Decode)]
 pub enum Order {
     /// Left to right, children before their parents.
     Default,
@@ -43,12 +43,14 @@ impl Order {
 
 /// A depset: its direct elements and the depsets it includes, shared rather
 /// than copied.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct DepsetGen<V: ValueLifetimeless> {
     pub direct: Vec<V>,
     pub transitive: Vec<V>,
     #[freeze(identity)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
     pub order: Order,
 }
 

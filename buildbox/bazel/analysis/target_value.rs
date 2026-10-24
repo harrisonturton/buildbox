@@ -8,7 +8,7 @@ use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::starlark_complex_value;
 use starlark::values::{
-    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value, ValueLifetimeless,
+    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
 };
 use std::fmt;
@@ -18,11 +18,13 @@ pub const DEFAULT_INFO: &str = "DefaultInfo";
 
 /// A configured target: its label, and the providers its rule returned,
 /// by [provider key](bazel_starlark::provider::ProviderGen::key).
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct TargetValueGen<V: ValueLifetimeless> {
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
     pub label: Label,
     pub providers: SmallMap<String, V>,
     /// Whether the target is a file rather than a rule. Files have no

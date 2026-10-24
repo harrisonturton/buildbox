@@ -109,6 +109,7 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         "shutdown" => crate::commands::shutdown(&context, out).await,
         "clean" => crate::commands::clean(&context, args, out).await,
         "dump" => crate::commands::dump(&context, out).await,
+        "page-check" => crate::commands::page_check(&context, out).await,
         "build" => crate::build::build(&context, args, out).await,
         "test" => crate::test::test(&context, args, out).await,
         "run" => crate::run::run(&context, args, out).await,

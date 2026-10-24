@@ -5,7 +5,7 @@ use starlark::coerce::Coerce;
 use starlark::eval::{Arguments, Evaluator};
 use starlark::starlark_complex_value;
 use starlark::values::{
-    Freeze, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value, ValueLifetimeless,
+    Freeze, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
 };
 use std::fmt;
@@ -13,7 +13,8 @@ use std::fmt;
 /// A macro defined with `macro()`. Calling it calls its implementation with
 /// the same keyword arguments, and `visibility = None` if not given; the
 /// macro's own scoping of names and visibility isn't enforced.
-#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
 pub struct SymbolicMacroGen<V: ValueLifetimeless> {
     pub implementation: V,

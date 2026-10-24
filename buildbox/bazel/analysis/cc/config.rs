@@ -1,12 +1,13 @@
 //! Toolchain configurations, as `cc_common.create_cc_toolchain_config_info`
 //! takes them.
 
+use skycodec::{Decode, Encode};
 use super::features::{ActionConfig, EnvEntry, EnvSet, Feature, FlagGroup, FlagSet, Tool, ToolchainFeatures, WithFeatureSet};
 use starlark::values::{Heap, Value};
 use std::collections::BTreeMap;
 
 /// What a C++ toolchain is, and how its actions are configured.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct CcToolchainConfig {
     pub toolchain_identifier: String,
     pub host_system_name: String,

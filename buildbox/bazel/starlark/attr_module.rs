@@ -8,17 +8,19 @@ use starlark::environment::GlobalsBuilder;
 use starlark::starlark_complex_value;
 use starlark::starlark_module;
 use starlark::values::{
-    Freeze, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, StringValue, Trace, Value,
+    Freeze, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, StringValue, Trace, Value,
     ValueLifetimeless, ValueLike, starlark_value,
 };
 use std::fmt;
 
 /// What `attr.label(...)` and its siblings return: an attribute's type and
 /// options, waiting for `rule()` to name it.
-#[derive(Clone, Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[derive(Clone, Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 pub struct AttributeGen<V: ValueLifetimeless> {
     #[freeze(identity)]
     #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
     pub ty: AttrType,
     pub default: Option<V>,
     pub mandatory: bool,

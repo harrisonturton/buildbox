@@ -265,6 +265,29 @@ impl<T: Decode> Decode for Vec<T> {
     }
 }
 
+impl<K: Decode + Ord, V: Decode> Decode for std::collections::BTreeMap<K, V> {
+    fn decode(d: &mut Decoder<'_>) -> Result<std::collections::BTreeMap<K, V>, DecodeError> {
+        let len = d.usize()?;
+        let mut map = std::collections::BTreeMap::new();
+        for _ in 0..len {
+            let key = K::decode(d)?;
+            map.insert(key, V::decode(d)?);
+        }
+        Ok(map)
+    }
+}
+
+impl<T: Decode + Ord> Decode for std::collections::BTreeSet<T> {
+    fn decode(d: &mut Decoder<'_>) -> Result<std::collections::BTreeSet<T>, DecodeError> {
+        let len = d.usize()?;
+        let mut set = std::collections::BTreeSet::new();
+        for _ in 0..len {
+            set.insert(T::decode(d)?);
+        }
+        Ok(set)
+    }
+}
+
 impl<T: Decode> Decode for Box<[T]> {
     fn decode(d: &mut Decoder<'_>) -> Result<Box<[T]>, DecodeError> {
         d.seq().map(Vec::into_boxed_slice)

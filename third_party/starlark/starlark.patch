@@ -333,6 +333,25 @@ index b29c0bc..a19f17e 100644
          assert!(result.is_err());
          match result {
              Err(err) => match err.kind() {
+diff --git a/src/values/layout/typed.rs b/src/values/layout/typed.rs
+index 8f43a3e..41bb743 100644
+--- a/src/values/layout/typed.rs
++++ b/src/values/layout/typed.rs
+@@ -475,9 +475,11 @@ impl<'v, T: StarlarkValue<'v>> crate::pagable::StarlarkDeserialize for FrozenVal
+         ctx: &mut dyn crate::pagable::starlark_deserialize::StarlarkDeserializeContext<'_>,
+     ) -> crate::Result<Self> {
+         let fv = FrozenValue::starlark_deserialize(ctx)?;
+-        // SAFETY: pagable deserializes this field through the same Rust type
+-        // that serialized it.
+-        Ok(unsafe { FrozenValueTyped::new_unchecked(fv) })
++        // Pagable deserializes this field through the same Rust type that
++        // serialized it. The value may not be deserialized yet, when values
++        // refer to each other in a cycle, such as a module and the functions
++        // defined in it, so its type isn't checked here.
++        Ok(FrozenValueTyped(fv, marker::PhantomData))
+     }
+ }
+ 
 diff --git a/src/values/layout/value.rs b/src/values/layout/value.rs
 index 7554138..0d71174 100644
 --- a/src/values/layout/value.rs

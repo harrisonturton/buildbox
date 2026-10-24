@@ -4,14 +4,14 @@ use crate::artifact::Artifact;
 use allocative::Allocative;
 use bazel_starlark::label_value::LabelValue;
 use starlark::starlark_simple_value;
-use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
+use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, ValueLike, starlark_value};
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
 
 /// A file, source or generated, as a Starlark value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
-pub struct FileValue(#[allocative(skip)] pub Artifact);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
+pub struct FileValue(#[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")] #[allocative(skip)] pub Artifact);
 
 starlark_simple_value!(FileValue);
 
@@ -29,7 +29,7 @@ impl fmt::Display for FileValue {
 }
 
 /// The directory a file is relative to, as `File.root`.
-#[derive(Debug, Clone, PartialEq, Eq, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, Clone, PartialEq, Eq, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct FileRoot(pub String);
 
 starlark_simple_value!(FileRoot);

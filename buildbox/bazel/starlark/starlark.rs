@@ -17,6 +17,7 @@ pub mod label_value;
 pub mod native_rules;
 pub mod opaque;
 pub mod package_builder;
+pub mod paging;
 pub mod provider;
 pub mod repo_api;
 pub mod rule_value;
@@ -28,7 +29,7 @@ pub use context::{EvalContext, FileKind, Globber};
 pub use eval::{EvalError, Loads, eval_bzl, eval_build, heap_name, loaded_names, loads, parse};
 pub use package_builder::PackageBuilder;
 
-use starlark::environment::{Globals, GlobalsBuilder, LibraryExtension};
+use starlark::environment::{GlobalFrozenHeapName, Globals, GlobalsBuilder, LibraryExtension};
 use starlark::values::{FrozenHeapRef, FrozenValue};
 use starlark::syntax::{Dialect, DialectTypes};
 use std::sync::LazyLock;
@@ -73,6 +74,8 @@ pub struct StarlarkBuiltins<'a> {
     pub toplevels: Vec<(String, FrozenValue)>,
     /// The heap the values are in, which the globals keep alive.
     pub heap: &'a FrozenHeapRef,
+    /// Identifies the builtins, for naming the globals' heaps.
+    pub id: String,
 }
 
 /// Add `native.bazel_version` and `native.legacy_globals`.
@@ -90,6 +93,7 @@ fn build_globals_builder() -> GlobalsBuilder {
         .with(label_value::label_constructor)
         .with(depset::depset_function);
     native_rules::register(&mut builder);
+    builder.frozen_heap().add_reference(provider::builtin_providers_heap());
     builder
 }
 
@@ -124,6 +128,7 @@ fn bzl_globals_builder() -> GlobalsBuilder {
         builder.set(name, value);
     }
     provider::register_builtin_providers(&mut builder);
+    builder.frozen_heap().add_reference(provider::builtin_providers_heap());
     builder
 }
 
@@ -137,7 +142,7 @@ fn add_extensions(builder: &mut GlobalsBuilder) {
 }
 
 /// The globals of BUILD files, before builtins.
-pub static BUILD_GLOBALS: LazyLock<Globals> = LazyLock::new(|| build_globals_builder().build());
+pub static BUILD_GLOBALS: LazyLock<Globals> = LazyLock::new(|| build_globals_builder().build_named(GlobalFrozenHeapName { name: "bb build" }));
 
 /// The globals of `.bzl` files, before builtins. `@_builtins` itself is
 /// evaluated with these and a stand-in `_builtins` object.
@@ -151,21 +156,30 @@ pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
     let value = builder.alloc(opaque::Opaque::new("_builtins"));
     builder.set("_builtins", value);
     add_extensions(&mut builder);
-    builder.build()
+    builder.build_named(GlobalFrozenHeapName { name: "bb bzl" })
 });
 
 /// The globals of BUILD files, with builtin rules.
 pub fn build_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
+    let name = globals_name("bb build", builtins);
     let mut builder = build_globals_builder();
     builder.frozen_heap().add_reference(builtins.heap);
     for (name, value) in &builtins.rules {
         builder.set(name, *value);
     }
-    builder.build()
+    builder.build_named(name)
+}
+
+/// A name for globals made with `builtins`, unique to them. Globals are
+/// made once per set of builtins, so the name is leaked.
+fn globals_name(what: &str, builtins: &StarlarkBuiltins<'_>) -> GlobalFrozenHeapName {
+    let name: &'static str = Box::leak(format!("{what} {}", builtins.id).into_boxed_str());
+    GlobalFrozenHeapName { name }
 }
 
 /// The globals of `.bzl` files, with builtin rules and values.
 pub fn bzl_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
+    let name = globals_name("bb bzl", builtins);
     let mut builder = bzl_globals_builder();
     builder.frozen_heap().add_reference(builtins.heap);
     for (name, value) in &builtins.toplevels {
@@ -181,5 +195,5 @@ pub fn bzl_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
             native.set(name, *value);
         }
     });
-    builder.build()
+    builder.build_named(name)
 }

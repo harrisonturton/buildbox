@@ -439,6 +439,7 @@ fn incompatible(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool
 /// Run the rule's implementation, on a blocking thread.
 fn evaluate(input: RuleInput, name: FrozenHeapName) -> Result<Analyzed, String> {
     Module::with_temp_heap(|module| {
+        module.frozen_heap().add_reference(bazel_starlark::provider::builtin_providers_heap());
         let actions = build_ctx::run(&module, &input).map_err(|error| format!("in {} rule {}: {error}", input.class.kind, input.label))?;
         let module = module.freeze_named(name).map_err(|error| format!("{}: {error:?}", input.label))?;
         Ok(Analyzed { module, actions })
@@ -452,6 +453,7 @@ fn file(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> 
     fingerprinter.bytes(format!("{:?}", artifact.config.map(|config| config.get().options.clone())).as_bytes());
     let fingerprint = fingerprinter.finish();
     let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<Analyzed> {
+        module.frozen_heap().add_reference(bazel_starlark::provider::builtin_providers_heap());
         let target = providers::file_target(key.label, artifact, module.heap())?;
         module.set(TARGET, module.heap().alloc(target));
         let module = module.freeze_named(bazel_starlark::heap_name("file", key.label, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
@@ -485,6 +487,7 @@ fn file_less(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str) -> Result<Configur
 /// A configured target with only an empty `DefaultInfo`.
 fn empty_target(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, is_test: bool, fingerprint: Fingerprint) -> Result<ConfiguredTarget, SkyError> {
     let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<Analyzed> {
+        module.frozen_heap().add_reference(bazel_starlark::provider::builtin_providers_heap());
         let defaults = providers::Defaults {
             files: Vec::new(),
             executable: None,
