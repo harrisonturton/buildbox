@@ -1,5 +1,5 @@
 {
-  "checksum": "06237921ac961a0988149e17597dfd667c512881841a51b1dc67b87ddfc86813",
+  "checksum": "dab2660c53cd1860c0fd62ef713b1ad7fe8a3ec1dbd2d96b6fcd00b25055681a",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -11671,7 +11671,8 @@
       "build_script_attrs": {},
       "common_attrs": {
         "crate_features": [
-          "default"
+          "default",
+          "pagable"
         ],
         "deps": {
           "common": [

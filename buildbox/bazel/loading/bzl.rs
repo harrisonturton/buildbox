@@ -72,7 +72,7 @@ impl Key for BzlLoadKey {
             };
             let mut context = EvalContext::new(FileKind::Bzl, label);
             context.mappings = mappings;
-            bazel_starlark::eval_bzl(ast, &builtins.bzl, &loads, context)
+            bazel_starlark::eval_bzl(ast, &builtins.bzl, &loads, context, bazel_starlark::heap_name("bzl", label, fingerprint))
         })
         .await?;
         let (module, printed) = module.map_err(|error| SkyError::new(error.message))?;

@@ -279,7 +279,7 @@ static BUILTIN_PROVIDER_VALUES: LazyLock<BuiltinProviders> = LazyLock::new(|| {
     let toplevel = BUILTIN_PROVIDERS.iter().map(|(name, fields)| (*name, alloc(name, *fields))).collect();
     let platform_common = PLATFORM_PROVIDERS.iter().map(|(name, fields)| (name.to_string(), alloc(name, *fields))).collect();
     BuiltinProviders {
-        heap: heap.into_ref(),
+        heap: heap.into_ref_named(starlark::values::FrozenHeapName::User(Box::new("builtin providers".to_string()))),
         toplevel,
         platform_common,
     }

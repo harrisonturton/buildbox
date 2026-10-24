@@ -15,7 +15,7 @@ use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode, Fingerprint, Fingerprinter};
 use skyframe::{Ctx, Key, SkyError, Storage, Value};
 use starlark::environment::{FrozenModule, Module};
-use starlark::values::{OwnedFrozenValue, ValueLike};
+use starlark::values::{FrozenHeapName, OwnedFrozenValue, ValueLike};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -191,7 +191,8 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         target_constraints: platform.values(),
         toolchains,
     };
-    let analyzed = bazel_loading::blocking(move || evaluate(input)).await?;
+    let name = bazel_starlark::heap_name("target", key.label, fingerprint);
+    let analyzed = bazel_loading::blocking(move || evaluate(input, name)).await?;
     let analyzed = analyzed.map_err(SkyError::new)?;
     Ok(configured(ctx, key, class_ref.kind, class.test, analyzed, fingerprint))
 }
@@ -436,27 +437,28 @@ fn incompatible(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool
 }
 
 /// Run the rule's implementation, on a blocking thread.
-fn evaluate(input: RuleInput) -> Result<Analyzed, String> {
+fn evaluate(input: RuleInput, name: FrozenHeapName) -> Result<Analyzed, String> {
     Module::with_temp_heap(|module| {
         let actions = build_ctx::run(&module, &input).map_err(|error| format!("in {} rule {}: {error}", input.class.kind, input.label))?;
-        let module = module.freeze().map_err(|error| format!("{}: {error:?}", input.label))?;
+        let module = module.freeze_named(name).map_err(|error| format!("{}: {error:?}", input.label))?;
         Ok(Analyzed { module, actions })
     })
 }
 
 /// The configured target of a file: it has no actions of its own.
 fn file(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> Result<ConfiguredTarget, SkyError> {
-    let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<Analyzed> {
-        let target = providers::file_target(key.label, artifact, module.heap())?;
-        module.set(TARGET, module.heap().alloc(target));
-        let module = module.freeze().map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        Ok(Analyzed { module, actions: Vec::new() })
-    })
-    .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
     let mut fingerprinter = Fingerprinter::new();
     fingerprinter.bytes(kind.as_bytes()).bytes(artifact.exec_path.to_string().as_bytes());
     fingerprinter.bytes(format!("{:?}", artifact.config.map(|config| config.get().options.clone())).as_bytes());
-    Ok(configured(ctx, key, Symbol::intern(kind), false, analyzed, fingerprinter.finish()))
+    let fingerprint = fingerprinter.finish();
+    let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<Analyzed> {
+        let target = providers::file_target(key.label, artifact, module.heap())?;
+        module.set(TARGET, module.heap().alloc(target));
+        let module = module.freeze_named(bazel_starlark::heap_name("file", key.label, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        Ok(Analyzed { module, actions: Vec::new() })
+    })
+    .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
+    Ok(configured(ctx, key, Symbol::intern(kind), false, analyzed, fingerprint))
 }
 
 /// The target that writes the status files.
@@ -489,7 +491,7 @@ fn empty_target(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, is_test: bool, 
         };
         let target = providers::collect(key.label, starlark::values::Value::new_none(), &defaults, module.heap())?;
         module.set(TARGET, module.heap().alloc(target));
-        let module = module.freeze().map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        let module = module.freeze_named(bazel_starlark::heap_name("empty", key.label, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
         Ok(Analyzed { module, actions: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;

@@ -25,7 +25,7 @@ pub mod symbolic_macro;
 pub mod toolchain_type;
 
 pub use context::{EvalContext, FileKind, Globber};
-pub use eval::{EvalError, Loads, eval_bzl, eval_build, loaded_names, loads, parse};
+pub use eval::{EvalError, Loads, eval_bzl, eval_build, heap_name, loaded_names, loads, parse};
 pub use package_builder::PackageBuilder;
 
 use starlark::environment::{Globals, GlobalsBuilder, LibraryExtension};

@@ -3,6 +3,7 @@
 use crate::context::{EvalContext, FileKind};
 use crate::package_builder::PackageBuilder;
 use crate::dialect;
+use starlark::values::FrozenHeapName;
 use starlark::environment::Globals;
 use bazel_label::Label;
 use bazel_packages::Package;
@@ -72,8 +73,16 @@ impl PrintHandler for Printer<'_> {
     }
 }
 
-/// Evaluate a `.bzl` file, returning its frozen module and what it printed.
-pub fn eval_bzl(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: EvalContext) -> Result<(FrozenModule, Vec<String>), EvalError> {
+/// The name of a frozen heap: what it holds, and a fingerprint of what it
+/// was made from. Heaps are told apart by name when they're serialized, so
+/// heaps made from different things must have different names.
+pub fn heap_name(what: &str, label: impl std::fmt::Display, fingerprint: impl std::fmt::Display) -> FrozenHeapName {
+    FrozenHeapName::User(Box::new(format!("{what} {label} {fingerprint}")))
+}
+
+/// Evaluate a `.bzl` file, returning its frozen module, its heap named
+/// `name`, and what it printed.
+pub fn eval_bzl(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: EvalContext, name: FrozenHeapName) -> Result<(FrozenModule, Vec<String>), EvalError> {
     debug_assert_eq!(context.kind, FileKind::Bzl);
     Module::with_temp_heap(|module| {
         {
@@ -84,7 +93,7 @@ pub fn eval_bzl(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: E
             eval.set_print_handler(&printer);
             eval.eval_module(ast, globals).map_err(EvalError::new)?;
         }
-        let frozen = module.freeze().map_err(|error| EvalError::new(format!("{error:?}")))?;
+        let frozen = module.freeze_named(name).map_err(|error| EvalError::new(format!("{error:?}")))?;
         Ok((frozen, context.printed.take()))
     })
 }

@@ -179,6 +179,7 @@ impl Loader {
         }
         let path = self.dir.join(label.package.path.join_path(PathId::parse(label.name.as_str())?).to_string());
         let source = std::fs::read_to_string(&path).map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;
+        let name = bazel_starlark::heap_name("builtins", label, Fingerprint::of(source.as_bytes()));
         let ast = bazel_starlark::parse(label, source)?;
         let context = LabelContext {
             package: label.package,
@@ -195,7 +196,7 @@ impl Loader {
         };
         let mut eval_context = EvalContext::new(FileKind::Bzl, label);
         eval_context.mappings.insert(RepoName::new(BUILTINS_REPO), self.mapping.clone());
-        let (module, _) = bazel_starlark::eval_bzl(ast, &BZL_GLOBALS, &loads, eval_context)?;
+        let (module, _) = bazel_starlark::eval_bzl(ast, &BZL_GLOBALS, &loads, eval_context, name)?;
         self.modules.borrow_mut().insert(label, module.clone());
         Ok(module)
     }
