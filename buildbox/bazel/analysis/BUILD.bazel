@@ -1,0 +1,51 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "analysis",
+    srcs = [
+        "action.rs",
+        "actions.rs",
+        "analysis.rs",
+        "args.rs",
+        "artifact.rs",
+        "attrs.rs",
+        "build_ctx.rs",
+        "condition.rs",
+        "configured.rs",
+        "expand.rs",
+        "file_value.rs",
+        "native.rs",
+        "platform.rs",
+        "providers.rs",
+        "rule_ctx.rs",
+        "runfiles.rs",
+        "state.rs",
+        "target_value.rs",
+        "toolchains.rs",
+    ],
+    crate_name = "bazel_analysis",
+    crate_root = "analysis.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/bazel/config",
+        "//buildbox/bazel/label",
+        "//buildbox/bazel/loading",
+        "//buildbox/bazel/packages",
+        "//buildbox/bazel/starlark",
+        "//buildbox/intern",
+        "//buildbox/skycodec",
+        "//buildbox/skyframe",
+        "@crates//:allocative",
+        "@crates//:anyhow",
+        "@crates//:futures",
+        "@crates//:starlark",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "analysis_test",
+    crate = ":analysis",
+)

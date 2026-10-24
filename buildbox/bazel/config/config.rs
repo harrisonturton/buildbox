@@ -31,6 +31,9 @@ pub struct BuildOptions {
     pub values: Vec<(String, String)>,
     /// Starlark flags, `--//pkg:flag=value`, sorted by label.
     pub starlark_flags: Vec<(Label, String)>,
+    /// The environment of actions that use the default shell environment,
+    /// sorted by name.
+    pub action_env: Vec<(String, String)>,
 }
 
 /// Identifies an interned configuration.
@@ -154,8 +157,34 @@ impl BuildOptions {
             defines: Vec::new(),
             values: Vec::new(),
             starlark_flags: Vec::new(),
+            action_env: Vec::new(),
         }
     }
+}
+
+/// The defaults of the native options `config_setting`s commonly match on,
+/// for configurations that don't set them.
+const OPTION_DEFAULTS: &[(&str, &str)] = &[
+    ("apple_platform_type", "macos"),
+    ("cpu", ""),
+    ("host_cpu", ""),
+    ("crosstool_top", "@bazel_tools//tools/cpp:toolchain"),
+    ("collect_code_coverage", "false"),
+    ("stamp", "false"),
+    ("compiler", ""),
+    ("dynamic_mode", "default"),
+    ("fission", "no"),
+    ("force_pic", "false"),
+    ("incompatible_enable_cc_toolchain_resolution", "true"),
+    ("java_runtime_version", "local_jdk"),
+    ("ios_multi_cpus", ""),
+    ("macos_cpus", ""),
+    ("experimental_platform_in_output_dir", "false"),
+];
+
+/// The default value of a native option.
+pub fn option_default(name: &str) -> Option<&'static str> {
+    OPTION_DEFAULTS.iter().find(|(option, _)| *option == name).map(|(_, value)| *value)
 }
 
 /// This machine's CPU, as Bazel's `--cpu` names it.
