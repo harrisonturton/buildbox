@@ -11,6 +11,7 @@ rust_library(
         "skycodec.rs",
     ],
     crate_root = "skycodec.rs",
+    proc_macro_deps = ["//buildbox/skycodec/derive"],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         "//buildbox/intern",

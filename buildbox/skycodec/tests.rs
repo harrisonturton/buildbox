@@ -77,3 +77,43 @@ fn fingerprints_separate_parts() {
     b.bytes(b"a").bytes(b"bc");
     assert_ne!(a.finish(), b.finish());
 }
+
+#[derive(Encode, Decode, Debug, PartialEq)]
+struct Named {
+    name: Symbol,
+    count: u32,
+    tags: Vec<String>,
+}
+
+#[derive(Encode, Decode, Debug, PartialEq)]
+struct Tuple(u64, Option<bool>);
+
+#[derive(Encode, Decode, Debug, PartialEq)]
+enum Shape {
+    Empty,
+    Circle(u32),
+    Rect { width: u32, height: u32 },
+}
+
+#[derive(Encode, Decode, Debug, PartialEq)]
+struct Wrapper<T>(Vec<T>);
+
+#[test]
+fn derived_codecs_round_trip() {
+    round_trip(Named {
+        name: Symbol::intern("x"),
+        count: 3,
+        tags: vec!["a".into()],
+    });
+    round_trip(Tuple(9, Some(true)));
+    for shape in [Shape::Empty, Shape::Circle(4), Shape::Rect { width: 1, height: 2 }] {
+        round_trip(shape);
+    }
+    round_trip(Wrapper(vec![Shape::Empty]));
+}
+
+#[test]
+fn unknown_variants_are_errors() {
+    let bytes = to_bytes(&7u32);
+    assert!(matches!(from_bytes::<Shape>(&bytes), Err(DecodeError::Invalid { .. })));
+}

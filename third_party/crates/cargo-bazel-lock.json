@@ -1,5 +1,5 @@
 {
-  "checksum": "dab589449d30023e21df8f465dc46c2600ef1611222b850e88cc40dd9c36b7a1",
+  "checksum": "d7f5852d1fc0249a071c2c9e12b70189554529e57c16bf843aa5bb08feaab2e5",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -3355,6 +3355,14 @@
             "target": "lz4_flex"
           },
           {
+            "id": "proc-macro2 1.0.107",
+            "target": "proc_macro2"
+          },
+          {
+            "id": "quote 1.0.47",
+            "target": "quote"
+          },
+          {
             "id": "regex 1.13.1",
             "target": "regex"
           },
@@ -3377,6 +3385,10 @@
           {
             "id": "starlark 0.14.2",
             "target": "starlark"
+          },
+          {
+            "id": "syn 2.0.119",
+            "target": "syn"
           },
           {
             "id": "tar 0.4.46",
@@ -14067,12 +14079,15 @@
     "http 1.5.0",
     "libc 0.2.191",
     "lz4_flex 0.11.6",
+    "proc-macro2 1.0.107",
+    "quote 1.0.47",
     "regex 1.13.1",
     "ring 0.17.14",
     "rustc-hash 2.1.3",
     "serde 1.0.229",
     "serde_json 1.0.154",
     "starlark 0.14.2",
+    "syn 2.0.119",
     "tar 0.4.46",
     "tempfile 3.27.0",
     "thiserror 2.0.21",

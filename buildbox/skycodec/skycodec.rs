@@ -7,6 +7,9 @@
 //! byte. Interned [`Symbol`]s and [`PathId`]s are written as their ids, which
 //! are only meaningful within one process; encodings that leave the process
 //! must translate them.
+//!
+//! `#[derive(Encode, Decode)]` implements both for structs and enums whose
+//! fields implement them.
 
 mod decode;
 mod encode;
@@ -17,6 +20,7 @@ pub use encode::{Encode, Encoder};
 pub use fingerprint::{Fingerprint, Fingerprinter};
 
 pub use intern::{PathId, Symbol};
+pub use skycodec_derive::{Decode, Encode};
 
 /// Encode a value into a new buffer.
 pub fn to_bytes<T: Encode + ?Sized>(value: &T) -> Vec<u8> {

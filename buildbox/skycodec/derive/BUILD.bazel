@@ -1,0 +1,16 @@
+load("@rules_rust//rust:defs.bzl", "rust_proc_macro")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_proc_macro(
+    name = "derive",
+    srcs = ["derive.rs"],
+    crate_name = "skycodec_derive",
+    crate_root = "derive.rs",
+    visibility = ["//buildbox/skycodec:__pkg__"],
+    deps = [
+        "@crates//:proc-macro2",
+        "@crates//:quote",
+        "@crates//:syn",
+    ],
+)
