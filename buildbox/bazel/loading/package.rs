@@ -11,6 +11,7 @@ use bazel_starlark::{EvalContext, FileKind, Globber, Loads, PackageBuilder};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
 use skyframe::{encoded_value, Ctx, Key, SkyError};
+use std::path::PathBuf;
 
 /// The names a BUILD file may have, in order of preference.
 pub const BUILD_FILE_NAMES: [&str; 2] = ["BUILD.bazel", "BUILD"];
@@ -100,7 +101,7 @@ async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyErro
     let mapping = ctx.compute(&RepoMappingKey(id.repo)).await?;
     let ast = match bazel_starlark::parse(build_label, source.clone()) {
         Ok(ast) => ast,
-        Err(error) => return Ok(LoadedPackage(failed_package(id, build_file, error.message))),
+        Err(error) => return Ok(LoadedPackage(failed_package(id, build_file, error.brief))),
     };
     let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), &mapping.0).await?;
     let predeclared = autoloads(ctx, &source, &bazel_starlark::loaded_names(&ast)).await?;
@@ -211,4 +212,37 @@ impl Globber for GraphGlobber {
         }
         Ok(result.matches.iter().map(PathId::to_string).collect())
     }
+}
+
+/// Where a package's BUILD file is on disk, or `None` if there's no such
+/// package.
+pub async fn build_file_path(ctx: &Ctx, id: PackageId) -> Result<Option<PathBuf>, SkyError> {
+    let lookup = ctx.compute(&PackageLookupKey(id)).await?;
+    let PackageLookup::Found { root, build_file } = &*lookup else {
+        return Ok(None);
+    };
+    let path = RootedPath::new(*root, id.path.join(*build_file)).resolve(ctx)?;
+    Ok(Some(path))
+}
+
+/// Where a target was declared, as messages give it: the BUILD file's path,
+/// with the line and column of the call that made it if it's a rule.
+pub async fn target_location(ctx: &Ctx, label: Label) -> Option<String> {
+    let path = build_file_path(ctx, label.package).await.ok()??;
+    let package = ctx.compute(&PackageKey(label.package)).await.ok()?;
+    let rule = match package.0.target(label.name) {
+        Some(bazel_packages::Target::Rule(rule)) => rule,
+        _ => return Some(path.display().to_string()),
+    };
+    Some(format!("{}:{}:{}", path.display(), rule.location.line, rule.location.column))
+}
+
+/// The error for a target its package doesn't declare.
+pub fn no_such_target(label: Label, build_file: &std::path::Path) -> String {
+    format!(
+        "no such target '{label}': target '{}' not declared in package '{}' defined by {}",
+        label.name,
+        display(label.package),
+        build_file.display()
+    )
 }

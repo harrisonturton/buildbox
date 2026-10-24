@@ -72,7 +72,7 @@ impl Key for TestKey {
         let backend = ctx.global::<Backend>()?;
         let test = TestSpec::of(ctx, self.0).await?;
         let request = test.request(ctx).await?;
-        let shown = progress(ctx).map(|progress| progress.action_started(format!("Testing {}", self.0.label)));
+        let shown = progress(ctx).map(|progress| progress.action_started(test_progress_id(self), Vec::new(), format!("Testing {}", self.0.label)));
         if let Some(shown) = &shown {
             shown.running(backend.runners.run);
         }
@@ -112,6 +112,13 @@ impl Key for TestKey {
             epoch: EPOCH.load(Ordering::Relaxed),
         })
     }
+}
+
+/// A number identifying a test run in progress reports.
+fn test_progress_id(key: &TestKey) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(key, &mut hasher);
+    std::hash::Hasher::finish(&hasher)
 }
 
 fn timed_out(duration_ms: u64) -> TestResult {

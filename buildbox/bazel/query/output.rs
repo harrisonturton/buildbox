@@ -2,14 +2,12 @@
 
 use crate::eval::{edges, kind_of};
 use crate::universe::{QueryError, TargetRef, TargetSet, Universe};
-use bazel_fs::Root;
 use bazel_label::{Label, PackageId, RepoMappingTable};
-use bazel_loading::RepoRootKey;
 use bazel_packages::{AttrValue, Rule, SelectorPart, Target};
 use skyframe::Compute;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// How query results are printed, as `--output` chooses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,7 +60,6 @@ pub async fn format<C: Compute>(
     universe: &Universe<C>,
     targets: &TargetSet,
     format: OutputFormat,
-    workspace_root: &Path,
 ) -> Result<String, QueryError> {
     let mapping = universe.main_mapping.clone();
     let mut out = String::new();
@@ -90,14 +87,14 @@ pub async fn format<C: Compute>(
             }
         }
         OutputFormat::Location => {
-            let roots = RepoPaths::new(universe, workspace_root);
+            let roots = RepoPaths::new(universe);
             for target in universe.targets(targets).await? {
                 let location = roots.location(&target).await?;
                 writeln!(out, "{location}: {} {}", kind_of(&target), display_label(target.label(), &mapping)).ok();
             }
         }
         OutputFormat::Build => {
-            let roots = RepoPaths::new(universe, workspace_root);
+            let roots = RepoPaths::new(universe);
             for target in universe.targets(targets).await? {
                 if let Target::Rule(rule) = target.target() {
                     let location = roots.location(&target).await?;
@@ -165,21 +162,15 @@ async fn ranks<C: Compute>(universe: &Universe<C>, targets: &TargetSet, longest:
 /// Resolves repositories to directories, for printing file locations.
 struct RepoPaths<'a, C> {
     universe: &'a Universe<C>,
-    workspace_root: &'a Path,
 }
 
 impl<'a, C: Compute> RepoPaths<'a, C> {
-    fn new(universe: &'a Universe<C>, workspace_root: &'a Path) -> RepoPaths<'a, C> {
-        RepoPaths { universe, workspace_root }
+    fn new(universe: &'a Universe<C>) -> RepoPaths<'a, C> {
+        RepoPaths { universe }
     }
 
     async fn package_dir(&self, package: PackageId) -> Result<PathBuf, QueryError> {
-        let root = self.universe.compute().compute(&RepoRootKey(package.repo)).await?;
-        let base = match root.0 {
-            Root::Workspace => self.workspace_root.to_path_buf(),
-            Root::Dir(dir) => PathBuf::from(dir.as_str()),
-        };
-        Ok(if package.path.is_root() { base } else { base.join(package.path.to_string()) })
+        self.universe.package_dir(package).await
     }
 
     /// Where a target is defined: `path:line:column`.

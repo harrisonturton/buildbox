@@ -2,11 +2,13 @@
 //! dependency edges between them.
 
 use bazel_label::{Label, PackageId, RepoMappingTable, TargetPattern, LabelContext};
-use bazel_loading::{BzlLoadKey, LoadedPackage, PackageKey, packages_beneath, rule_class};
+use bazel_fs::RootedPath;
+use bazel_loading::{BzlLoadKey, LoadedPackage, PackageKey, RepoRootKey, packages_beneath, rule_class};
 use bazel_packages::{AttrDefault, AttrSchema, AttrValue, Cfg, Package, Rule, RuleClass, RuleClassRef, Target};
 use futures::future::BoxFuture;
 use skyframe::{Compute, SkyError};
 use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// A set of targets, in the order queries print them.
@@ -71,18 +73,27 @@ pub struct Universe<C> {
     /// The package relative patterns are relative to.
     pub working_package: PackageId,
     pub main_mapping: Arc<RepoMappingTable>,
+    /// Where the main repository is, for naming files by their paths.
+    pub workspace_root: PathBuf,
     packages: Mutex<HashMap<PackageId, Result<Arc<LoadedPackage>, String>>>,
     classes: Mutex<HashMap<RuleClassRef, Arc<RuleClass>>>,
     errors: Mutex<Vec<String>>,
 }
 
 impl<C: Compute> Universe<C> {
-    pub fn new(compute: C, options: QueryOptions, working_package: PackageId, main_mapping: Arc<RepoMappingTable>) -> Universe<C> {
+    pub fn new(
+        compute: C,
+        options: QueryOptions,
+        working_package: PackageId,
+        main_mapping: Arc<RepoMappingTable>,
+        workspace_root: PathBuf,
+    ) -> Universe<C> {
         Universe {
             compute,
             options,
             working_package,
             main_mapping,
+            workspace_root,
             packages: Mutex::new(HashMap::new()),
             classes: Mutex::new(HashMap::new()),
             errors: Mutex::new(Vec::new()),
@@ -137,10 +148,14 @@ impl<C: Compute> Universe<C> {
         }
     }
 
-    /// The target a label names. Its package must have loaded without
-    /// errors, unless keeping going.
+    /// The target a label names. Unless keeping going, its package must
+    /// have loaded without errors.
     pub async fn target(&self, label: Label) -> Result<TargetRef, QueryError> {
         let package = self.package(label.package).await?;
+        let Ok(index) = package.0.targets.binary_search_by(|target| target.name().cmp(&label.name)) else {
+            let build_file = self.build_file(&package.0).await?;
+            return Err(QueryError(bazel_loading::no_such_target(label, &build_file)));
+        };
         if !package.0.errors.is_empty() && !self.options.keep_going {
             return Err(QueryError(format!(
                 "package contains errors: {}: {}",
@@ -148,15 +163,41 @@ impl<C: Compute> Universe<C> {
                 package.0.errors[0]
             )));
         }
-        let Ok(index) = package.0.targets.binary_search_by(|target| target.name().cmp(&label.name)) else {
-            return Err(QueryError(format!(
-                "no such target '{label}': target '{}' not declared in package '{}' defined by {}",
-                label.name,
-                bazel_loading::display_package(label.package),
-                package.0.build_file
-            )));
-        };
         Ok(TargetRef { package, index })
+    }
+
+    /// The directory a package is in.
+    pub async fn package_dir(&self, package: PackageId) -> Result<PathBuf, QueryError> {
+        let root = self.compute.compute(&RepoRootKey(package.repo)).await?;
+        let dir = RootedPath::new(root.0, package.path).resolve_in(&self.workspace_root);
+        Ok(dir)
+    }
+
+    /// Where a package's BUILD file is.
+    pub async fn build_file(&self, package: &Package) -> Result<PathBuf, QueryError> {
+        let dir = self.package_dir(package.id).await?;
+        Ok(dir.join(package.build_file.name.as_str()))
+    }
+
+    /// The errors of the packages loaded that had them, each as Bazel
+    /// reports it: `/path/to/BUILD:line:column: message`.
+    pub async fn package_errors(&self) -> Vec<String> {
+        let failed: Vec<Arc<LoadedPackage>> = {
+            let packages = self.packages.lock().unwrap_or_else(|p| p.into_inner());
+            let mut failed: Vec<Arc<LoadedPackage>> = packages.values().filter_map(|package| package.as_ref().ok()).filter(|package| !package.0.errors.is_empty()).cloned().collect();
+            failed.sort_by_key(|package| package.0.id);
+            failed
+        };
+        let mut errors = Vec::new();
+        for package in failed {
+            let Ok(build_file) = self.build_file(&package.0).await else {
+                continue;
+            };
+            for error in &package.0.errors {
+                errors.push(format!("{}:{error}", build_file.display()));
+            }
+        }
+        errors
     }
 
     /// The targets of `labels` that exist, recording the others as errors.

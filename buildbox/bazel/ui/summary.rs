@@ -5,7 +5,11 @@ use crate::format_count;
 use bazel_progress::Snapshot;
 
 /// Runners reported before the others, in this order, as Bazel does.
-const REPORTED_FIRST: [&str; 3] = ["disk cache hit", "remote cache hit", "internal"];
+const REPORTED_FIRST: [&str; 4] = ["action cache hit", "disk cache hit", "remote cache hit", "internal"];
+
+/// Results found in the action cache, which are reported but aren't
+/// processes, so aren't counted in the total.
+const ACTION_CACHE_HIT: &str = "action cache hit";
 
 /// `Analyzed target //pkg:b (6 packages loaded, 9 targets configured).`,
 /// where `what` is `target //pkg:b` or `3 targets`.
@@ -16,7 +20,8 @@ pub fn analyzed(what: &str, snapshot: &Snapshot) -> String {
 /// How the actions that finished got their results:
 /// `3 processes: 1 internal, 2 linux-sandbox.`
 pub fn processes(snapshot: &Snapshot) -> String {
-    let total = snapshot.actions_finished;
+    let hits = snapshot.processes.get(ACTION_CACHE_HIT).copied().unwrap_or_default();
+    let total = snapshot.actions_finished - hits.min(snapshot.actions_finished);
     if total == 0 {
         return "0 processes.".to_string();
     }
@@ -62,6 +67,10 @@ mod tests {
         assert_eq!(
             processes(&finished(&[("linux-sandbox", 2), ("internal", 1), ("disk cache hit", 4), ("remote", 1)])),
             "8 processes: 4 disk cache hit, 1 internal, 2 linux-sandbox, 1 remote."
+        );
+        assert_eq!(
+            processes(&finished(&[("action cache hit", 5), ("internal", 1)])),
+            "1 process: 5 action cache hit, 1 internal."
         );
     }
 

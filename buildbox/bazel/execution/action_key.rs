@@ -12,6 +12,7 @@ use intern::PathId;
 use skycodec::{Decode, Encode};
 use skyframe::{Ctx, Key, SkyError, encoded_value};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::Instrument;
@@ -53,6 +54,15 @@ pub struct ActionKey {
     pub index: u32,
 }
 
+impl ActionKey {
+    /// A number identifying the action in progress reports.
+    pub fn progress_id(&self) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 impl Key for ActionKey {
     type Value = ActionOutputs;
     const KIND: &'static str = "ACTION_EXECUTION";
@@ -65,30 +75,39 @@ impl Key for ActionKey {
         let action = &stored.load()?;
         let backend = ctx.global::<Backend>()?;
         let span = tracing::info_span!("action", mnemonic = action.mnemonic.as_str(), label = %self.owner.label);
-        run(ctx, &backend, self.owner, action).instrument(span).await
+        run(ctx, &backend, *self, action).instrument(span).await
     }
 }
 
-async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action) -> Result<ActionOutputs, SkyError> {
+async fn run(ctx: &Ctx, backend: &Arc<Backend>, key: ActionKey, action: &Action) -> Result<ActionOutputs, SkyError> {
     let ActionKind::Spawn(spawn) = &action.kind else {
-        return run_internal(ctx, backend, owner, action).await;
+        return run_internal(ctx, backend, key, action).await;
     };
-    crate::spawn::run(ctx, backend, owner, action, spawn).await
+    crate::spawn::run(ctx, backend, key, action, spawn).await
 }
 
 /// Run an action that Bazel would run in its own process, without
 /// spawning one.
-async fn run_internal(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action) -> Result<ActionOutputs, SkyError> {
-    let shown = progress(ctx).map(|progress| progress.action_started(description(action, owner)));
-    let outputs = match &action.kind {
-        ActionKind::Write { content, executable } => write(backend, action, content.as_bytes(), *executable).await,
-        ActionKind::Template {
-            template,
-            substitutions,
-            executable,
-        } => expand_template(ctx, backend, action, *template, substitutions, *executable).await,
-        ActionKind::Symlink { target, executable } => copy(ctx, backend, action, *target, *executable).await,
-        ActionKind::Spawn(_) => Err(SkyError::new("a spawn action isn't an internal one")),
+async fn run_internal(ctx: &Ctx, backend: &Arc<Backend>, key: ActionKey, action: &Action) -> Result<ActionOutputs, SkyError> {
+    let read = match &action.kind {
+        ActionKind::Template { template, .. } => Some(generated_input(ctx, *template).await?),
+        ActionKind::Symlink { target, .. } => Some(generated_input(ctx, *target).await?),
+        _ => None,
+    };
+    let inputs = read.iter().filter_map(|(_, generated_by)| generated_by.as_ref().map(ActionKey::progress_id)).collect();
+    let shown = progress(ctx).map(|progress| progress.action_started(key.progress_id(), inputs, description(action, key.owner)));
+    let outputs = match (&action.kind, read) {
+        (ActionKind::Write { content, executable }, _) => write(backend, action, content.as_bytes(), *executable).await,
+        (
+            ActionKind::Template {
+                substitutions,
+                executable,
+                ..
+            },
+            Some((template, _)),
+        ) => expand_template(backend, action, template, substitutions, *executable).await,
+        (ActionKind::Symlink { executable, .. }, Some((target, _))) => copy(backend, action, target, *executable).await,
+        _ => Err(SkyError::new("an internal action's input wasn't read")),
     }?;
     if let Some(shown) = shown {
         shown.finish("internal");
@@ -123,8 +142,15 @@ pub struct Input {
 /// The digest of an input: a source file's, or the output of the action
 /// that generates it.
 pub async fn input(ctx: &Ctx, artifact: Artifact) -> Result<Input, SkyError> {
+    let (input, _) = generated_input(ctx, artifact).await?;
+    Ok(input)
+}
+
+/// [`input`], with the action that generated it, if it isn't a source
+/// file.
+pub async fn generated_input(ctx: &Ctx, artifact: Artifact) -> Result<(Input, Option<ActionKey>), SkyError> {
     let Some(config) = artifact.config else {
-        return source_input(ctx, artifact).await;
+        return Ok((source_input(ctx, artifact).await?, None));
     };
     let owner = ConfiguredTargetKey {
         label: artifact.owner,
@@ -134,16 +160,18 @@ pub async fn input(ctx: &Ctx, artifact: Artifact) -> Result<Input, SkyError> {
     let Some((index, _)) = target.generating_action(artifact.exec_path) else {
         return Err(SkyError::new(format!("{}: no action generates '{}'", artifact.owner, artifact.exec_path)));
     };
-    let outputs = ctx.compute(&ActionKey { owner, index }).await?;
+    let key = ActionKey { owner, index };
+    let outputs = ctx.compute(&key).await?;
     let Some(output) = outputs.get(artifact.exec_path) else {
         return Err(SkyError::new(format!("{}: '{}' wasn't generated", artifact.owner, artifact.exec_path)));
     };
-    Ok(Input {
+    let input = Input {
         digest: output.digest,
         executable: output.executable,
         is_directory: output.is_directory,
         source: None,
-    })
+    };
+    Ok((input, Some(key)))
 }
 
 async fn source_input(ctx: &Ctx, artifact: Artifact) -> Result<Input, SkyError> {
@@ -153,7 +181,7 @@ async fn source_input(ctx: &Ctx, artifact: Artifact) -> Result<Input, SkyError> 
     let rooted = RootedPath::new(root.0, path);
     let digest = ctx.compute(&SourceDigestKey(rooted)).await?;
     let Some(blob) = digest.digest else {
-        return Err(SkyError::new(format!("missing input file '{label}'")));
+        return Err(SkyError::new(format!("{MISSING_INPUT}'{label}'")));
     };
     Ok(Input {
         digest: blob,
@@ -162,6 +190,9 @@ async fn source_input(ctx: &Ctx, artifact: Artifact) -> Result<Input, SkyError> 
         source: Some(rooted.resolve(ctx)?),
     })
 }
+
+/// How the error for a source file that doesn't exist starts.
+pub const MISSING_INPUT: &str = "missing input file ";
 
 /// Make sure an input is in the CAS, uploading it if it's a source file.
 pub async fn upload(backend: &Backend, inputs: &[&Input]) -> Result<(), SkyError> {
@@ -213,14 +244,12 @@ async fn write(backend: &Backend, action: &Action, content: &[u8], executable: b
 }
 
 async fn expand_template(
-    ctx: &Ctx,
     backend: &Arc<Backend>,
     action: &Action,
-    template: Artifact,
+    template: Input,
     substitutions: &[(String, String)],
     executable: bool,
 ) -> Result<ActionOutputs, SkyError> {
-    let template = input(ctx, template).await?;
     upload(backend, &[&template]).await?;
     let bytes = backend.cas.read_bytes(&template.digest.to_cas()).await.map_err(cas_error)?;
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
@@ -230,9 +259,8 @@ async fn expand_template(
     write(backend, action, text.as_bytes(), executable).await
 }
 
-async fn copy(ctx: &Ctx, backend: &Arc<Backend>, action: &Action, target: Artifact, executable: bool) -> Result<ActionOutputs, SkyError> {
+async fn copy(backend: &Arc<Backend>, action: &Action, target: Input, executable: bool) -> Result<ActionOutputs, SkyError> {
     let output = single_output(action)?;
-    let target = input(ctx, target).await?;
     upload(backend, &[&target]).await?;
     Ok(ActionOutputs {
         files: vec![OutputFile {

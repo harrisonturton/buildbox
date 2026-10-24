@@ -14,7 +14,7 @@ mod rule_class;
 pub use builtins::{BUILTINS_REPO, Builtins, BuiltinsDir, BuiltinsKey, builtins_mapping};
 pub use bzl::{BzlLoadKey, BzlModule, mappings};
 
-pub use package::{LoadedPackage, PackageKey, PackageLookup, PackageLookupKey, display as display_package};
+pub use package::{LoadedPackage, PackageKey, PackageLookup, PackageLookupKey, build_file_path, display as display_package, no_such_target, target_location};
 pub use recursive::{PackagesUnderDirectory, PackagesUnderDirectoryKey, packages_beneath};
 pub use rule_class::{RuleClassKey, RuleClassValue, rule_class};
 

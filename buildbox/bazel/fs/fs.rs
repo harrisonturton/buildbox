@@ -51,14 +51,20 @@ impl RootedPath {
 
     /// The path on disk, given the graph's workspace.
     pub fn resolve(&self, ctx: &Ctx) -> Result<PathBuf, SkyError> {
+        let workspace = ctx.global::<Workspace>()?;
+        Ok(self.resolve_in(&workspace.root))
+    }
+
+    /// The path on disk, for the workspace at `workspace`.
+    pub fn resolve_in(&self, workspace: &Path) -> PathBuf {
         let base = match self.root {
-            Root::Workspace => ctx.global::<Workspace>()?.root.clone(),
+            Root::Workspace => workspace.to_path_buf(),
             Root::Dir(dir) => PathBuf::from(dir.as_str()),
         };
         if self.path.is_root() {
-            return Ok(base);
+            return base;
         }
-        Ok(base.join(self.path.to_string()))
+        base.join(self.path.to_string())
     }
 
     pub fn join(&self, name: Symbol) -> RootedPath {

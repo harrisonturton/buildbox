@@ -2,9 +2,11 @@
 //! it: messages, and the progress bar beneath them.
 
 use bazel_options::ParsedOptions;
-use bazel_progress::{Snapshot, Tracker};
+use bazel_progress::{Event, Snapshot, Tracker};
 use bazel_rust_connect::buildbox::bazel::v1::{EnvironmentVariable, Exec, RunResponse, run_response};
-use bazel_ui::{Kind, Phase, Screen, Terminal, UiOptions};
+use bazel_ui::{FailureFormat, Kind, Phase, Screen, Shown, Terminal, UiOptions};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
@@ -33,6 +35,12 @@ struct Ui {
     drawn: Vec<String>,
     /// The progress bar as last printed, without times, and when.
     printed: Option<(Vec<String>, Instant)>,
+    failure_format: FailureFormat,
+    /// Whether the command has started analyzing targets.
+    analysis_started: bool,
+    /// The errors of the failures already reported as events, which aren't
+    /// reported again.
+    reported: HashSet<String>,
 }
 
 impl Output {
@@ -48,25 +56,39 @@ impl Output {
             tracker: None,
             drawn: Vec::new(),
             printed: None,
+            failure_format: FailureFormat::default(),
+            analysis_started: false,
+            reported: HashSet::new(),
         };
         let ui = Arc::new(Mutex::new(ui));
         tokio::spawn(refresh_until_dropped(Arc::downgrade(&ui)));
         Output { ui }
     }
 
-    /// Set how output looks from a command's `--color`, `--curses` and
-    /// `--[no]show_progress`.
+    /// Set how output looks from a command's `--color`, `--curses`,
+    /// `--[no]show_progress` and `--[no]verbose_failures`.
     pub async fn configure(&self, options: &ParsedOptions) {
         let mut ui = self.ui.lock().await;
+        ui.failure_format.verbose = options.flag("verbose_failures", false);
         let options = UiOptions::new(&ui.terminal, options.get("color"), options.get("curses"), options.flag("show_progress", true));
         let cleared = ui.screen.set_options(options);
         ui.drawn.clear();
         ui.send_stderr(cleared).await;
     }
 
+    /// Where the command's actions run, which verbose failures show.
+    pub async fn set_exec_root(&self, exec_root: PathBuf) {
+        self.ui.lock().await.failure_format.exec_root = Some(exec_root);
+    }
+
     /// Show what `tracker` records in the progress bar.
     pub async fn track(&self, tracker: Arc<Tracker>) {
         self.ui.lock().await.tracker = Some(tracker);
+    }
+
+    /// Whether the command has started analyzing targets.
+    pub async fn analysis_started(&self) -> bool {
+        self.ui.lock().await.analysis_started
     }
 
     /// What the tracked progress has recorded so far.
@@ -77,6 +99,8 @@ impl Output {
     /// Start a new phase of the command, showing it at once.
     pub async fn phase(&self, phase: Phase) {
         let mut ui = self.ui.lock().await;
+        ui.show_events().await;
+        ui.analysis_started |= matches!(phase, Phase::Analyzing(_) | Phase::Executing);
         ui.phase = phase;
         ui.printed = None;
         ui.refresh().await;
@@ -84,27 +108,25 @@ impl Output {
 
     pub async fn stdout(&self, text: &str) {
         let mut ui = self.ui.lock().await;
-        let bar = ui.bar(Some(Instant::now()));
-        let cleared = ui.screen.redraw(&[]);
-        ui.send_stderr(cleared).await;
-        ui.send(run_response::Output::Stdout(text.as_bytes().to_vec())).await;
-        let drawn = ui.screen.redraw(&bar);
-        ui.drawn = bar;
-        ui.send_stderr(drawn).await;
+        ui.show_events().await;
+        ui.write_stdout(text).await;
     }
 
     /// Output for stderr as it is, such as what an action printed.
     pub async fn stderr(&self, text: &str) {
         let mut ui = self.ui.lock().await;
-        let bar = ui.bar(Some(Instant::now()));
-        let written = ui.screen.output(text, &bar);
-        ui.drawn = bar;
-        ui.send_stderr(written).await;
+        ui.show_events().await;
+        ui.write_stderr(text).await;
     }
 
-    /// Report an error, as Bazel does: `ERROR: message`.
+    /// Report an error, as Bazel does: `ERROR: message`, unless it's the
+    /// error of a failure already reported as it happened.
     pub async fn error(&self, message: &str) {
-        self.message(Kind::Error, message).await;
+        let mut ui = self.ui.lock().await;
+        ui.show_events().await;
+        if !ui.reported.contains(message) {
+            ui.write_message(Kind::Error, message).await;
+        }
     }
 
     pub async fn warning(&self, message: &str) {
@@ -117,15 +139,14 @@ impl Output {
 
     async fn message(&self, kind: Kind, message: &str) {
         let mut ui = self.ui.lock().await;
-        let bar = ui.bar(Some(Instant::now()));
-        let written = ui.screen.message(kind, message, &bar);
-        ui.drawn = bar;
-        ui.send_stderr(written).await;
+        ui.show_events().await;
+        ui.write_message(kind, message).await;
     }
 
     /// Clear the progress bar, for the end of the command.
     pub async fn finish(&self) {
         let mut ui = self.ui.lock().await;
+        ui.show_events().await;
         ui.phase = Phase::Idle;
         let written = ui.screen.finish();
         ui.drawn.clear();
@@ -154,6 +175,69 @@ impl Output {
 }
 
 impl Ui {
+    async fn write_message(&mut self, kind: Kind, message: &str) {
+        let bar = self.bar(Some(Instant::now()));
+        let written = self.screen.message(kind, message, &bar);
+        self.drawn = bar;
+        self.send_stderr(written).await;
+    }
+
+    async fn write_stderr(&mut self, text: &str) {
+        let bar = self.bar(Some(Instant::now()));
+        let written = self.screen.output(text, &bar);
+        self.drawn = bar;
+        self.send_stderr(written).await;
+    }
+
+    /// Write to stdout, clearing the progress bar first in case stdout is
+    /// the same terminal.
+    async fn write_stdout(&mut self, text: &str) {
+        let bar = self.bar(Some(Instant::now()));
+        let cleared = self.screen.redraw(&[]);
+        self.send_stderr(cleared).await;
+        self.send(run_response::Output::Stdout(text.as_bytes().to_vec())).await;
+        let drawn = self.screen.redraw(&bar);
+        self.drawn = bar;
+        self.send_stderr(drawn).await;
+    }
+
+    /// Show the events reported since they were last shown.
+    async fn show_events(&mut self) {
+        let Some(tracker) = &self.tracker else {
+            return;
+        };
+        for event in tracker.take_events() {
+            let shown = match &event {
+                Event::ActionOutput(output) => bazel_ui::action_output(output),
+                Event::ActionFailed(failure) => {
+                    self.reported.insert(failure.error.clone());
+                    bazel_ui::action_failure(failure, &self.failure_format)
+                }
+                Event::Error(message) => Shown {
+                    messages: vec![(Kind::Error, message.clone())],
+                    ..Shown::default()
+                },
+            };
+            self.show(shown).await;
+        }
+    }
+
+    async fn show(&mut self, shown: Shown) {
+        for (kind, message) in &shown.messages {
+            self.write_message(*kind, message).await;
+        }
+        if !shown.stderr.is_empty() {
+            let mut stderr = shown.stderr;
+            if !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            self.write_stderr(&stderr).await;
+        }
+        if !shown.stdout.is_empty() {
+            self.write_stdout(&shown.stdout).await;
+        }
+    }
+
     fn snapshot(&self) -> Snapshot {
         match &self.tracker {
             Some(tracker) => tracker.snapshot(),
@@ -174,6 +258,7 @@ impl Ui {
     /// unless the phase has changed, and while executing, only when actions
     /// are running.
     async fn refresh(&mut self) {
+        self.show_events().await;
         let now = Instant::now();
         if self.screen.options().cursor_control {
             let bar = self.bar(Some(now));

@@ -3,10 +3,12 @@
 //! renders text; writing it to the client is the caller's job.
 
 mod bar;
+mod events;
 mod screen;
 mod summary;
 
 pub use bar::{Phase, progress_bar};
+pub use events::{FailureFormat, Shown, action_failure, action_output};
 pub use screen::Screen;
 pub use summary::{analyzed, processes, total_actions};
 

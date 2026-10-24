@@ -11,7 +11,7 @@ use crate::toolchains::{self, ResolvedToolchains};
 use bazel_config::ConfigId;
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule, PackageKey, RepoMappingKey};
-use bazel_progress::Progress;
+use bazel_progress::{Event, Progress};
 use bazel_packages::{AttrType, AttrValue, Cfg, Package, Rule, RuleClass, RuleClassRef, Target};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode, Fingerprint, Fingerprinter};
@@ -135,7 +135,7 @@ async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarg
     }
     let package = ctx.compute(&PackageKey(key.label.package)).await?;
     let Some(target) = package.0.target(key.label.name) else {
-        return Err(no_such_target(key.label, &package.0));
+        return Err(SkyError::new(no_such_target(ctx, key.label, &package.0).await));
     };
     match target {
         Target::Rule(rule) => analyze_rule(ctx, key, &package.0, rule).await,
@@ -153,13 +153,14 @@ async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarg
     }
 }
 
-fn no_such_target(label: Label, package: &Package) -> SkyError {
-    SkyError::new(format!(
-        "no such target '{label}': target '{}' not declared in package '{}' defined by {}",
-        label.name,
-        bazel_loading::display_package(label.package),
-        package.build_file
-    ))
+/// The error for a target its package doesn't declare, naming the
+/// package's BUILD file by its path.
+async fn no_such_target(ctx: &Ctx, label: Label, package: &Package) -> String {
+    let build_file = match bazel_loading::build_file_path(ctx, label.package).await {
+        Ok(Some(path)) => path,
+        _ => std::path::PathBuf::from(package.build_file.to_string()),
+    };
+    bazel_loading::no_such_target(label, &build_file)
 }
 
 /// What implements a rule class.
@@ -192,10 +193,14 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     }
     let implementation = implementation(ctx, &class_ref)
         .await
-        .map_err(|error| SkyError::new(format!("in {} rule {label}: {}", class_ref.kind, error.message())))?;
+        .map_err(|error| format!("in {} rule {label}: {}", class_ref.kind, error.message()));
+    let implementation = match implementation {
+        Ok(implementation) => implementation,
+        Err(message) => return Err(located(ctx, label, message).await),
+    };
     let deps = match is_stub(&implementation) {
         true => BTreeMap::new(),
-        false => analyze_deps(ctx, &class, &attrs, key.config).await?,
+        false => analyze_deps(ctx, label, &class, &attrs, key.config).await?,
     };
     if let Some(reason) = incompatible_dep(key, &deps) {
         return incompatible(ctx, key, class_ref.kind, class.test, reason);
@@ -225,8 +230,20 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     };
     let name = bazel_starlark::heap_name("target", key.label, fingerprint);
     let analyzed = bazel_loading::blocking(move || evaluate(input, name)).await?;
-    let analyzed = analyzed.map_err(SkyError::new)?;
+    let analyzed = match analyzed {
+        Ok(analyzed) => analyzed,
+        Err(message) => return Err(located(ctx, label, message).await),
+    };
     Ok(configured(ctx, key, class_ref.kind, class.test, analyzed, fingerprint))
+}
+
+/// An error in analyzing a rule, at where the rule was declared, as Bazel
+/// reports it.
+async fn located(ctx: &Ctx, label: Label, message: String) -> SkyError {
+    match bazel_loading::target_location(ctx, label).await {
+        Some(location) => SkyError::new(format!("{location}: {message}")),
+        None => SkyError::new(message),
+    }
 }
 
 /// The first constraint of the rule's `target_compatible_with` that the
@@ -277,6 +294,7 @@ fn dep_config(cfg: Cfg, config: ConfigId) -> ConfigId {
 /// Analyze every dependency the rule's attributes name.
 async fn analyze_deps(
     ctx: &Ctx,
+    referrer: Label,
     class: &RuleClass,
     attrs: &[(Symbol, AttrValue)],
     config: ConfigId,
@@ -300,8 +318,34 @@ async fn analyze_deps(
     }
     wanted.sort();
     wanted.dedup();
-    let deps = futures::future::try_join_all(wanted.iter().map(|(label, config)| dep(ctx, *label, *config))).await?;
-    Ok(wanted.into_iter().zip(deps).collect())
+    let results = futures::future::join_all(wanted.iter().map(|(label, config)| dep(ctx, *label, *config))).await;
+    let mut deps = BTreeMap::new();
+    for (wanted, result) in wanted.into_iter().zip(results) {
+        match result {
+            Ok(dep) => deps.insert(wanted, dep),
+            Err(DepError::Failed(error)) => return Err(error),
+            Err(DepError::Missing(message)) => return Err(missing_dep(ctx, referrer, &message).await),
+        };
+    }
+    Ok(deps)
+}
+
+/// Why a dependency can't be had.
+enum DepError {
+    /// It doesn't exist, as this message says.
+    Missing(String),
+    /// It failed to analyze.
+    Failed(SkyError),
+}
+
+/// The error for a dependency that doesn't exist, as Bazel reports it:
+/// where the target that refers to it was declared, and that it's
+/// referred to.
+async fn missing_dep(ctx: &Ctx, referrer: Label, message: &str) -> SkyError {
+    match bazel_loading::target_location(ctx, referrer).await {
+        Some(location) => SkyError::new(format!("{location}: {message} and referenced by '{referrer}'")),
+        None => SkyError::new(format!("{message} and referenced by '{referrer}'")),
+    }
 }
 
 /// Whether an attribute is late-bound, as native attributes named `:x`
@@ -319,18 +363,33 @@ fn labels_of_unknown_repos(value: &AttrValue) -> Vec<Label> {
 }
 
 /// One dependency: a file, or an analyzed rule.
-async fn dep(ctx: &Ctx, label: Label, config: ConfigId) -> Result<Dep, SkyError> {
-    let package = ctx.compute(&PackageKey(label.package)).await?;
+async fn dep(ctx: &Ctx, label: Label, config: ConfigId) -> Result<Dep, DepError> {
+    let package = match ctx.compute(&PackageKey(label.package)).await {
+        Ok(package) => package,
+        Err(error) => return Err(DepError::Missing(error.message().to_string())),
+    };
+    let analyzed = |key: ConfiguredTargetKey| async move { ctx.compute(&key).await.map_err(DepError::Failed) };
     match package.0.target(label.name) {
-        None => Err(no_such_target(label, &package.0)),
+        None => Err(DepError::Missing(report_no_such_target(ctx, label, &package.0).await)),
         Some(Target::SourceFile(_)) => Ok(Dep::File(label, Artifact::source(label))),
         Some(Target::OutputFile { rule, .. }) => {
             let owner = label.sibling(*rule);
-            ctx.compute(&ConfiguredTargetKey { label: owner, config }).await?;
+            analyzed(ConfiguredTargetKey { label: owner, config }).await?;
             Ok(Dep::File(label, Artifact::derived(owner, &config.get(), artifact::name_path(label), false)))
         }
-        Some(_) => Ok(Dep::Target(ctx.compute(&ConfiguredTargetKey { label, config }).await?)),
+        Some(_) => Ok(Dep::Target(analyzed(ConfiguredTargetKey { label, config }).await?)),
     }
+}
+
+/// The error for a dependency its package doesn't declare, reported, as
+/// Bazel does, at that package's BUILD file.
+async fn report_no_such_target(ctx: &Ctx, label: Label, package: &Package) -> String {
+    let message = no_such_target(ctx, label, package).await;
+    let build_file = bazel_loading::build_file_path(ctx, label.package).await;
+    if let (Ok(progress), Ok(Some(build_file))) = (ctx.global::<Progress>(), build_file) {
+        progress.report(Event::Error(format!("{}: {message}", build_file.display())));
+    }
+    message
 }
 
 /// The function that implements a rule class.

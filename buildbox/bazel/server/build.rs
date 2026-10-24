@@ -128,10 +128,15 @@ pub async fn failed(code: i32, started: Instant, out: &Output) -> i32 {
     code
 }
 
-/// Say how long the command took and how its actions ran.
+/// Say how long the command took and how its actions ran, with the
+/// critical path if it got as far as analysis, when actions may run.
 pub async fn report_stats(started: Instant, out: &Output) {
     let snapshot = out.snapshot().await;
-    out.info(&format!("Elapsed time: {:.3}s", started.elapsed().as_secs_f64())).await;
+    let mut elapsed = format!("Elapsed time: {:.3}s", started.elapsed().as_secs_f64());
+    if out.analysis_started().await {
+        elapsed.push_str(&format!(", Critical Path: {:.2}s", snapshot.critical_path.as_secs_f64()));
+    }
+    out.info(&elapsed).await;
     out.info(&bazel_ui::processes(&snapshot)).await;
 }
 
@@ -183,6 +188,8 @@ pub async fn run_command(
 ) -> Result<Built, i32> {
     let tracker = context.server.workspaces().get(&context.workspace_root).progress.track();
     out.track(tracker).await;
+    let exec_root = crate::commands::output_base_for(context.server, &context.workspace_root).join("execroot/_main");
+    out.set_exec_root(exec_root).await;
     let (analyzed, head_starts) = futures::channel::mpsc::unbounded();
     let execute_actions = options.flag("build", true);
     let analyzed = execute_actions.then_some(analyzed);
@@ -238,12 +245,9 @@ async fn analyze_and_build(
     };
     let keep_going = options.flag("keep_going", false);
     out.phase(Phase::Loading).await;
-    let (labels, explicit) = match targets(context, session, options, &main_mapping).await {
+    let (labels, explicit) = match targets(context, session, options, &main_mapping, out).await {
         Ok(requested) => requested,
-        Err(message) => {
-            out.error(&message).await;
-            return Err(exit::BUILD_FAILURE);
-        }
+        Err(code) => return Err(code),
     };
     let config = match configuration(context, options, &main_mapping) {
         Ok(config) => config,
@@ -254,12 +258,16 @@ async fn analyze_and_build(
     };
     let what = analyzing(&labels, &main_mapping);
     out.phase(Phase::Analyzing(what.clone())).await;
-    let (analyzed, mut errors) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
+    let (analyzed, failed) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
     let incompatible = report_explicitly_incompatible(&analyzed, &explicit, &main_mapping, out).await;
-    if errors && !keep_going {
-        out.error("Analysis of target failed; build aborted").await;
+    if let Some(first) = failed.first().filter(|_| !keep_going) {
+        out.error(&format!("Analysis of target '{first}' failed; build aborted: Analysis failed")).await;
         return Err(exit::BUILD_FAILURE);
     }
+    if !failed.is_empty() {
+        out.info(&format!("Analysis succeeded for only {} of {} top-level targets", analyzed.len(), labels.len())).await;
+    }
+    let mut errors = !failed.is_empty();
     if incompatible && !keep_going {
         return Err(exit::BUILD_FAILURE);
     }
@@ -477,6 +485,18 @@ fn plural(count: usize, word: &str) -> String {
     }
 }
 
+/// Report a target pattern that couldn't be resolved, as Bazel does: the
+/// errors of the packages it loaded, then the pattern's.
+async fn pattern_failed(universe: &Universe<&Session>, pattern: &str, message: &str, out: &Output) -> i32 {
+    for error in universe.package_errors().await {
+        out.error(&error).await;
+    }
+    out.warning("Target pattern parsing failed.").await;
+    out.error(&format!("Skipping '{pattern}': {message}")).await;
+    out.error(message).await;
+    exit::BUILD_FAILURE
+}
+
 /// The targets the command line's patterns name, and those of them named
 /// other than by a wildcard. Wildcards skip targets tagged `manual`;
 /// patterns starting with `-` are subtracted.
@@ -485,14 +505,15 @@ async fn targets(
     session: &Session,
     options: &ParsedOptions,
     main_mapping: &Arc<RepoMappingTable>,
-) -> Result<(Vec<Label>, BTreeSet<Label>), String> {
+    out: &Output,
+) -> Result<(Vec<Label>, BTreeSet<Label>), i32> {
     let package = working_package(&context.workspace_root, &context.working_directory);
     let query_options = QueryOptions {
         implicit_deps: true,
         tool_deps: true,
         keep_going: false,
     };
-    let universe = Universe::new(session, query_options, package, main_mapping.clone());
+    let universe = Universe::new(session, query_options, package, main_mapping.clone(), context.workspace_root.clone());
     let mut included = TargetSet::new();
     let mut excluded = TargetSet::new();
     let mut explicit = BTreeSet::new();
@@ -501,7 +522,10 @@ async fn targets(
             Some(text) => (true, text),
             None => (false, pattern.as_str()),
         };
-        let mut labels = universe.resolve(text).await.map_err(|error| error.0)?;
+        let mut labels = match universe.resolve(text).await {
+            Ok(labels) => labels,
+            Err(error) => return Err(pattern_failed(&universe, pattern, &error.0, out).await),
+        };
         let wildcard = is_wildcard(text, package, main_mapping);
         if wildcard {
             labels = buildable_by_wildcard(&universe, labels).await;
@@ -509,14 +533,18 @@ async fn targets(
         if !wildcard && !negative {
             explicit.extend(labels.iter().copied());
         }
-        labels = expand_test_suites(&universe, labels).await?;
+        labels = match expand_test_suites(&universe, labels).await {
+            Ok(labels) => labels,
+            Err(message) => return Err(pattern_failed(&universe, pattern, &message, out).await),
+        };
         match negative {
             true => excluded.extend(labels),
             false => included.extend(labels),
         }
     }
     if options.residue.is_empty() {
-        return Err("No targets specified".to_string());
+        out.error("No targets specified").await;
+        return Err(exit::BUILD_FAILURE);
     }
     let labels = included.into_iter().filter(|label| !excluded.contains(label)).collect();
     Ok((labels, explicit))
@@ -683,9 +711,9 @@ fn action_env(context: &CommandContext<'_>, options: &ParsedOptions) -> Vec<(Str
     env
 }
 
-/// Analyze targets, reporting the errors.
 /// Analyze the targets, sending each compatible one to `analyzed` as soon
-/// as it's done.
+/// as it's done. Returns those analyzed, and those that failed to, as
+/// messages show them.
 async fn analyze(
     session: &Session,
     labels: &[Label],
@@ -693,7 +721,7 @@ async fn analyze(
     mapping: &RepoMappingTable,
     analyzed: Option<UnboundedSender<Arc<ConfiguredTarget>>>,
     out: &Output,
-) -> (Vec<(Label, Arc<ConfiguredTarget>)>, bool) {
+) -> (Vec<(Label, Arc<ConfiguredTarget>)>, Vec<String>) {
     let mut analyses: Vec<BoxFuture<'_, _>> = Vec::with_capacity(labels.len());
     for label in labels {
         analyses.push(Box::pin(analyze_one(session, ConfiguredTargetKey { label: *label, config }, analyzed.clone())));
@@ -701,18 +729,17 @@ async fn analyze(
     drop(analyzed);
     let results = futures::future::join_all(analyses).await;
     let mut analyzed = Vec::new();
-    let mut errors = false;
+    let mut failed = Vec::new();
     for (label, result) in labels.iter().zip(results) {
         match result {
             Ok(target) => analyzed.push((*label, target)),
             Err(error) => {
-                errors = true;
-                let shown = bazel_query::display_label(*label, mapping);
-                out.error(&format!("{shown}: {}", error.message())).await;
+                failed.push(bazel_query::display_label(*label, mapping));
+                out.error(error.message()).await;
             }
         }
     }
-    (analyzed, errors)
+    (analyzed, failed)
 }
 
 async fn analyze_one(
@@ -801,36 +828,53 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
     if let Err(error) = convenience_symlinks(&context.workspace_root, &built.exec_root, prefix, &config.output_directory) {
         out.warning(&format!("failed to create convenience symlinks: {error}")).await;
     }
+    let failed = built.targets.iter().filter(|(_, target, files)| !all_built(target, files)).count();
+    if failed > 0 && options.flag("keep_going", false) {
+        let succeeded = built.targets.len() - failed;
+        out.info(&format!("Build succeeded for only {succeeded} of {} top-level targets", built.targets.len())).await;
+    }
     let show_result: usize = options.get("show_result").and_then(|value| value.parse().ok()).unwrap_or(1);
-    if built.targets.len() > show_result {
-        return;
+    if built.targets.len() <= show_result {
+        for (label, target, files) in &built.targets {
+            report_target(*label, target, files, built, prefix, out).await;
+        }
     }
-    let mut failures = false;
-    for (label, target, files) in &built.targets {
-        if target.incompatible.is_some() {
-            continue;
-        }
-        let shown = bazel_query::display_label(*label, &built.main_mapping);
-        let defaults: Vec<Artifact> = default_files(target).into_iter().filter(|artifact| !artifact.is_source()).collect();
-        if defaults.is_empty() {
-            out.stderr(&format!("Target {shown} up-to-date (nothing to build)\n")).await;
-            continue;
-        }
-        let all_built = defaults.iter().all(|artifact| files.iter().any(|file| file.path == artifact.exec_path));
-        if !all_built {
-            out.stderr(&format!("Target {shown} failed to build\n")).await;
-            failures = true;
-            continue;
-        }
-        let mut text = format!("Target {shown} up-to-date:\n");
-        for artifact in defaults {
-            text.push_str(&format!("  {}\n", display_path(&artifact, prefix, &config.output_directory)));
-        }
-        out.stderr(&text).await;
-    }
-    if failures && !options.flag("verbose_failures", false) {
+    if failed > 0 && !options.flag("verbose_failures", false) {
         out.stderr("Use --verbose_failures to see the command lines of failed build steps.\n").await;
     }
+}
+
+/// Whether every file a target builds by default was built. Incompatible
+/// targets build nothing, so count as built.
+fn all_built(target: &ConfiguredTarget, files: &[OutputFile]) -> bool {
+    if target.incompatible.is_some() {
+        return true;
+    }
+    let defaults = default_files(target).into_iter().filter(|artifact| !artifact.is_source());
+    defaults.into_iter().all(|artifact| files.iter().any(|file| file.path == artifact.exec_path))
+}
+
+/// Say whether a target is up to date, and the files it built.
+async fn report_target(label: Label, target: &ConfiguredTarget, files: &[OutputFile], built: &Built, prefix: &str, out: &Output) {
+    if target.incompatible.is_some() {
+        return;
+    }
+    let shown = bazel_query::display_label(label, &built.main_mapping);
+    let defaults: Vec<Artifact> = default_files(target).into_iter().filter(|artifact| !artifact.is_source()).collect();
+    if defaults.is_empty() {
+        out.stderr(&format!("Target {shown} up-to-date (nothing to build)\n")).await;
+        return;
+    }
+    if !all_built(target, files) {
+        out.stderr(&format!("Target {shown} failed to build\n")).await;
+        return;
+    }
+    let output_directory = &built.config.get().output_directory;
+    let mut text = format!("Target {shown} up-to-date:\n");
+    for artifact in defaults {
+        text.push_str(&format!("  {}\n", display_path(&artifact, prefix, output_directory)));
+    }
+    out.stderr(&text).await;
 }
 
 fn default_files(target: &ConfiguredTarget) -> Vec<Artifact> {

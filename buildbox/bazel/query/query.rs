@@ -38,9 +38,9 @@ pub struct QueryResult {
 /// Parse, evaluate and print a query.
 pub async fn run<C: Compute>(compute: C, request: QueryRequest) -> Result<QueryResult, QueryError> {
     let expr = parse(&request.expression).map_err(|error| QueryError(error.0))?;
-    let universe = Universe::new(compute, request.options, request.working_package, request.main_mapping);
+    let universe = Universe::new(compute, request.options, request.working_package, request.main_mapping, request.workspace_root);
     let targets = evaluate(&universe, &expr).await?;
-    let output = format(&universe, &targets, request.output, &request.workspace_root).await?;
+    let output = format(&universe, &targets, request.output).await?;
     Ok(QueryResult {
         output,
         errors: universe.errors(),

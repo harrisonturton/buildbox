@@ -20,20 +20,62 @@ use std::collections::HashMap;
 #[error("{message}")]
 pub struct EvalError {
     pub message: String,
+    /// The error in a line, as Bazel words it: `line:column: message`, or
+    /// just the message if it has no location.
+    pub brief: String,
 }
 
 impl EvalError {
     fn new(error: impl std::fmt::Display) -> EvalError {
+        let message = error.to_string();
         EvalError {
-            message: error.to_string(),
+            brief: message.clone(),
+            message,
         }
     }
+
+    fn starlark(error: starlark::Error) -> EvalError {
+        let described = bazel_wording(&error.without_diagnostic().to_string());
+        let brief = match error.span() {
+            Some(span) => {
+                let start = span.resolve_span().begin;
+                format!("{}:{}: {described}", start.line + 1, start.column + 1)
+            }
+            None => described,
+        };
+        EvalError {
+            message: error.to_string(),
+            brief,
+        }
+    }
+}
+
+/// A Starlark error's message as Bazel's Starlark words it, for the errors
+/// whose wording differs.
+fn bazel_wording(message: &str) -> String {
+    let message = message.trim();
+    if let Some(name) = message.strip_prefix("Variable `").and_then(|rest| rest.strip_suffix("` not found")) {
+        return format!("name '{name}' is not defined");
+    }
+    if let Some(rest) = message.strip_prefix("Parse error: unexpected ") {
+        return syntax_error(rest).unwrap_or_else(|| format!("syntax error: {rest}"));
+    }
+    message.strip_prefix("error: ").unwrap_or(message).to_string()
+}
+
+/// `syntax error at 'cmd': expected )`, from starlark-rust's
+/// `identifier 'cmd', expected symbol ')'`.
+fn syntax_error(unexpected: &str) -> Option<String> {
+    let (found, expected) = unexpected.split_once(", expected ")?;
+    let token = found.split_once(' ').map(|(_, token)| token).unwrap_or(found).trim_matches('\'');
+    let expected = expected.strip_prefix("symbol ").unwrap_or(expected).trim_matches('\'');
+    Some(format!("syntax error at '{token}': expected {expected}"))
 }
 
 /// Parse a file, named by its label so that builtins can tell which file
 /// called them.
 pub fn parse(file: Label, source: String) -> Result<AstModule, EvalError> {
-    AstModule::parse(&file.canonical_form_for_file(), source, &dialect()).map_err(EvalError::new)
+    AstModule::parse(&file.canonical_form_for_file(), source, &dialect()).map_err(EvalError::starlark)
 }
 
 /// The modules a file's `load` statements name, as written.
@@ -122,12 +164,12 @@ pub fn eval_build(
         eval.extra = Some(&context);
         eval.set_loader(loads);
         eval.set_print_handler(&printer);
-        eval.eval_module(ast, globals).map(|_| ()).map_err(EvalError::new)
+        eval.eval_module(ast, globals).map(|_| ()).map_err(EvalError::starlark)
     });
     let printed = context.printed.take();
     let mut builder = context.package.take().expect("set above").into_inner();
     if let Err(error) = result {
-        builder.errors.push(error.message);
+        builder.errors.push(error.brief);
     }
     (builder.finish(), printed)
 }

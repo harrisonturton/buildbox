@@ -6,6 +6,7 @@ rust_library(
     name = "ui",
     srcs = [
         "bar.rs",
+        "events.rs",
         "screen.rs",
         "summary.rs",
         "ui.rs",

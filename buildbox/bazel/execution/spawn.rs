@@ -1,11 +1,12 @@
 //! Running commands through the backend, with the action cache.
 
-use crate::action_key::{ActionOutputs, Input, OutputFile, cas_error, description, input, progress, upload};
-use bazel_progress::ActionProgress;
+use crate::action_key::{ActionKey, ActionOutputs, Input, MISSING_INPUT, OutputFile, cas_error, description, generated_input, input, progress, upload};
+use crate::backend::Runners;
+use bazel_progress::{ActionFailure, ActionOutput, ActionProgress, Command, Event, FailureReason};
 use crate::backend::Backend;
 use crate::digest::BlobDigest;
 use crate::inputs::InputTree;
-use bazel_analysis::{Action, Artifact, ConfiguredTargetKey, Spawn};
+use bazel_analysis::{Action, Artifact, Spawn};
 use buffa::Message;
 use intern::PathId;
 use remote_execution_rust_connect::build::bazel::remote::execution::v2 as reapi;
@@ -108,11 +109,19 @@ pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnRe
 }
 
 /// Run a spawn action, or reuse its cached result.
-pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action, spawn: &Spawn) -> Result<ActionOutputs, SkyError> {
+pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, action: &Action, spawn: &Spawn) -> Result<ActionOutputs, SkyError> {
+    let owner = action_key.owner;
     let unique = action.all_inputs();
     let span = tracing::info_span!("action_inputs", inputs = unique.len(), runfiles = action.runfiles.len());
-    ready(ctx, &unique).instrument(span).await?;
-    let shown = progress(ctx).map(|progress| progress.action_started(description(action, owner)));
+    let generated_by = match ready(ctx, &unique).instrument(span).await {
+        Ok(generated_by) => generated_by,
+        Err(NotReady::MissingInputs(labels)) => {
+            let result = reapi::ActionResult::default();
+            return Err(report_failure(ctx, backend, action_key, action, FailureReason::MissingInputs(labels), &result).await);
+        }
+        Err(NotReady::Failed(error)) => return Err(error),
+    };
+    let shown = progress(ctx).map(|progress| progress.action_started(action_key.progress_id(), generated_by, description(action, owner)));
     let _staged = backend.stage().await?;
     if let Some(shown) = &shown {
         shown.running(backend.runners.run);
@@ -133,19 +142,106 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, 
     if let (Some(local), Some(key)) = (&local, &key) {
         let span = tracing::info_span!("local_cache_lookup");
         if let Some(result) = local.lookup(backend, key).instrument(span).await? {
-            finish(shown, backend.runners.cache_hit);
-            return outputs(action, &result);
+            finish(shown, ACTION_CACHE_HIT);
+            return checked_outputs(ctx, backend, action_key, action, &result).await;
         }
     }
+    let command = Command {
+        arguments: request.arguments.clone(),
+        env: request.env.clone(),
+        configuration: owner.config.get().checksum.clone(),
+        execution_platform: owner.config.get().options.host_platform.to_string(),
+    };
     let spawned = execute(backend, request).await?;
-    if spawned.result.exit_code != 0 {
-        return Err(failed(backend, action, owner, &spawned.result).await);
+    let result = &spawned.result;
+    if result.exit_code != 0 {
+        let reason = FailureReason::Exit {
+            code: result.exit_code,
+            command,
+            sandboxed: backend.runners == Runners::LOCAL,
+        };
+        return Err(report_failure(ctx, backend, action_key, action, reason, result).await);
     }
     if let (Some(local), Some(key)) = (&local, key) {
-        local.0.insert(key, &spawned.result.encode_to_vec());
+        local.0.insert(key, &result.encode_to_vec());
     }
     finish(shown, backend.runners.name(spawned.cached));
-    outputs(action, &spawned.result)
+    if !spawned.cached {
+        report_output(ctx, backend, action_key, action, result).await;
+    }
+    checked_outputs(ctx, backend, action_key, action, result).await
+}
+
+/// The outputs of a result, or if it lacks any, the error the action fails
+/// with, once the failure is reported.
+async fn checked_outputs(ctx: &Ctx, backend: &Backend, key: ActionKey, action: &Action, result: &reapi::ActionResult) -> Result<ActionOutputs, SkyError> {
+    match outputs(action, result) {
+        Ok(outputs) => Ok(outputs),
+        Err(Missing::Outputs(paths)) => Err(report_failure(ctx, backend, key, action, FailureReason::MissingOutputs(paths), result).await),
+        Err(Missing::Invalid(error)) => Err(error),
+    }
+}
+
+/// Tell whoever is watching what a successful action printed, if anything.
+async fn report_output(ctx: &Ctx, backend: &Backend, key: ActionKey, action: &Action, result: &reapi::ActionResult) {
+    let Some(progress) = progress(ctx) else {
+        return;
+    };
+    let output = action_output(backend, description(action, key.owner), result).await;
+    if !output.stdout.is_empty() || !output.stderr.is_empty() {
+        progress.report(Event::ActionOutput(output));
+    }
+}
+
+async fn action_output(backend: &Backend, description: String, result: &reapi::ActionResult) -> ActionOutput {
+    ActionOutput {
+        description,
+        stdout: output_text(backend, &result.stdout_raw, result.stdout_digest.as_option()).await,
+        stderr: output_text(backend, &result.stderr_raw, result.stderr_digest.as_option()).await,
+    }
+}
+
+/// Tell whoever is watching why an action failed, and what it printed,
+/// returning the error it fails with. The error is transient, so a later
+/// build runs the action again, as Bazel does.
+async fn report_failure(
+    ctx: &Ctx,
+    backend: &Backend,
+    key: ActionKey,
+    action: &Action,
+    reason: FailureReason,
+    result: &reapi::ActionResult,
+) -> SkyError {
+    let owner = key.owner;
+    let location = bazel_loading::target_location(ctx, owner.label).await;
+    let description = description(action, owner);
+    let error = failure_error(location.as_deref(), &description, &reason);
+    let failure = ActionFailure {
+        error: error.clone(),
+        location,
+        output: action_output(backend, description.clone(), result).await,
+        description,
+        label: owner.label.to_string(),
+        mnemonic: action.mnemonic.to_string(),
+        reason,
+    };
+    if let Some(progress) = progress(ctx) {
+        progress.report(Event::ActionFailed(Arc::new(failure)));
+    }
+    SkyError::transient(error)
+}
+
+/// The error an action fails with: one line saying where and how.
+fn failure_error(location: Option<&str>, description: &str, reason: &FailureReason) -> String {
+    let how = match reason {
+        FailureReason::Exit { code, .. } => format!("(Exit {code})"),
+        FailureReason::MissingOutputs(_) => "not all outputs were created or valid".to_string(),
+        FailureReason::MissingInputs(labels) => format!("{} input file(s) do not exist", labels.len()),
+    };
+    match location {
+        Some(location) => format!("{location}: {description} failed: {how}"),
+        None => format!("{description} failed: {how}"),
+    }
 }
 
 /// Report that an action finished `how`, if progress is being reported.
@@ -154,6 +250,10 @@ pub fn finish(shown: Option<ActionProgress>, how: &str) {
         shown.finish(how);
     }
 }
+
+/// What progress reports call finding an action's result in the
+/// [`LocalActionCache`], as Bazel calls finding it in its own action cache.
+pub const ACTION_CACHE_HIT: &str = "action cache hit";
 
 /// Results of actions run before, kept across restarts by [`local_key`]:
 /// cheaper to compute than an action's REAPI digest, which needs its input
@@ -209,12 +309,39 @@ fn output_digests(result: &reapi::ActionResult) -> Vec<cas::Digest> {
     file_digests.chain(tree_digests).filter_map(|digest| cas::Digest::from_proto(digest).ok()).collect()
 }
 
+/// Why an action's inputs aren't ready.
+enum NotReady {
+    /// These source files, by label, don't exist.
+    MissingInputs(Vec<String>),
+    Failed(SkyError),
+}
+
 /// Wait until every input has been generated, keeping none of their
 /// digests, so that an action waiting on others holds no input tree.
-async fn ready(ctx: &Ctx, unique: &[Artifact]) -> Result<(), SkyError> {
-    let waits = unique.iter().map(|artifact| async { input(ctx, *artifact).await.map(drop) });
-    futures::future::try_join_all(waits).await?;
-    Ok(())
+/// Returns the progress ids of the actions that generated them.
+async fn ready(ctx: &Ctx, unique: &[Artifact]) -> Result<Vec<u64>, NotReady> {
+    let waits = unique.iter().map(|artifact| async {
+        let (_, generated_by) = generated_input(ctx, *artifact).await?;
+        Ok::<_, SkyError>(generated_by.map(|key| key.progress_id()))
+    });
+    let results = futures::future::join_all(waits).await;
+    let mut ids = Vec::with_capacity(results.len());
+    let mut missing = Vec::new();
+    for result in results {
+        match result {
+            Ok(generated_by) => ids.extend(generated_by),
+            Err(error) => match error.message().strip_prefix(MISSING_INPUT) {
+                Some(label) => missing.push(label.trim_matches('\'').to_string()),
+                None => return Err(NotReady::Failed(error)),
+            },
+        }
+    }
+    if !missing.is_empty() {
+        return Err(NotReady::MissingInputs(missing));
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
 }
 
 /// Every input, by its path in the input tree: the action's inputs, and
@@ -356,9 +483,18 @@ async fn cached(backend: &Backend, digest: &cas::Digest) -> Result<Option<reapi:
     Ok(missing.is_empty().then_some(result))
 }
 
+/// Why a result's outputs can't be used.
+enum Missing {
+    /// These declared outputs, by path from their root, weren't created.
+    Outputs(Vec<String>),
+    /// An output's digest isn't valid.
+    Invalid(SkyError),
+}
+
 /// The outputs of a result, which must include every declared output.
-fn outputs(action: &Action, result: &reapi::ActionResult) -> Result<ActionOutputs, SkyError> {
+fn outputs(action: &Action, result: &reapi::ActionResult) -> Result<ActionOutputs, Missing> {
     let mut files = Vec::with_capacity(action.outputs.len());
+    let mut missing = Vec::new();
     for output in &action.outputs {
         let path = output.exec_path.to_string();
         let found = match output.is_directory {
@@ -366,9 +502,10 @@ fn outputs(action: &Action, result: &reapi::ActionResult) -> Result<ActionOutput
             true => result.output_directories.iter().find(|dir| dir.path == path).map(|dir| (dir.tree_digest.as_option(), false)),
         };
         let Some((Some(digest), executable)) = found else {
-            return Err(SkyError::new(format!("output '{path}' was not created")));
+            missing.push(root_relative(&path));
+            continue;
         };
-        let digest = cas::Digest::from_proto(digest).map_err(|error| SkyError::new(format!("output '{path}': {error}")))?;
+        let digest = cas::Digest::from_proto(digest).map_err(|error| Missing::Invalid(SkyError::new(format!("output '{path}': {error}"))))?;
         files.push(OutputFile {
             path: PathId::parse(&path).unwrap_or(output.exec_path),
             digest: BlobDigest::from_cas(&digest),
@@ -376,28 +513,20 @@ fn outputs(action: &Action, result: &reapi::ActionResult) -> Result<ActionOutput
             is_directory: output.is_directory,
         });
     }
+    if !missing.is_empty() {
+        return Err(Missing::Outputs(missing));
+    }
     Ok(ActionOutputs { files })
 }
 
-/// The error for an action that exited with a non-zero code, with what it
-/// printed.
-async fn failed(backend: &Backend, action: &Action, owner: ConfiguredTargetKey, result: &reapi::ActionResult) -> SkyError {
-    let stdout = output_text(backend, &result.stdout_raw, result.stdout_digest.as_option()).await;
-    let stderr = output_text(backend, &result.stderr_raw, result.stderr_digest.as_option()).await;
-    let mut message = format!(
-        "{}: {} failed: (Exit {}): {}",
-        owner.label,
-        description(action, owner),
-        result.exit_code,
-        action.mnemonic
-    );
-    for text in [stdout, stderr] {
-        if !text.is_empty() {
-            message.push('\n');
-            message.push_str(text.trim_end());
-        }
+/// An output's path from its root, as messages show it: without the
+/// `bazel-out/<configuration>/bin/` it's under.
+fn root_relative(path: &str) -> String {
+    let parts: Vec<&str> = path.splitn(4, '/').collect();
+    match parts.as_slice() {
+        ["bazel-out", _, _, rest] => rest.to_string(),
+        _ => path.to_string(),
     }
-    SkyError::transient(message)
 }
 
 /// What a command printed to one of its streams, up to a limit.
