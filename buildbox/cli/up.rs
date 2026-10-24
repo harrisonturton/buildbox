@@ -13,7 +13,7 @@ pub struct UpArgs {
 
 pub async fn run(args: UpArgs) -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "dhat-heap")]
-    let _profiler = dhat::Profiler::new_heap();
+    let _profiler = write_profile_on_signal(dhat::Profiler::new_heap());
     #[cfg(feature = "dhat-heap")]
     tokio::spawn(async {
         loop {
@@ -33,4 +33,23 @@ pub async fn run(args: UpArgs) -> Result<(), Box<dyn Error>> {
     telemetry.shutdown().await;
     result?;
     Ok(())
+}
+
+/// Keep the heap profiler until the server gets SIGUSR2, then write its
+/// profile, which records what's live at that moment as well as at the
+/// heap's peak.
+#[cfg(feature = "dhat-heap")]
+fn write_profile_on_signal(profiler: dhat::Profiler) -> std::sync::Arc<std::sync::Mutex<Option<dhat::Profiler>>> {
+    let profiler = std::sync::Arc::new(std::sync::Mutex::new(Some(profiler)));
+    let held = profiler.clone();
+    tokio::spawn(async move {
+        let Ok(mut signal) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2()) else {
+            return;
+        };
+        signal.recv().await;
+        let taken = held.lock().ok().and_then(|mut profiler| profiler.take());
+        drop(taken);
+        eprintln!("dhat: wrote the profile");
+    });
+    profiler
 }
