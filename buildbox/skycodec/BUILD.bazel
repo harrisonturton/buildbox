@@ -1,0 +1,26 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "skycodec",
+    srcs = [
+        "decode.rs",
+        "encode.rs",
+        "fingerprint.rs",
+        "skycodec.rs",
+    ],
+    crate_root = "skycodec.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/intern",
+        "@crates//:ring",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "skycodec_test",
+    srcs = ["tests.rs"],
+    deps = [":skycodec"],
+)
