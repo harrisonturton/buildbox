@@ -1,0 +1,2 @@
+# Implementation of //bazel/connect. Nothing here is public API: load the
+# rules from //bazel/connect:defs.bzl.

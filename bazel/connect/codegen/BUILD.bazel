@@ -1,0 +1,15 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+# Descriptor sets in, one lib.rs out. Run by rust_connect_library.
+rust_binary(
+    name = "codegen",
+    srcs = ["main.rs"],
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:buffa",
+        "@crates//:buffa-codegen",
+        "@crates//:connectrpc-codegen",
+    ],
+)

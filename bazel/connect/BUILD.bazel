@@ -1,0 +1,1 @@
+# Rules for Connect RPC. Load them from //bazel/connect:defs.bzl.

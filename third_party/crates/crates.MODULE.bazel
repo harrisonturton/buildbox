@@ -116,6 +116,67 @@ crate.annotation(
     gen_binaries = ["protoc-gen-tonic"],
 )
 
+# Connect RPC: generated message types, service traits, servers and clients.
+# The server speaks gRPC, which Bazel uses, as well as the Connect protocol.
+# zstd is left out of the default features because it builds C from source.
+crate.spec(
+    default_features = False,
+    features = [
+        "client",
+        "gzip",
+        "json",
+        "server",
+    ],
+    package = "connectrpc",
+    version = "0.9.1",
+)
+
+crate.spec(
+    features = ["json"],
+    package = "buffa",
+    version = "0.9.2",
+)
+
+# The well-known types (google.protobuf.*), which generated code refers to.
+crate.spec(
+    features = ["json"],
+    package = "buffa-types",
+    version = "0.9.2",
+)
+
+crate.spec(
+    package = "serde_json",
+    version = "1",
+)
+
+# Streams for streaming RPCs, which connectrpc types as futures' Stream.
+crate.spec(
+    package = "futures",
+    version = "0.3",
+)
+
+# Uri, which connectrpc's clients are configured with.
+crate.spec(
+    package = "http",
+    version = "1",
+)
+
+# The //bazel/connect codegen driver.
+crate.spec(
+    package = "anyhow",
+    version = "1",
+)
+
+crate.spec(
+    package = "buffa-codegen",
+    version = "0.9.2",
+)
+
+crate.spec(
+    package = "connectrpc-codegen",
+    version = "0.9.0",
+)
+
 # Resolved crate versions are pinned in these lockfiles. To update them, run:
 #   CARGO_BAZEL_REPIN=1 bazel build //...
 crate.from_specs(
