@@ -42,7 +42,7 @@ impl Symbols {
     fn intern(&self, s: &str) -> Symbol {
         let hash = hash_text(s);
         let is_match = |value| text(value).as_str() == s;
-        let make = || self.arena.alloc(s).as_ptr() as u64;
+        let make = || self.arena.alloc_str(s).as_ptr() as u64;
         Symbol(self.table.intern(&TextHashing, hash, is_match, make))
     }
 }

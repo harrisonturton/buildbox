@@ -126,3 +126,26 @@ fn freed_pages_are_compacted() {
         assert_eq!(read_bytes(&store, *value), noise(i as u64, 1000));
     }
 }
+
+#[test]
+fn insert_new_says_whether_the_value_was_stored() {
+    let store = ValueStore::new();
+    let bytes = target(1);
+    let first = store.insert_new(KIND, Fingerprint::of(&bytes), &bytes);
+    let second = store.insert_new(KIND, Fingerprint::of(&bytes), &bytes);
+    assert!(first.is_new);
+    assert!(!second.is_new);
+    assert_eq!(first.value, second.value);
+}
+
+#[test]
+fn release_and_take_returns_the_freed_value() {
+    let store = ValueStore::new();
+    let value = insert(&store, &target(7));
+    store.retain(value);
+    assert!(store.release_and_take(value).unwrap().is_none());
+    let Some(Stored::Bytes(bytes)) = store.release_and_take(value).unwrap() else {
+        panic!("expected the freed bytes");
+    };
+    assert_eq!(bytes, target(7));
+}

@@ -1,0 +1,45 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "skyframe",
+    srcs = [
+        "cache.rs",
+        "ctx.rs",
+        "engine.rs",
+        "error.rs",
+        "graph.rs",
+        "key.rs",
+        "keys.rs",
+        "kinds.rs",
+        "skyframe.rs",
+        "trace.rs",
+    ],
+    crate_root = "skyframe.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/intern",
+        "//buildbox/skycodec",
+        "//buildbox/skystore",
+        "@crates//:futures",
+        "@crates//:rustc-hash",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "skyframe_unit_test",
+    crate = ":skyframe",
+)
+
+rust_test(
+    name = "skyframe_test",
+    srcs = ["tests.rs"],
+    deps = [
+        ":skyframe",
+        "//buildbox/skycodec",
+        "@crates//:tokio",
+    ],
+)

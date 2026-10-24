@@ -7,10 +7,12 @@
 //! text however many workspaces use it. Interned values are never freed.
 
 mod arena;
+mod blob;
 mod path;
 mod segvec;
 mod symbol;
 mod table;
 
+pub use blob::BlobTable;
 pub use path::{path_stats, PathError, PathId, PathStats};
 pub use symbol::{symbol_stats, Symbol, SymbolStats};

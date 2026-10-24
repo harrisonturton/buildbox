@@ -72,6 +72,20 @@ impl ValueRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Kind(pub u16);
 
+/// The result of [`ValueStore::insert_new`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Inserted {
+    pub value: ValueRef,
+    /// Whether the value wasn't already stored.
+    pub is_new: bool,
+}
+
+/// A value [`Shard::release`] freed, still encoded.
+enum Freed {
+    Bytes { kind: Kind, codec: Codec, stored: Vec<u8> },
+    Live(LiveValue),
+}
+
 /// A live object held by the store.
 pub type LiveValue = Arc<dyn Any + Send + Sync>;
 
@@ -175,18 +189,25 @@ impl ValueStore {
     /// Store an encoded value, or add a reference to it if it is already
     /// stored. `fingerprint` must identify `bytes`, including their kind.
     pub fn insert(&self, kind: Kind, fingerprint: Fingerprint, bytes: &[u8]) -> ValueRef {
+        self.insert_new(kind, fingerprint, bytes).value
+    }
+
+    /// Like [`ValueStore::insert`], also saying whether the value is new.
+    /// Values that refer to other values use this to take references to
+    /// them only once.
+    pub fn insert_new(&self, kind: Kind, fingerprint: Fingerprint, bytes: &[u8]) -> Inserted {
         if let Some(value) = self.lock(shard_of(&fingerprint)).retain_existing(&fingerprint) {
-            return value;
+            return Inserted { value, is_new: false };
         }
 
         let dictionary = self.dictionaries.get(kind);
         let (codec, stored) = compress::compress(bytes, dictionary.as_ref());
-        let value = self.lock(shard_of(&fingerprint)).insert(kind, fingerprint, codec, &stored);
+        let inserted = self.lock(shard_of(&fingerprint)).insert(kind, fingerprint, codec, &stored);
 
-        if dictionary.is_none() && bytes.len() >= compress::MIN_COMPRESS_LEN {
+        if inserted.is_new && dictionary.is_none() && bytes.len() >= compress::MIN_COMPRESS_LEN {
             self.sample(kind, bytes);
         }
-        value
+        inserted
     }
 
     /// Store a live object, or add a reference to the one already stored with
@@ -216,7 +237,23 @@ impl ValueStore {
     /// Remove a reference, freeing the value if it was the last. Returns
     /// whether it was freed.
     pub fn release(&self, value: ValueRef) -> bool {
-        self.lock(value.shard()).release(value)
+        self.lock(value.shard()).release(value).is_some()
+    }
+
+    /// Remove a reference and, if it was the last, return the value that was
+    /// freed, so that references it held can be released in turn.
+    pub fn release_and_take(&self, value: ValueRef) -> Result<Option<Stored>, StoreError> {
+        let Some(freed) = self.lock(value.shard()).release(value) else {
+            return Ok(None);
+        };
+        let stored = match freed {
+            Freed::Live(live) => Stored::Live(live),
+            Freed::Bytes { kind, codec, stored } => {
+                let dictionary = self.dictionaries.get(kind);
+                Stored::Bytes(compress::decompress(codec, &stored, dictionary.as_deref())?)
+            }
+        };
+        Ok(Some(stored))
     }
 
     /// Read a value.
@@ -315,13 +352,14 @@ impl Shard {
         Some(ValueRef::new(shard_of(fingerprint), index))
     }
 
-    fn insert(&mut self, kind: Kind, fingerprint: Fingerprint, codec: Codec, stored: &[u8]) -> ValueRef {
-        if let Some(existing) = self.retain_existing(&fingerprint) {
-            return existing;
+    fn insert(&mut self, kind: Kind, fingerprint: Fingerprint, codec: Codec, stored: &[u8]) -> Inserted {
+        if let Some(value) = self.retain_existing(&fingerprint) {
+            return Inserted { value, is_new: false };
         }
         let slot = self.place(codec, stored);
         self.count(kind, codec, stored, 1);
-        self.add_entry(kind, fingerprint, slot)
+        let value = self.add_entry(kind, fingerprint, slot);
+        Inserted { value, is_new: true }
     }
 
     fn insert_live(&mut self, kind: Kind, fingerprint: Fingerprint, value: LiveValue, size: usize) -> ValueRef {
@@ -378,20 +416,37 @@ impl Shard {
         ValueRef::new(shard_of(&fingerprint), index)
     }
 
-    fn release(&mut self, value: ValueRef) -> bool {
-        let Some(entry) = self.entry_mut(value) else {
-            return false;
-        };
+    fn release(&mut self, value: ValueRef) -> Option<Freed> {
+        let entry = self.entry_mut(value)?;
         entry.refs -= 1;
         if entry.refs > 0 {
-            return false;
+            return None;
         }
         let entry = *entry;
+        let freed = self.contents(&entry);
         self.free_entry(value.index() as u32, entry);
         if self.pages.should_compact() {
             self.compact();
         }
-        true
+        freed
+    }
+
+    fn contents(&self, entry: &Entry) -> Option<Freed> {
+        let kind = Kind(entry.kind);
+        match entry.slot {
+            Slot::Free => None,
+            Slot::Live { index, .. } => self.live[index as usize].clone().map(Freed::Live),
+            Slot::Inline { codec, len, bytes } => Some(Freed::Bytes {
+                kind,
+                codec,
+                stored: bytes[..len as usize].to_vec(),
+            }),
+            Slot::Paged { codec, location } => Some(Freed::Bytes {
+                kind,
+                codec,
+                stored: self.pages.read(location).to_vec(),
+            }),
+        }
     }
 
     fn free_entry(&mut self, index: u32, entry: Entry) {
