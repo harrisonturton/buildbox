@@ -149,3 +149,73 @@ fn release_and_take_returns_the_freed_value() {
     };
     assert_eq!(bytes, target(7));
 }
+
+#[test]
+fn checkpoint_then_restore_keeps_values_and_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ValueStore::new();
+    let values: Vec<ValueRef> = (0..300).map(|i| insert(&store, &target(i))).collect();
+    let small = insert(&store, b"tiny");
+    let saving: Vec<(ValueRef, u32)> = values.iter().chain([&small]).map(|value| (*value, 1)).collect();
+    let image = store.checkpoint(dir.path(), &saving).unwrap();
+    assert_eq!(store.stats().page_live_bytes, 0, "saved values leave memory");
+    assert_eq!(read_bytes(&store, values[7]), target(7));
+
+    let decoded: StoreImage = skycodec::from_bytes(&skycodec::to_bytes(&image)).unwrap();
+    assert_eq!(decoded, image);
+    let restored = ValueStore::restore(dir.path(), &decoded).unwrap();
+    for (i, value) in values.iter().enumerate() {
+        assert_eq!(read_bytes(&restored, *value), target(i));
+    }
+    assert_eq!(read_bytes(&restored, small), b"tiny");
+    assert_eq!(insert(&restored, &target(3)), values[3], "inserting a saved value finds it");
+}
+
+#[test]
+fn live_values_are_restored_absent_and_refilled() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ValueStore::new();
+    let fingerprint = Fingerprint::of(b"live");
+    let live = store.insert_live(KIND, fingerprint, Arc::new(5u32), 8);
+    let image = store.checkpoint(dir.path(), &[(live, 1)]).unwrap();
+    let restored = ValueStore::restore(dir.path(), &image).unwrap();
+    assert!(restored.is_absent(live));
+    assert!(restored.read(live).is_err());
+    assert_eq!(restored.insert_live(KIND, fingerprint, Arc::new(5u32), 8), live);
+    assert!(!restored.is_absent(live));
+    assert!(matches!(restored.read(live), Ok(Stored::Live(_))));
+}
+
+#[test]
+fn sparse_segments_are_rewritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ValueStore::new();
+    let values: Vec<ValueRef> = (0..200).map(|i| insert(&store, &target(i))).collect();
+    let all: Vec<(ValueRef, u32)> = values.iter().map(|value| (*value, 1)).collect();
+    let first = store.checkpoint(dir.path(), &all).unwrap();
+    for value in &values[10..] {
+        store.release(*value);
+    }
+    let kept: Vec<(ValueRef, u32)> = values[..10].iter().map(|value| (*value, 1)).collect();
+    let second = store.checkpoint(dir.path(), &kept).unwrap();
+    assert_ne!(first.segments, second.segments);
+    assert!(second.disk_bytes() < first.disk_bytes() / 4);
+    remove_unused_segments(dir.path(), &second.segments).unwrap();
+    let restored = ValueStore::restore(dir.path(), &second).unwrap();
+    for (i, value) in values[..10].iter().enumerate() {
+        assert_eq!(read_bytes(&restored, *value), target(i));
+    }
+}
+
+#[test]
+fn a_damaged_segment_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ValueStore::new();
+    let value = insert(&store, &target(1));
+    let image = store.checkpoint(dir.path(), &[(value, 1)]).unwrap();
+    let path = dir.path().join(format!("{:08}.seg", image.segments[0].id));
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[0] ^= 1;
+    std::fs::write(&path, bytes).unwrap();
+    assert!(ValueStore::restore(dir.path(), &image).is_err());
+}

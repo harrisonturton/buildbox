@@ -5,9 +5,12 @@ package(default_visibility = ["//visibility:private"])
 rust_library(
     name = "skystore",
     srcs = [
+        "checkpoint.rs",
         "compress.rs",
         "dictionaries.rs",
+        "mmap.rs",
         "pages.rs",
+        "segments.rs",
         "skystore.rs",
         "tests.rs",
     ],
@@ -16,6 +19,7 @@ rust_library(
     deps = [
         "//buildbox/skycodec",
         "@crates//:hashbrown",
+        "@crates//:libc",
         "@crates//:thiserror",
         "@crates//:tracing",
         "@crates//:zstd",
@@ -25,4 +29,5 @@ rust_library(
 rust_test(
     name = "skystore_test",
     crate = ":skystore",
+    deps = ["@crates//:tempfile"],
 )

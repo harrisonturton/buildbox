@@ -25,12 +25,23 @@ pub(crate) enum Codec {
     ZstdDict,
 }
 
+impl Codec {
+    pub(crate) fn from_u8(value: u8) -> Option<Codec> {
+        match value {
+            0 => Some(Codec::Raw),
+            1 => Some(Codec::Zstd),
+            2 => Some(Codec::ZstdDict),
+            _ => None,
+        }
+    }
+}
+
 /// A zstd dictionary trained on values of one kind, prepared for both
 /// compressing and decompressing.
 pub(crate) struct Dictionary {
     cdict: CDict<'static>,
     ddict: DDict<'static>,
-    len: usize,
+    content: Box<[u8]>,
 }
 
 // zstd only reads prepared dictionaries, so they can be shared between threads.
@@ -42,15 +53,24 @@ impl Dictionary {
     /// `None` if zstd can't find enough in common between them.
     pub(crate) fn train(samples: &[Vec<u8>], max_len: usize) -> Option<Dictionary> {
         let content = zstd::dict::from_samples(samples, max_len).ok()?;
-        Some(Dictionary {
+        Some(Dictionary::from_content(content))
+    }
+
+    /// The dictionary with this content, as [`Dictionary::content`] gave it.
+    pub(crate) fn from_content(content: Vec<u8>) -> Dictionary {
+        Dictionary {
             cdict: CDict::create(&content, LEVEL),
             ddict: DDict::create(&content),
-            len: content.len(),
-        })
+            content: content.into_boxed_slice(),
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.len
+        self.content.len()
+    }
+
+    pub(crate) fn content(&self) -> &[u8] {
+        &self.content
     }
 }
 

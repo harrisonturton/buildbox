@@ -19,14 +19,21 @@
 //! [`ValueStore::retain`] add a reference, and [`ValueStore::release`]
 //! removes one, freeing the value when none are left.
 
+mod checkpoint;
 mod compress;
 mod dictionaries;
+mod mmap;
 mod pages;
+mod segments;
+
+pub use checkpoint::{SavedEntry, SavedSlot, StoreImage};
+pub use segments::{SegmentInfo, remove_unused as remove_unused_segments};
 
 use compress::Codec;
 use dictionaries::Dictionaries;
 use hashbrown::HashTable;
 use pages::{Location, Pages};
+use segments::Segments;
 use skycodec::Fingerprint;
 use std::any::Any;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -148,6 +155,7 @@ pub struct KindStats {
 pub struct ValueStore {
     shards: Box<[Mutex<Shard>]>,
     dictionaries: Dictionaries,
+    segments: Segments,
 }
 
 #[derive(Default)]
@@ -177,7 +185,12 @@ enum Slot {
     Free,
     Inline { codec: Codec, len: u8, bytes: [u8; INLINE_BYTES] },
     Paged { codec: Codec, location: Location },
+    /// In a segment file; the location's page is the segment's id.
+    Disk { codec: Codec, location: Location },
     Live { index: u32, size: u32 },
+    /// A live object a restored store knows the fingerprint of but doesn't
+    /// have, until it's computed again and stored.
+    Absent,
 }
 
 impl ValueStore {
@@ -185,6 +198,7 @@ impl ValueStore {
         ValueStore {
             shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
             dictionaries: Dictionaries::default(),
+            segments: Segments::default(),
         }
     }
 
@@ -198,7 +212,12 @@ impl ValueStore {
     /// Values that refer to other values use this to take references to
     /// them only once.
     pub fn insert_new(&self, kind: Kind, fingerprint: Fingerprint, bytes: &[u8]) -> Inserted {
-        if let Some(value) = self.lock(shard_of(&fingerprint)).retain_existing(&fingerprint) {
+        let existing = self.lock(shard_of(&fingerprint)).retain_existing(&fingerprint);
+        if let Some(value) = existing {
+            if self.is_absent(value) {
+                let (codec, stored) = compress::compress(bytes, self.dictionaries.get(kind).as_ref());
+                self.lock(value.shard()).fill_absent_bytes(value, kind, codec, &stored);
+            }
             return Inserted { value, is_new: false };
         }
 
@@ -218,9 +237,16 @@ impl ValueStore {
     pub fn insert_live(&self, kind: Kind, fingerprint: Fingerprint, value: LiveValue, size: usize) -> ValueRef {
         let mut shard = self.lock(shard_of(&fingerprint));
         if let Some(existing) = shard.retain_existing(&fingerprint) {
+            shard.fill_absent(existing, value, size);
             return existing;
         }
         shard.insert_live(kind, fingerprint, value, size)
+    }
+
+    /// Whether the value is a live object the store doesn't have: one a
+    /// restored store knows only the fingerprint of.
+    pub fn is_absent(&self, value: ValueRef) -> bool {
+        self.lock(value.shard()).is_absent_at(value)
     }
 
     /// The stored value with this fingerprint, if any, with a reference added.
@@ -239,13 +265,13 @@ impl ValueStore {
     /// Remove a reference, freeing the value if it was the last. Returns
     /// whether it was freed.
     pub fn release(&self, value: ValueRef) -> bool {
-        self.lock(value.shard()).release(value).is_some()
+        self.lock(value.shard()).release(value, &self.segments).is_some()
     }
 
     /// Remove a reference and, if it was the last, return the value that was
     /// freed, so that references it held can be released in turn.
     pub fn release_and_take(&self, value: ValueRef) -> Result<Option<Stored>, StoreError> {
-        let Some(freed) = self.lock(value.shard()).release(value) else {
+        let Some(freed) = self.lock(value.shard()).release(value, &self.segments) else {
             return Ok(None);
         };
         let stored = match freed {
@@ -262,19 +288,33 @@ impl ValueStore {
     pub fn read(&self, value: ValueRef) -> Result<Stored, StoreError> {
         let (kind, codec, stored) = {
             let shard = self.lock(value.shard());
-            let entry = shard.entry(value).ok_or(StoreError::Missing(value))?;
+            let entry = *shard.entry(value).ok_or(StoreError::Missing(value))?;
             match entry.slot {
-                Slot::Free => return Err(StoreError::Missing(value)),
+                Slot::Free | Slot::Absent => return Err(StoreError::Missing(value)),
                 Slot::Live { index, .. } => {
                     let live = shard.live[index as usize].clone().ok_or(StoreError::Missing(value))?;
                     return Ok(Stored::Live(live));
                 }
                 Slot::Inline { codec, len, bytes } => (entry.kind, codec, bytes[..len as usize].to_vec()),
                 Slot::Paged { codec, location } => (entry.kind, codec, shard.pages.read(location).to_vec()),
+                Slot::Disk { codec, location } => {
+                    drop(shard);
+                    return self.read_disk(value, Kind(entry.kind), codec, location);
+                }
             }
         };
         let dictionary = self.dictionaries.get(Kind(kind));
         let bytes = compress::decompress(codec, &stored, dictionary.as_deref())?;
+        Ok(Stored::Bytes(bytes))
+    }
+
+    /// Read a value from its segment, decompressing straight from the
+    /// mapping.
+    fn read_disk(&self, value: ValueRef, kind: Kind, codec: Codec, location: Location) -> Result<Stored, StoreError> {
+        let segment = self.segments.get(location.page).ok_or(StoreError::Missing(value))?;
+        let stored = segments::read(&segment, location).ok_or(StoreError::Corrupt("value beyond the end of its segment"))?;
+        let dictionary = self.dictionaries.get(kind);
+        let bytes = compress::decompress(codec, stored, dictionary.as_deref())?;
         Ok(Stored::Bytes(bytes))
     }
 
@@ -366,19 +406,44 @@ impl Shard {
     }
 
     fn insert_live(&mut self, kind: Kind, fingerprint: Fingerprint, value: LiveValue, size: usize) -> ValueRef {
+        let slot = self.push_live(value, size);
+        self.add_entry(kind, fingerprint, slot)
+    }
+
+    fn is_absent_at(&self, value: ValueRef) -> bool {
+        self.entry(value).is_some_and(|entry| matches!(entry.slot, Slot::Absent))
+    }
+
+    /// Give an absent entry the live object it stood for.
+    fn fill_absent(&mut self, value: ValueRef, live: LiveValue, size: usize) {
+        if self.is_absent_at(value) {
+            self.entries[value.index()].slot = self.push_live(live, size);
+        }
+    }
+
+    /// Give an absent entry the bytes it stood for.
+    fn fill_absent_bytes(&mut self, value: ValueRef, kind: Kind, codec: Codec, stored: &[u8]) {
+        if self.is_absent_at(value) {
+            self.count(kind, codec, stored, 1);
+            self.entries[value.index()].slot = self.place(codec, stored);
+        }
+    }
+
+    /// Hold a live object, returning its slot.
+    fn push_live(&mut self, live: LiveValue, size: usize) -> Slot {
         let index = match self.free_live.pop() {
             Some(index) => {
-                self.live[index as usize] = Some(value);
+                self.live[index as usize] = Some(live);
                 index
             }
             None => {
-                self.live.push(Some(value));
+                self.live.push(Some(live));
                 (self.live.len() - 1) as u32
             }
         };
         let size = u32::try_from(size).unwrap_or(u32::MAX);
         self.live_bytes += size as u64;
-        self.add_entry(kind, fingerprint, Slot::Live { index, size })
+        Slot::Live { index, size }
     }
 
     fn place(&mut self, codec: Codec, stored: &[u8]) -> Slot {
@@ -419,25 +484,33 @@ impl Shard {
         ValueRef::new(shard_of(&fingerprint), index)
     }
 
-    fn release(&mut self, value: ValueRef) -> Option<Freed> {
+    fn release(&mut self, value: ValueRef, segments: &Segments) -> Option<Freed> {
         let entry = self.entry_mut(value)?;
         entry.refs -= 1;
         if entry.refs > 0 {
             return None;
         }
         let entry = *entry;
-        let freed = self.contents(&entry);
-        self.free_entry(value.index() as u32, entry);
+        let freed = self.contents(&entry, segments);
+        self.free_entry(value.index() as u32, entry, segments);
         if self.pages.should_compact() {
             self.compact();
         }
         freed
     }
 
-    fn contents(&self, entry: &Entry) -> Option<Freed> {
+    fn contents(&self, entry: &Entry, segments: &Segments) -> Option<Freed> {
         let kind = Kind(entry.kind);
         match entry.slot {
-            Slot::Free => None,
+            Slot::Free | Slot::Absent => None,
+            Slot::Disk { codec, location } => {
+                let segment = segments.get(location.page)?;
+                Some(Freed::Bytes {
+                    kind,
+                    codec,
+                    stored: segments::read(&segment, location)?.to_vec(),
+                })
+            }
             Slot::Live { index, .. } => self.live[index as usize].clone().map(Freed::Live),
             Slot::Inline { codec, len, bytes } => Some(Freed::Bytes {
                 kind,
@@ -452,7 +525,7 @@ impl Shard {
         }
     }
 
-    fn free_entry(&mut self, index: u32, entry: Entry) {
+    fn free_entry(&mut self, index: u32, entry: Entry, segments: &Segments) {
         let removed = self
             .index
             .find_entry(entry.fingerprint.short(), |&i| i == index)
@@ -460,7 +533,12 @@ impl Shard {
         debug_assert!(removed.is_ok(), "every stored entry is indexed");
 
         match entry.slot {
-            Slot::Free => {}
+            Slot::Free | Slot::Absent => {}
+            Slot::Disk { codec, location } => {
+                if let Some(stored) = segments.get(location.page).and_then(|segment| segments::read(&segment, location).map(<[u8]>::to_vec)) {
+                    self.count(Kind(entry.kind), codec, &stored, -1);
+                }
+            }
             Slot::Inline { codec, len, bytes } => self.count(Kind(entry.kind), codec, &bytes[..len as usize], -1),
             Slot::Paged { codec, location } => {
                 let stored = self.pages.read(location).to_vec();
@@ -508,7 +586,7 @@ impl Shard {
             let (codec, stored) = match entry.slot {
                 Slot::Paged { codec, location } => (codec, self.pages.read(location).to_vec()),
                 Slot::Inline { codec, len, bytes } => (codec, bytes[..len as usize].to_vec()),
-                Slot::Free | Slot::Live { .. } => continue,
+                Slot::Free | Slot::Live { .. } | Slot::Disk { .. } | Slot::Absent => continue,
             };
             if codec == Codec::ZstdDict {
                 continue;

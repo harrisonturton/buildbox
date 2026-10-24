@@ -50,6 +50,30 @@ impl Training {
 }
 
 impl Dictionaries {
+    /// Every kind's dictionary content.
+    pub(crate) fn export(&self) -> Vec<(u16, Vec<u8>)> {
+        let dictionaries = self.dictionaries.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let present = dictionaries.iter().enumerate().filter_map(|(kind, dictionary)| Some((kind as u16, dictionary.as_ref()?.content().to_vec())));
+        present.collect()
+    }
+
+    /// Use a saved dictionary for `kind`, and train no other.
+    pub(crate) fn import(&self, kind: Kind, content: Vec<u8>) {
+        let index = kind.0 as usize;
+        {
+            let mut training = self.lock_training();
+            if training.len() <= index {
+                training.resize_with(index + 1, Training::default);
+            }
+            training[index].attempts = MAX_ATTEMPTS;
+        }
+        let mut dictionaries = self.dictionaries.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if dictionaries.len() <= index {
+            dictionaries.resize(index + 1, None);
+        }
+        dictionaries[index] = Some(Arc::new(Dictionary::from_content(content)));
+    }
+
     pub(crate) fn get(&self, kind: Kind) -> Option<Arc<Dictionary>> {
         let dictionaries = self.dictionaries.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         dictionaries.get(kind.0 as usize).cloned().flatten()
