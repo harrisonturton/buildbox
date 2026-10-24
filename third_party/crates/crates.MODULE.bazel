@@ -208,6 +208,31 @@ crate.spec(
     version = "1",
 )
 
+# Fetching external repositories: HTTP downloads and the archive formats
+# Bazel can extract.
+crate.spec(
+    package = "ureq",
+    version = "2.12",
+)
+
+crate.spec(
+    default_features = False,
+    features = ["deflate"],
+    package = "zip",
+    version = "2",
+)
+
+crate.spec(
+    features = ["static"],
+    package = "xz2",
+    version = "0.1",
+)
+
+crate.spec(
+    package = "bzip2",
+    version = "0.4",
+)
+
 # Resolved crate versions are pinned in these lockfiles. To update them, run:
 #   CARGO_BAZEL_REPIN=1 bazel build //...
 crate.from_specs(

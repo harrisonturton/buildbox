@@ -1,0 +1,36 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "fetch",
+    srcs = [
+        "download.rs",
+        "extract.rs",
+        "fetch.rs",
+        "integrity.rs",
+        "patch.rs",
+    ],
+    crate_name = "bazel_fetch",
+    crate_root = "fetch.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "@crates//:bzip2",
+        "@crates//:data-encoding",
+        "@crates//:flate2",
+        "@crates//:ring",
+        "@crates//:tar",
+        "@crates//:thiserror",
+        "@crates//:tracing",
+        "@crates//:ureq",
+        "@crates//:xz2",
+        "@crates//:zip",
+        "@crates//:zstd",
+    ],
+)
+
+rust_test(
+    name = "fetch_test",
+    crate = ":fetch",
+    deps = ["@crates//:tempfile"],
+)
