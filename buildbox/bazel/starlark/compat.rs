@@ -6,9 +6,11 @@
 const DEFAULT_BY_NAME: &[&str] = &[".get(", ".pop("];
 
 /// Rewrite `.get(key, default = value)` and `.pop(...)` to pass `default`
-/// by position. Text in strings and comments is left alone.
+/// by position, and `dict | select(...)` to `dict + select(...)`, since
+/// starlark-rust has no reflected `|` for select to implement. Text in
+/// strings and comments is left alone.
 pub fn rewrite(source: &str) -> String {
-    if !source.contains("default") {
+    if !source.contains("default") && !source.contains("select(") {
         return source.to_string();
     }
     let bytes = source.as_bytes();
@@ -18,6 +20,11 @@ pub fn rewrite(source: &str) -> String {
         if let Some(end) = skip_string_or_comment(bytes, index) {
             out.push_str(&source[index..end]);
             index = end;
+            continue;
+        }
+        if is_union_with_select(&source[index..]) {
+            out.push('+');
+            index += 1;
             continue;
         }
         let Some(method) = DEFAULT_BY_NAME.iter().find(|method| source[index..].starts_with(*method)) else {
@@ -88,6 +95,14 @@ fn skip_default_keyword(source: &str, start: usize, out: &mut String) -> usize {
     source.len() - value_trimmed.len()
 }
 
+/// Whether `rest` starts with a `|` whose right operand is a `select`.
+fn is_union_with_select(rest: &str) -> bool {
+    let Some(operand) = rest.strip_prefix('|') else {
+        return false;
+    };
+    operand.trim_start().starts_with("select(")
+}
+
 /// The end of a string literal or comment starting at `index`, if one does.
 fn skip_string_or_comment(bytes: &[u8], index: usize) -> Option<usize> {
     match bytes[index] {
@@ -125,5 +140,13 @@ mod tests {
         assert_eq!(rewrite("d.get(k, default == 1)"), "d.get(k, default == 1)");
         assert_eq!(rewrite("s = \".get(a, default = b)\""), "s = \".get(a, default = b)\"");
         assert_eq!(rewrite("# d.get(a, default = b)\nd.get(a, default = b)"), "# d.get(a, default = b)\nd.get(a, b)");
+    }
+
+    #[test]
+    fn unions_with_select_by_concatenation() {
+        assert_eq!(rewrite("x = {} | select({})"), "x = {} + select({})");
+        assert_eq!(rewrite("x = a |\n    select({})"), "x = a +\n    select({})");
+        assert_eq!(rewrite("x = a | b"), "x = a | b");
+        assert_eq!(rewrite("x = \"| select(\""), "x = \"| select(\"");
     }
 }
