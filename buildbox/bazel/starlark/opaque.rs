@@ -64,7 +64,7 @@ impl<'v> StarlarkValue<'v> for Opaque {
             return dotted_version_call(args, eval).map_err(starlark::Error::new_other);
         }
         if is_flag_getter(&self.type_name) {
-            return Ok(Value::new_bool(false));
+            return Ok(Value::new_bool(flag_default(&self.type_name)));
         }
         Ok(eval.heap().alloc(Opaque::new(&format!("{}()", self.type_name))))
     }
@@ -136,6 +136,18 @@ impl<'v> StarlarkValue<'v> for Namespace {
 fn is_flag_getter(type_name: &str) -> bool {
     let name = type_name.rsplit('.').next().unwrap_or(type_name);
     name.starts_with("incompatible_") || name.starts_with("experimental_")
+}
+
+/// The flags behind getters builtins call that Bazel 9 enables by
+/// default. Every other `incompatible_` and `experimental_` flag is off.
+const FLAGS_ON_BY_DEFAULT: &[&str] = &["incompatible_enable_proto_toolchain_resolution"];
+
+/// The default value of the flag a getter such as
+/// `proto_common_do_not_use.incompatible_enable_proto_toolchain_resolution`
+/// returns.
+fn flag_default(type_name: &str) -> bool {
+    let name = type_name.rsplit('.').next().unwrap_or(type_name);
+    FLAGS_ON_BY_DEFAULT.contains(&name)
 }
 
 /// `_builtins.internal.apple_common.dotted_version`, as the real function.
