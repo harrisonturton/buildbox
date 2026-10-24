@@ -277,6 +277,21 @@ async fn invalidating_keys_the_graph_lacks_keeps_its_revision() {
 }
 
 #[tokio::test]
+async fn invalidating_a_file_verifies_only_its_dependents() {
+    let engine = Engine::default();
+    let counts = Arc::new(Counts::default());
+    let (graph, disk) = workspace(&engine, &counts);
+    assert_eq!(total(&graph).await, 5);
+    let verified = |kind: &str| engine.stats().kinds.iter().find(|row| row.name == kind).map_or(0, |row| row.verified);
+    let lines_before = verified("LINES");
+
+    disk.write("b", "1\n2\n3");
+    graph.invalidate(&[File("b".into())]).await;
+    assert_eq!(total(&graph).await, 6);
+    assert_eq!(verified("LINES"), lines_before, "Lines of a, which b doesn't reach, isn't verified again");
+}
+
+#[tokio::test]
 async fn unchanged_values_stop_recomputation() {
     let engine = Engine::default();
     let counts = Arc::new(Counts::default());

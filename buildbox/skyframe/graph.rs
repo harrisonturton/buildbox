@@ -5,7 +5,7 @@ use crate::engine::{Engine, Event};
 use crate::key::Key;
 use crate::keys::KeyId;
 use crate::kinds::{self, KindId};
-use crate::trace::{Trace, ERROR, TRANSIENT};
+use crate::trace::{Dep, Trace, ERROR, TRANSIENT};
 use crate::SkyError;
 use futures::future::BoxFuture;
 use futures::FutureExt;
@@ -51,6 +51,10 @@ pub(crate) struct GraphInner {
 #[derive(Default)]
 struct GraphState {
     nodes: FxHashMap<u32, Node>,
+    /// The keys whose results read each key, from their traces: what an
+    /// invalidation can reach. May list keys that no longer read it, which
+    /// only makes invalidating check more than it needs to.
+    rdeps: FxHashMap<u32, Vec<u32>>,
     in_flight: FxHashMap<u32, Arc<InFlight>>,
     /// Which in-flight keys each computing key is waiting for, to find cycles.
     waiting_on: FxHashMap<u32, Vec<u32>>,
@@ -191,19 +195,21 @@ impl Graph {
         let _guard = self.0.sessions.write().await;
         let engine = &self.0.engine.0;
         let mut state = self.0.lock();
-        let mut dirtied = false;
+        let mut dirtied = Vec::new();
         for key in keys {
             let Some(id) = engine.keys.get(key) else {
                 continue;
             };
             if let Some(node) = state.nodes.get_mut(&id.0) {
                 node.flags |= DIRTY;
-                dirtied = true;
+                dirtied.push(id.0);
             }
         }
-        if dirtied {
-            self.0.revision.fetch_add(1, Ordering::AcqRel);
+        if dirtied.is_empty() {
+            return;
         }
+        let previous = self.0.revision.fetch_add(1, Ordering::AcqRel);
+        state.keep_unreached(&dirtied, previous, previous + 1);
     }
 
     /// Every key of type `K` with a result in this graph, for finding which
@@ -504,6 +510,45 @@ impl GraphState {
         Ok(node.outcome())
     }
 
+    /// Carry the nodes that were valid at `previous` and that no dirtied
+    /// node's dependents reach over to `revision`, so that only what an
+    /// invalidation can affect is verified again.
+    fn keep_unreached(&mut self, dirtied: &[u32], previous: u32, revision: u32) {
+        let mut reached: rustc_hash::FxHashSet<u32> = dirtied.iter().copied().collect();
+        let mut pending: Vec<u32> = dirtied.to_vec();
+        while let Some(key) = pending.pop() {
+            let Some(dependents) = self.rdeps.get(&key) else {
+                continue;
+            };
+            for &dependent in dependents {
+                if reached.insert(dependent) {
+                    pending.push(dependent);
+                }
+            }
+        }
+        for (key, node) in self.nodes.iter_mut() {
+            let valid = node.verified_at == previous && node.flags & (DIRTY | TRANSIENT) == 0;
+            if valid && !reached.contains(key) {
+                node.verified_at = revision;
+            }
+        }
+    }
+
+    /// Note that `key`'s new result read `deps`.
+    fn add_rdeps(&mut self, key: u32, deps: &[Dep]) {
+        for dep in deps {
+            let dependents = self.rdeps.entry(dep.key.0).or_default();
+            if dependents.last() == Some(&key) {
+                continue;
+            }
+            dependents.push(key);
+            if dependents.len() >= 64 && dependents.len().is_power_of_two() {
+                dependents.sort_unstable();
+                dependents.dedup();
+            }
+        }
+    }
+
     /// Give a node a new result, from `trace`, returning the trace it had,
     /// which the node no longer holds.
     fn record(&mut self, key: KeyId, revision: u32, trace: ValueRef, decoded: Result<Arc<Trace>, SkyError>) -> (Result<Outcome, SkyError>, Option<ValueRef>) {
@@ -511,6 +556,9 @@ impl GraphState {
             Ok(decoded) => (decoded.value, decoded.flags),
             Err(_) => (trace, ERROR | TRANSIENT),
         };
+        if let Ok(decoded) = &decoded {
+            self.add_rdeps(key.0, &decoded.deps);
+        }
         let node = Node {
             trace,
             value,
