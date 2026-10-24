@@ -7,7 +7,7 @@ with a local action cache and local, unisolated execution, and it's designed to
 be trivial to run:
 
 ```
-buildbox up
+bb up
 ```
 
 I built it for reproducible builds at home, and to build with Linux-only
@@ -34,7 +34,7 @@ Buildbox is built with Bazel. Install
 [bazelisk](https://github.com/bazelbuild/bazelisk) as `bazel`; every toolchain,
 including the C toolchain and sysroot, is downloaded by Bazel.
 
-To build and install `buildbox` to `~/.local/bin`:
+To build and install buildbox as `bb` in `~/.local/bin`:
 
 ```
 ./install.sh
@@ -48,7 +48,7 @@ Set `PREFIX` to install elsewhere: `PREFIX=/usr/local ./install.sh` installs to
 Start the server:
 
 ```
-buildbox up
+bb up
 ```
 
 Then point Bazel at it, in your project's `.bazelrc`:
@@ -63,13 +63,13 @@ that Bazel downloads (rather than ones installed on the host) make this easy.
 While the server runs, the CLI can inspect it:
 
 ```
-$ buildbox status
+$ bb status
 buildbox 0.1.0, up 2h 5m
 CAS           34102 blobs, 9.2 GiB      /home/me/.cache/buildbox/cas
 Action cache  381 entries, 161.6 KiB    /home/me/.cache/buildbox/ac
 Actions       48 running, 4 queued, limit 48
 
-$ buildbox actions
+$ bb actions
 ID      STATE    TIME      COMMAND
 52      running  822ms     /bin/bash -c source external/bazel_tools/tools/genrule/genrule-setup.sh; ...
 ```
@@ -77,7 +77,7 @@ ID      STATE    TIME      COMMAND
 ## Configuration
 
 Settings come from built-in defaults, then an optional config file, then
-command-line flags, each overriding the last. `buildbox config` prints the
+command-line flags, each overriding the last. `bb config` prints the
 result.
 
 The config file is `$XDG_CONFIG_HOME/buildbox/config.toml` (usually
@@ -105,8 +105,8 @@ keep_sandboxes = false
 ```
 
 `~` is your home directory, and relative paths are relative to the config file.
-Each setting has a matching flag, e.g. `buildbox up --root /data/buildbox -j 16`;
-see `buildbox up --help`.
+Each setting has a matching flag, e.g. `bb up --root /data/buildbox -j 16`;
+see `bb up --help`.
 
 Keep `cas_dir` and `sandbox_dir` on the same filesystem, so inputs can be hard
 linked into sandboxes rather than copied.

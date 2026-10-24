@@ -4,7 +4,7 @@
 #
 # Usage: ./install.sh
 #
-# The binary is installed to $PREFIX/bin/buildbox, where PREFIX defaults to
+# The binary is installed to $PREFIX/bin/bb, where PREFIX defaults to
 # ~/.local.
 
 set -euo pipefail
@@ -35,8 +35,8 @@ fi
 binary="$(bazel info "${BAZEL_FLAGS[@]}" execution_root 2>/dev/null)/$outputs"
 
 install -d "$bin_dir"
-install -m 0755 "$binary" "$bin_dir/buildbox"
-echo "Installed buildbox to $bin_dir/buildbox"
+install -m 0755 "$binary" "$bin_dir/bb"
+echo "Installed buildbox to $bin_dir/bb"
 
 case ":$PATH:" in
   *":$bin_dir:"*) ;;

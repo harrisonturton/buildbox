@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 
 /// A Bazel remote execution server for running builds on this machine.
 #[derive(Parser)]
-#[command(version)]
+#[command(name = "bb", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
