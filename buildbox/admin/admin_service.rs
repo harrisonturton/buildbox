@@ -142,6 +142,7 @@ fn action_info(action: scheduler::ActionInfo, now: SystemTime) -> ActionInfo {
         action_digest: action.digest.to_string(),
         state: state.into(),
         arguments: action.arguments,
+        environment: action.environment,
         queued_millis: millis_since(action.queued_at, now),
         running_millis,
         ..Default::default()
@@ -164,6 +165,7 @@ mod tests {
     use cas_mem::MemCas;
     use executor::{Action, ExecuteError, Executor};
     use remote_execution_rust_connect::build::bazel::remote::execution::v2::{ActionResult, Command};
+    use std::collections::BTreeMap;
     use tokio::sync::Notify;
 
     /// An executor whose actions run until released.
@@ -189,13 +191,15 @@ mod tests {
             },
             input_root: cas::Digest::empty(),
             timeout: None,
+            platform: vec![],
         }
     }
 
     async fn service(executor: Arc<BlockingExecutor>, max_concurrent: usize) -> (AdminService, Arc<Scheduler>) {
         let cas = Arc::new(MemCas::new());
         cas.put_bytes(b"hello").await.unwrap();
-        let scheduler = Arc::new(Scheduler::new(executor, max_concurrent));
+        let environments = BTreeMap::from([(scheduler::DEFAULT_ENVIRONMENT.to_string(), executor as Arc<dyn Executor>)]);
+        let scheduler = Arc::new(Scheduler::new(environments, max_concurrent));
         let service = AdminService::new(
             cas,
             "/cas".to_string(),
@@ -273,6 +277,7 @@ mod tests {
         assert_eq!(info.action_digest, cas::Digest::of_bytes(b"compile").to_string());
         assert_eq!(info.state.as_known(), Some(ActionState::ACTION_STATE_RUNNING));
         assert_eq!(info.arguments, ["compile", "--flag"]);
+        assert_eq!(info.environment, scheduler::DEFAULT_ENVIRONMENT);
 
         release_until_finished(&executor, task).await;
     }

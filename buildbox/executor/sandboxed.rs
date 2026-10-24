@@ -202,6 +202,7 @@ mod tests {
             command,
             input_root,
             timeout: None,
+            platform: vec![],
         }
     }
 

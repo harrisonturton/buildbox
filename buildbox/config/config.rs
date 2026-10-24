@@ -4,6 +4,7 @@
 //! built-in defaults, an optional TOML config file, and command-line flags.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -34,6 +35,17 @@ pub struct Config {
     /// Where to append spans, as OTLP JSON. `None` means spans aren't
     /// exported.
     pub trace_file: Option<PathBuf>,
+
+    /// The environments actions can run in, by name.
+    pub environments: BTreeMap<String, ExecutionEnvironment>,
+}
+
+/// Where and how actions run. Actions choose an environment by name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionEnvironment {
+    /// Directly on this machine, with no isolation.
+    Local,
 }
 
 /// Settings that may be given in the config file or on the command line.
@@ -53,6 +65,7 @@ pub struct Settings {
     pub max_concurrent_actions: Option<usize>,
     pub keep_sandboxes: Option<bool>,
     pub trace_file: Option<PathBuf>,
+    pub environments: Option<BTreeMap<String, ExecutionEnvironment>>,
 }
 
 impl Settings {
@@ -67,6 +80,7 @@ impl Settings {
             max_concurrent_actions: overrides.max_concurrent_actions.or(self.max_concurrent_actions),
             keep_sandboxes: overrides.keep_sandboxes.or(self.keep_sandboxes),
             trace_file: overrides.trace_file.or(self.trace_file),
+            environments: overrides.environments.or(self.environments),
         }
     }
 
@@ -100,6 +114,9 @@ pub enum ConfigError {
 
     #[error("can't choose a default {what}: HOME isn't set")]
     NoDefault { what: &'static str },
+
+    #[error("invalid environment name {0:?}: use only letters, digits, '.', '_' and '-'")]
+    InvalidEnvironmentName(String),
 }
 
 /// The parts of the process environment the configuration depends on.
@@ -185,6 +202,11 @@ fn resolve(settings: Settings, env: &Environment) -> Result<Config, ConfigError>
         return Err(ConfigError::NoConcurrency);
     }
 
+    let environments = settings.environments.unwrap_or_default();
+    if let Some(name) = environments.keys().find(|name| !is_valid_environment_name(name)) {
+        return Err(ConfigError::InvalidEnvironmentName(name.clone()));
+    }
+
     let root = settings.root.or_else(|| env.default_root());
     let root = root.as_deref();
 
@@ -196,7 +218,13 @@ fn resolve(settings: Settings, env: &Environment) -> Result<Config, ConfigError>
         max_concurrent_actions,
         keep_sandboxes: settings.keep_sandboxes.unwrap_or(false),
         trace_file: settings.trace_file,
+        environments,
     })
+}
+
+fn is_valid_environment_name(name: &str) -> bool {
+    let is_allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+    !name.is_empty() && name.chars().all(is_allowed)
 }
 
 /// Use `dir` if it was set, or otherwise the subdirectory `name` of `root`.
@@ -282,6 +310,7 @@ mod tests {
                 max_concurrent_actions: 8,
                 keep_sandboxes: false,
                 trace_file: None,
+                environments: BTreeMap::new(),
             }
         );
     }
@@ -401,5 +430,39 @@ mod tests {
         let err = load(None, Settings::default(), &env).unwrap_err();
 
         assert!(matches!(err, ConfigError::NoDefault { .. }), "{err}");
+    }
+
+    #[test]
+    fn environments_are_read_from_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = test_env(dir.path());
+        write_default_config(&env, "[environments.default]\nkind = \"local\"\n");
+
+        let config = load(None, Settings::default(), &env).unwrap();
+
+        let expected = BTreeMap::from([("default".to_string(), ExecutionEnvironment::Local)]);
+        assert_eq!(config.environments, expected);
+    }
+
+    #[test]
+    fn invalid_environment_names_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = test_env(dir.path());
+        write_default_config(&env, "[environments.\"has space\"]\nkind = \"local\"\n");
+
+        let err = load(None, Settings::default(), &env).unwrap_err();
+
+        assert!(matches!(err, ConfigError::InvalidEnvironmentName(_)), "{err}");
+    }
+
+    #[test]
+    fn unknown_environment_kinds_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = test_env(dir.path());
+        write_default_config(&env, "[environments.vm]\nkind = \"virtual_machine\"\n");
+
+        let err = load(None, Settings::default(), &env).unwrap_err();
+
+        assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
     }
 }

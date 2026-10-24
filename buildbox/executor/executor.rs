@@ -24,6 +24,10 @@ pub struct Action {
     /// How long the action may run before it is stopped. `None` means no
     /// limit.
     pub timeout: Option<Duration>,
+
+    /// The action's platform properties, as name-value pairs. They describe
+    /// what the action needs from the machine it runs on.
+    pub platform: Vec<(String, String)>,
 }
 
 /// Runs actions.

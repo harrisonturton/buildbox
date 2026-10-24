@@ -58,6 +58,8 @@ impl ConfigArgs {
             max_concurrent_actions: self.max_concurrent_actions,
             keep_sandboxes: self.keep_sandboxes.then_some(true),
             trace_file: self.trace_file.clone(),
+            // Environments can only be set in the config file.
+            environments: None,
         };
         config::load(self.config.as_deref(), overrides, &Environment::from_process())
     }

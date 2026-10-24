@@ -91,12 +91,14 @@ impl ExecutionService {
             Some(timeout) => Some(parse_timeout(timeout)?),
             None => None,
         };
+        let platform = platform_properties(action, &command);
 
         Ok(executor::Action {
             digest: action_digest.clone(),
             command,
             input_root,
             timeout,
+            platform,
         })
     }
 
@@ -198,6 +200,25 @@ fn missing_blobs_details(digests: &[Digest]) -> Any {
     Any::pack(&failure, PreconditionFailure::TYPE_URL)
 }
 
+/// The action's platform properties. Clients older than REAPI v2.2 set them
+/// on the command rather than the action.
+fn platform_properties(action: &Action, command: &Command) -> Vec<(String, String)> {
+    let mut platform = action.platform.as_option();
+    let action_has_none = platform.is_none_or(|platform| platform.properties.is_empty());
+    if action_has_none {
+        platform = command.platform.as_option();
+    }
+
+    let Some(platform) = platform else {
+        return vec![];
+    };
+    platform
+        .properties
+        .iter()
+        .map(|property| (property.name.clone(), property.value.clone()))
+        .collect()
+}
+
 fn parse_timeout(timeout: &buffa_types::google::protobuf::Duration) -> Result<Duration, ConnectError> {
     Duration::try_from(timeout.clone()).map_err(|error| ConnectError::invalid_argument(format!("timeout: {error}")))
 }
@@ -209,14 +230,17 @@ mod tests {
     use buffa::Message;
     use cas_mem::MemCas;
     use connectrpc::ErrorCode;
-    use remote_execution_rust_connect::build::bazel::remote::execution::v2::Directory;
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::{platform, Directory, Platform};
     use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
 
-    /// An executor that returns a fixed outcome and counts its calls.
+    /// An executor that returns a fixed outcome, and records the platform of
+    /// each action it is asked to run.
     struct FakeExecutor {
         exit_code: i32,
         missing: Option<Digest>,
         calls: AtomicUsize,
+        platforms: Mutex<Vec<Vec<(String, String)>>>,
     }
 
     impl FakeExecutor {
@@ -225,6 +249,7 @@ mod tests {
                 exit_code,
                 missing: None,
                 calls: AtomicUsize::new(0),
+                platforms: Mutex::new(vec![]),
             })
         }
 
@@ -233,18 +258,24 @@ mod tests {
                 exit_code: 0,
                 missing: Some(digest),
                 calls: AtomicUsize::new(0),
+                platforms: Mutex::new(vec![]),
             })
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
+
+        fn platforms(&self) -> Vec<Vec<(String, String)>> {
+            self.platforms.lock().unwrap().clone()
+        }
     }
 
     #[async_trait::async_trait]
     impl Executor for FakeExecutor {
-        async fn execute(&self, _action: &executor::Action) -> Result<ActionResult, ExecuteError> {
+        async fn execute(&self, action: &executor::Action) -> Result<ActionResult, ExecuteError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.platforms.lock().unwrap().push(action.platform.clone());
             if let Some(digest) = &self.missing {
                 return Err(ExecuteError::MissingInputs(vec![digest.clone()]));
             }
@@ -262,14 +293,23 @@ mod tests {
     }
 
     async fn fixture(executor: Arc<FakeExecutor>, do_not_cache: bool) -> Fixture {
+        let action = Action {
+            do_not_cache,
+            ..Default::default()
+        };
+        fixture_with(executor, action, Command::default()).await
+    }
+
+    /// A fixture for running `action`, with its command and input root
+    /// filled in.
+    async fn fixture_with(executor: Arc<FakeExecutor>, action: Action, command: Command) -> Fixture {
         let cas = Arc::new(MemCas::new());
-        let command = cas.put_bytes(&Command::default().encode_to_vec()).await.unwrap();
+        let command = cas.put_bytes(&command.encode_to_vec()).await.unwrap();
         let input_root = cas.put_bytes(&Directory::default().encode_to_vec()).await.unwrap();
         let action = Action {
             command_digest: command.to_proto().into(),
             input_root_digest: input_root.to_proto().into(),
-            do_not_cache,
-            ..Default::default()
+            ..action
         };
         let action_digest = cas.put_bytes(&action.encode_to_vec()).await.unwrap();
 
@@ -354,5 +394,48 @@ mod tests {
         let err = f.service.run(&request(&absent, false)).await.unwrap_err();
 
         assert_eq!(err.code, ErrorCode::FailedPrecondition);
+    }
+
+    fn platform_with(name: &str, value: &str) -> Platform {
+        Platform {
+            properties: vec![platform::Property {
+                name: name.to_string(),
+                value: value.to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn passes_the_actions_platform_to_the_executor() {
+        let action = Action {
+            platform: platform_with("environment", "from-action").into(),
+            ..Default::default()
+        };
+        let command = Command {
+            platform: platform_with("environment", "from-command").into(),
+            ..Default::default()
+        };
+        let f = fixture_with(FakeExecutor::exiting_with(0), action, command).await;
+
+        f.service.run(&request(&f.action_digest, false)).await.unwrap();
+
+        let expected = vec![("environment".to_string(), "from-action".to_string())];
+        assert_eq!(f.executor.platforms(), [expected]);
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_the_commands_platform() {
+        let command = Command {
+            platform: platform_with("environment", "from-command").into(),
+            ..Default::default()
+        };
+        let f = fixture_with(FakeExecutor::exiting_with(0), Action::default(), command).await;
+
+        f.service.run(&request(&f.action_digest, false)).await.unwrap();
+
+        let expected = vec![("environment".to_string(), "from-command".to_string())];
+        assert_eq!(f.executor.platforms(), [expected]);
     }
 }

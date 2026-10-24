@@ -66,6 +66,9 @@ message ActionInfo {
 
   // How long the action has been running, or 0 if it is queued.
   uint64 running_millis = 6;
+
+  // The name of the environment the action runs in.
+  string environment = 7;
 }
 
 enum ActionState {

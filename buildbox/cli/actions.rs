@@ -25,7 +25,7 @@ pub async fn run(args: ActionsArgs) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    println!("{:<8}{:<9}{:<10}COMMAND", "ID", "STATE", "TIME");
+    println!("{:<8}{:<9}{:<10}{:<14}COMMAND", "ID", "STATE", "TIME", "ENVIRONMENT");
     for action in &response.actions {
         println!("{}", action_line(action));
     }
@@ -40,5 +40,6 @@ fn action_line(action: &ActionInfo) -> String {
     };
     let time = format::duration(Duration::from_millis(millis));
     let command = format::truncate(&action.arguments.join(" "), MAX_COMMAND_WIDTH);
-    format!("{:<8}{state:<9}{time:<10}{command}", action.id)
+    let environment = format::truncate(&action.environment, 13);
+    format!("{:<8}{state:<9}{time:<10}{environment:<14}{command}", action.id)
 }

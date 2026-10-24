@@ -5,13 +5,14 @@ use actioncache_fs::FsActionCache;
 use admin::AdminService;
 use cas::{Cas, CasError};
 use cas_fs::FsCas;
-use config::Config;
+use config::{Config, ExecutionEnvironment};
 use connectrpc::{ConnectRpcService, Limits, Router, Server};
 use executor::Executor;
 use executor_local::HostRunner;
 use executor_sandboxed::SandboxedExecutor;
 use reapi::{Invocations, RequestTracing, INVOCATION_IDLE_TIMEOUT, MAX_MESSAGE_SIZE_BYTES};
 use scheduler::Scheduler;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -57,8 +58,8 @@ pub enum ServerError {
 pub async fn run(config: &Config) -> Result<(), ServerError> {
     let cas: Arc<dyn Cas> = Arc::new(open_cas(config).await?);
     let action_cache: Arc<dyn ActionCache> = Arc::new(open_action_cache(config).await?);
-    let local_executor: Arc<dyn Executor> = Arc::new(open_executor(config, cas.clone()).await?);
-    let scheduler = Arc::new(Scheduler::new(local_executor, config.max_concurrent_actions));
+    let environments = open_environments(config, cas.clone()).await?;
+    let scheduler = Arc::new(Scheduler::new(environments, config.max_concurrent_actions));
 
     let execution_service = reapi::ExecutionService::new(cas.clone(), action_cache.clone(), scheduler.clone());
     let action_cache_service = reapi::ActionCacheService::new(cas.clone(), action_cache.clone());
@@ -148,7 +149,12 @@ async fn open_action_cache(config: &Config) -> Result<FsActionCache, ServerError
         .map_err(|error| ServerError::ActionCache { error })
 }
 
-async fn open_executor(config: &Config, cas: Arc<dyn Cas>) -> Result<SandboxedExecutor, ServerError> {
+/// Create an executor for each configured environment. Unless configured
+/// otherwise, the default environment runs actions locally.
+async fn open_environments(
+    config: &Config,
+    cas: Arc<dyn Cas>,
+) -> Result<BTreeMap<String, Arc<dyn Executor>>, ServerError> {
     tracing::info!("using sandbox directory {}", config.sandbox_dir.display());
     executor_sandboxed::prepare_sandbox_root(&config.sandbox_dir, config.keep_sandboxes)
         .await
@@ -157,9 +163,27 @@ async fn open_executor(config: &Config, cas: Arc<dyn Cas>) -> Result<SandboxedEx
             error,
         })?;
 
+    let mut environments = config.environments.clone();
+    environments
+        .entry(scheduler::DEFAULT_ENVIRONMENT.to_string())
+        .or_insert(ExecutionEnvironment::Local);
+
+    let mut executors = BTreeMap::new();
+    for (name, environment) in environments {
+        tracing::info!("environment {name:?}: {environment:?}");
+        let executor = match environment {
+            ExecutionEnvironment::Local => local_executor(config, cas.clone()),
+        };
+        executors.insert(name, executor);
+    }
+    Ok(executors)
+}
+
+fn local_executor(config: &Config, cas: Arc<dyn Cas>) -> Arc<dyn Executor> {
     let runner = Arc::new(HostRunner);
     let worker_name = "buildbox-local".to_string();
-    Ok(SandboxedExecutor::new(cas, config.sandbox_dir.clone(), config.keep_sandboxes, runner, worker_name))
+    let executor = SandboxedExecutor::new(cas, config.sandbox_dir.clone(), config.keep_sandboxes, runner, worker_name);
+    Arc::new(executor)
 }
 
 /// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM. Running
