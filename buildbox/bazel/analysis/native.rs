@@ -1,5 +1,6 @@
 //! The implementations of native rules.
 
+use crate::inputs::InputSet;
 use crate::action::{Action, ActionKind, RunfilesTree, Spawn};
 use crate::artifact::{self, Artifact};
 use crate::build_ctx::{Prepared, RuleInput, target_executable, target_files};
@@ -220,8 +221,7 @@ fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, he
     let mut inputs = srcs.clone();
     inputs.extend(tools);
     inputs.push(setup);
-    inputs.sort();
-    inputs.dedup();
+    let inputs = InputSet::of(inputs);
     let script = format!("source {}; {expanded}", setup.exec_path);
     let message = match input.string("message") {
         "" => "Executing genrule",

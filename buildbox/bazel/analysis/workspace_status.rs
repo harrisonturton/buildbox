@@ -4,6 +4,7 @@
 //! bb doesn't run `--workspace_status_command` yet, so the files hold
 //! fixed values, which keeps actions that read them cacheable.
 
+use crate::inputs::InputSet;
 use crate::action::{Action, ActionKind};
 use crate::artifact::Artifact;
 use bazel_config::BuildConfiguration;
@@ -43,7 +44,7 @@ fn write(output: Artifact, content: &str) -> Action {
     Action {
         mnemonic: Symbol::intern("WorkspaceStatus"),
         progress_message: String::new(),
-        inputs: Vec::new(),
+        inputs: InputSet::default(),
         runfiles: Vec::new(),
         outputs: vec![output],
         kind: ActionKind::Write {

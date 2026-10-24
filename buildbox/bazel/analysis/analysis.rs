@@ -18,6 +18,7 @@ mod configured;
 mod expand;
 mod file_value;
 mod fragments;
+mod inputs;
 mod native;
 mod platform;
 mod providers;
@@ -30,6 +31,7 @@ mod toolchains;
 mod workspace_status;
 
 pub use action::{Action, ActionKind, RunfilesTree, Spawn};
+pub use inputs::InputSet;
 pub use artifact::{Artifact, name_path, package_dir, repo_dir, runfiles_repo_name};
 pub use configured::{ConfiguredTarget, ConfiguredTargetKey, Incompatibility};
 pub use file_value::FileValue;

@@ -4,6 +4,7 @@ use crate::action::{Action, ActionKind, RunfilesTree};
 use crate::artifact::{self, Artifact};
 use crate::expand::LocationStyle;
 use crate::runfiles::Runfiles;
+use crate::inputs::InputSets;
 use crate::shared::Sharing;
 use bazel_config::BuildConfiguration;
 use bazel_label::{Label, LabelContext, RepoMappingTable};
@@ -30,6 +31,8 @@ pub struct RuleState {
     /// The runfiles trees of the executables of dependencies, which actions
     /// that run them need.
     pub tool_runfiles: RefCell<HashMap<Artifact, Arc<RunfilesTree>>>,
+    /// The input sets of the depsets actions read.
+    pub input_sets: RefCell<InputSets>,
     /// Make variables, such as `$(BINDIR)`, by name.
     pub make_variables: Vec<(String, String)>,
     /// The files `$(location)` expands each label to: those of the
@@ -49,6 +52,7 @@ impl RuleState {
             actions: RefCell::new(Vec::new()),
             declared: RefCell::new(Vec::new()),
             tool_runfiles: RefCell::new(HashMap::new()),
+            input_sets: RefCell::new(InputSets::default()),
             make_variables,
             locations: Vec::new(),
             target_constraints: Vec::new(),

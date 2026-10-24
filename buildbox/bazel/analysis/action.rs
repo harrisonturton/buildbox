@@ -1,6 +1,7 @@
 //! Actions: what analysis says to run to generate files.
 
 use crate::artifact::Artifact;
+use crate::inputs::InputSet;
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
 use std::sync::Arc;
@@ -12,7 +13,7 @@ pub struct Action {
     /// A short name for the kind of action, such as `Genrule`.
     pub mnemonic: Symbol,
     pub progress_message: String,
-    pub inputs: Vec<Artifact>,
+    pub inputs: InputSet,
     /// The runfiles trees of tools the action runs, which are inputs too.
     pub runfiles: Vec<Arc<RunfilesTree>>,
     pub outputs: Vec<Artifact>,
@@ -58,14 +59,19 @@ pub struct RunfilesTree {
 }
 
 impl Action {
-    /// Every artifact the action reads, including those of runfiles trees.
-    pub fn all_inputs(&self) -> impl Iterator<Item = &Artifact> {
-        let runfiles = self.runfiles.iter().flat_map(|tree| tree.entries.iter().map(|(_, artifact)| artifact));
+    /// Every artifact the action reads, including those of runfiles trees,
+    /// once each.
+    pub fn all_inputs(&self) -> Vec<Artifact> {
+        let runfiles = self.runfiles.iter().flat_map(|tree| tree.entries.iter().map(|(_, artifact)| *artifact));
         let template = match &self.kind {
-            ActionKind::Template { template, .. } => Some(template),
-            ActionKind::Symlink { target, .. } => Some(target),
+            ActionKind::Template { template, .. } => Some(*template),
+            ActionKind::Symlink { target, .. } => Some(*target),
             _ => None,
         };
-        self.inputs.iter().chain(runfiles).chain(template)
+        let mut all = self.inputs.to_vec();
+        all.extend(runfiles.chain(template));
+        all.sort();
+        all.dedup();
+        all
     }
 }

@@ -4,6 +4,7 @@
 use super::api::{self, CompilationFields, LibraryFiles, LinkVariables};
 use super::features::{FeatureConfiguration, Variables};
 use super::values::{CcStruct, CcToolchain, ToolchainConfigValue};
+use crate::inputs::InputSet;
 use crate::action::{Action, ActionKind, Spawn};
 use crate::artifact::{self, Artifact};
 use crate::build_ctx::{Prepared, RuleInput};
@@ -317,7 +318,7 @@ fn virtual_includes(input: &RuleInput, state: &RuleState, headers: &[Artifact]) 
         state.register(Action {
             mnemonic: Symbol::intern("Symlink"),
             progress_message: String::new(),
-            inputs: Vec::new(),
+            inputs: InputSet::default(),
             runfiles: Vec::new(),
             outputs: vec![link],
             kind: ActionKind::Symlink {
@@ -433,8 +434,8 @@ fn compile(
     srcs: &[Artifact],
 ) -> anyhow::Result<Vec<Artifact>> {
     let use_pic = configuration.is_enabled("supports_pic");
-    let headers = compilation.all_headers();
-    let toolchain_files = toolchain_files(toolchain, "compiler_files");
+    let headers = InputSet::of(compilation.all_headers());
+    let toolchain_files = toolchain_files(state, toolchain, "compiler_files")?;
     let package = artifact::package_dir(state.label.package);
     let mut objects = Vec::new();
     for source in srcs {
@@ -464,11 +465,7 @@ fn compile(
         variables.strings("preprocessor_defines", compilation.defines.iter().chain(&compilation.local_defines).cloned());
         let mut arguments = vec![configuration.tool(action)?.path.clone()];
         arguments.extend(configuration.command_line(action, &variables)?);
-        let mut inputs = vec![*source];
-        inputs.extend(headers.iter().copied());
-        inputs.extend(toolchain_files.iter().copied());
-        inputs.sort();
-        inputs.dedup();
+        let inputs = InputSet::new(vec![*source], vec![headers.clone(), toolchain_files.clone()]);
         state.register(Action {
             mnemonic: Symbol::intern("CppCompile"),
             progress_message: format!("Compiling {}", source.short_path()),
@@ -487,15 +484,15 @@ fn compile(
 }
 
 /// The files a toolchain's tools need for some actions, or all of them.
-fn toolchain_files(toolchain: &CcToolchain<'_>, set: &str) -> Vec<Artifact> {
-    let files = toolchain
-        .file_set(set)
-        .and_then(Depset::from_value)
-        .map(|depset| depset.to_list())
-        .filter(|files| !files.is_empty())
-        .or_else(|| toolchain.file_set("all_files").and_then(Depset::from_value).map(|depset| depset.to_list()))
-        .unwrap_or_default();
-    files.into_iter().filter_map(FileValue::artifact).collect()
+fn toolchain_files(state: &RuleState, toolchain: &CcToolchain<'_>, set: &str) -> anyhow::Result<InputSet> {
+    let mut sets = state.input_sets.borrow_mut();
+    if let Some(files) = toolchain.file_set(set).filter(|files| Depset::from_value(*files).is_some_and(|depset| !depset.is_empty())) {
+        return sets.convert(files, set);
+    }
+    match toolchain.file_set("all_files") {
+        Some(files) => sets.convert(files, "all_files"),
+        None => Ok(InputSet::default()),
+    }
 }
 
 /// Archive object files into `lib<name>.a`.
@@ -520,8 +517,7 @@ pub fn archive(
     variables.set("libraries_to_link", super::features::Variable::Sequence(libraries));
     let mut arguments = vec![configuration.tool(action)?.path.clone()];
     arguments.extend(configuration.command_line(action, &variables)?);
-    let mut inputs = objects.to_vec();
-    inputs.extend(toolchain_files(toolchain, "ar_files"));
+    let inputs = InputSet::new(objects.to_vec(), vec![toolchain_files(state, toolchain, "ar_files")?]);
     state.register(Action {
         mnemonic: Symbol::intern("CppArchive"),
         progress_message: format!("Linking {}", output.short_path()),
@@ -627,10 +623,7 @@ fn link_executable(
     let variables = link.variables(&toolchain.config);
     let mut arguments = vec![configuration.tool(action)?.path.clone()];
     arguments.extend(configuration.command_line(action, &variables)?);
-    let mut inputs = libraries.inputs;
-    inputs.extend(toolchain_files(toolchain, "linker_files"));
-    inputs.sort();
-    inputs.dedup();
+    let inputs = InputSet::new(libraries.inputs, vec![toolchain_files(state, toolchain, "linker_files")?]);
     state.register(Action {
         mnemonic: Symbol::intern("CppLink"),
         progress_message: format!("Linking {}", output.short_path()),
@@ -727,7 +720,7 @@ fn implicit_outputs(state: &RuleState, toolchain: &CcToolchain<'_>, configuratio
             state.register(Action {
                 mnemonic: Symbol::intern("CcGenerateDwp"),
                 progress_message: String::new(),
-                inputs: Vec::new(),
+                inputs: InputSet::default(),
                 runfiles: Vec::new(),
                 outputs: vec![*artifact],
                 kind: ActionKind::Write {
@@ -753,8 +746,7 @@ fn strip(state: &RuleState, toolchain: &CcToolchain<'_>, configuration: &Feature
     variables.strings("stripopts", Vec::new());
     let mut arguments = vec![tool, "-S".to_string(), "-p".to_string(), "-o".to_string(), output.exec_path.to_string(), input.exec_path.to_string()];
     arguments.extend(configuration.command_line(action, &variables)?);
-    let mut inputs = vec![input];
-    inputs.extend(toolchain_files(toolchain, "strip_files"));
+    let inputs = InputSet::new(vec![input], vec![toolchain_files(state, toolchain, "strip_files")?]);
     state.register(Action {
         mnemonic: Symbol::intern("CcStrip"),
         progress_message: format!("Stripping {}", output.short_path()),

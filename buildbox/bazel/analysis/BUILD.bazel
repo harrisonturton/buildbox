@@ -22,6 +22,7 @@ rust_library(
         "configured.rs",
         "expand.rs",
         "file_value.rs",
+        "inputs.rs",
         "fragments.rs",
         "native.rs",
         "platform.rs",

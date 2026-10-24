@@ -1,6 +1,7 @@
 //! `ctx.actions`: how rule implementations declare files and register the
 //! actions that generate them.
 
+use crate::inputs::InputSet;
 use crate::action::{Action, ActionKind, RunfilesTree, Spawn};
 use crate::args::{self, Args};
 use crate::artifact::{self, Artifact};
@@ -151,7 +152,7 @@ fn write_param_file(state: &RuleState, outputs: &[Artifact], args: &args::ArgsSt
     state.register(Action {
         mnemonic: Symbol::intern("ParamFile"),
         progress_message: String::new(),
-        inputs: Vec::new(),
+        inputs: InputSet::default(),
         runfiles: Vec::new(),
         outputs: vec![params],
         kind: ActionKind::Write {
@@ -178,15 +179,16 @@ fn string_dict(value: Option<Value<'_>>, what: &str) -> anyhow::Result<Vec<(Stri
 
 /// The text of a progress message, with `%{label}`, `%{input}` and
 /// `%{output}` substituted.
-fn progress_message(message: Option<&str>, state: &RuleState, inputs: &[Artifact], outputs: &[Artifact]) -> String {
+fn progress_message(message: Option<&str>, state: &RuleState, inputs: &InputSet, outputs: &[Artifact]) -> String {
     let Some(message) = message else {
         return String::new();
     };
     let first_path = |artifacts: &[Artifact]| artifacts.first().map(|artifact| artifact.exec_path.to_string()).unwrap_or_default();
+    let mut message = message.replace("%{label}", &state.label.to_string()).replace("%{output}", &first_path(outputs));
+    if message.contains("%{input}") {
+        message = message.replace("%{input}", &first_path(&inputs.to_vec()));
+    }
     message
-        .replace("%{label}", &state.label.to_string())
-        .replace("%{input}", &first_path(inputs))
-        .replace("%{output}", &first_path(outputs))
 }
 
 /// What `run` and `run_shell` share.
@@ -209,13 +211,16 @@ impl<'v> SpawnArgs<'v> {
         if outputs.is_empty() {
             anyhow::bail!("an action must have at least one output");
         }
-        let mut inputs = files(self.inputs, "inputs")?;
+        let declared = match self.inputs {
+            Some(inputs) => state.input_sets.borrow_mut().convert(inputs, "inputs")?,
+            None => InputSet::default(),
+        };
         tools.add_list(self.tools, state)?;
         let mut arguments = command;
-        arguments.extend(self::arguments(self.arguments, state, &outputs, &mut inputs)?);
-        inputs.extend(tools.inputs);
-        inputs.sort();
-        inputs.dedup();
+        let mut direct = Vec::new();
+        arguments.extend(self::arguments(self.arguments, state, &outputs, &mut direct)?);
+        direct.extend(tools.inputs);
+        let inputs = InputSet::new(direct, vec![declared]);
 
         let mut env = string_dict(self.env, "env")?;
         if self.use_default_shell_env {
@@ -259,7 +264,7 @@ fn transform_status_file<'v>(
     state.register(Action {
         mnemonic: Symbol::intern("TemplateExpand"),
         progress_message: String::new(),
-        inputs: Vec::new(),
+        inputs: InputSet::default(),
         runfiles: Vec::new(),
         outputs: vec![output],
         kind: ActionKind::Template {
@@ -352,7 +357,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         state.register(Action {
             mnemonic: Symbol::intern(mnemonic.unwrap_or("FileWrite")),
             progress_message: String::new(),
-            inputs: Vec::new(),
+            inputs: InputSet::default(),
             runfiles: Vec::new(),
             outputs: vec![output],
             kind: ActionKind::Write {
@@ -384,7 +389,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         state.register(Action {
             mnemonic: Symbol::intern("TemplateExpand"),
             progress_message: String::new(),
-            inputs: Vec::new(),
+            inputs: InputSet::default(),
             runfiles: Vec::new(),
             outputs: vec![output],
             kind: ActionKind::Template {
@@ -420,7 +425,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         state.register(Action {
             mnemonic: Symbol::intern("Symlink"),
             progress_message: String::new(),
-            inputs: Vec::new(),
+            inputs: InputSet::default(),
             runfiles: Vec::new(),
             outputs: vec![output],
             kind: ActionKind::Symlink {

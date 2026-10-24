@@ -106,8 +106,8 @@ pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnRe
 
 /// Run a spawn action, or reuse its cached result.
 pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action, spawn: &Spawn) -> Result<ActionOutputs, SkyError> {
-    let span = tracing::info_span!("action_inputs", inputs = action.inputs.len(), runfiles = action.runfiles.len());
-    let unique = unique_inputs(action);
+    let unique = action.all_inputs();
+    let span = tracing::info_span!("action_inputs", inputs = unique.len(), runfiles = action.runfiles.len());
     ready(ctx, &unique).instrument(span).await?;
     let _staged = backend.stage().await?;
     let (output_files, output_directories) = output_paths(action);
@@ -135,14 +135,6 @@ fn progress(action: &Action, owner: ConfiguredTargetKey) -> String {
     }
 }
 
-/// Every artifact the action reads, once each.
-fn unique_inputs(action: &Action) -> Vec<Artifact> {
-    let mut unique: Vec<Artifact> = action.all_inputs().copied().collect();
-    unique.sort();
-    unique.dedup();
-    unique
-}
-
 /// Wait until every input has been generated, keeping none of their
 /// digests, so that an action waiting on others holds no input tree.
 async fn ready(ctx: &Ctx, unique: &[Artifact]) -> Result<(), SkyError> {
@@ -154,7 +146,7 @@ async fn ready(ctx: &Ctx, unique: &[Artifact]) -> Result<(), SkyError> {
 /// Every input, by its path in the input tree: the action's inputs, and
 /// the entries of its tools' runfiles trees.
 async fn inputs(ctx: &Ctx, action: &Action, unique: Vec<Artifact>) -> Result<BTreeMap<String, Input>, SkyError> {
-    let mut paths: Vec<(String, Artifact)> = action.inputs.iter().map(|artifact| (artifact.exec_path.to_string(), *artifact)).collect();
+    let mut paths: Vec<(String, Artifact)> = action.inputs.to_vec().into_iter().map(|artifact| (artifact.exec_path.to_string(), artifact)).collect();
     for tree in &action.runfiles {
         for (path, artifact) in &tree.entries {
             paths.push((format!("{}/{path}", tree.dir), *artifact));
