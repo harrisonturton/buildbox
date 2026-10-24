@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package buildbox.bazel.v1;
+
+// Runs Bazel commands in a long-lived server shared by every workspace on
+// the machine.
+service Bazel {
+  // Run a command, such as `build` or `query`, streaming its output.
+  rpc Run(RunRequest) returns (stream RunResponse);
+}
+
+message RunRequest {
+  // The arguments after the program name: startup options, the command,
+  // and its arguments.
+  repeated string args = 1;
+
+  // The client's working directory.
+  string working_directory = 2;
+
+  // The client's environment.
+  repeated EnvironmentVariable env = 3;
+
+  // Whether the client's stderr is a terminal, for progress output.
+  bool interactive = 4;
+}
+
+message EnvironmentVariable {
+  string name = 1;
+  string value = 2;
+}
+
+message RunResponse {
+  oneof output {
+    // Output for the client's stdout.
+    bytes stdout = 1;
+
+    // Output for the client's stderr.
+    bytes stderr = 2;
+
+    // The command finished with this exit code. Always the last message.
+    int32 exit_code = 3;
+
+    // `bazel run`: the client should run this program, then exit with its
+    // exit code.
+    Exec exec = 4;
+  }
+}
+
+message Exec {
+  repeated string argv = 1;
+  string working_directory = 2;
+  repeated EnvironmentVariable env = 3;
+}

@@ -116,6 +116,7 @@ fn macros_record_their_generator() {
     };
     let generator = inner.generator.as_ref().expect("created by a macro");
     assert_eq!(generator.function.as_str(), "my_macro");
+    assert_eq!(generator.name.as_str(), "b");
     assert_eq!(inner.attr(Symbol::intern("flag")), Some(&AttrValue::Bool(false)));
 }
 

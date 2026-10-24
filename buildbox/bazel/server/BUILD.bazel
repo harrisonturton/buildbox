@@ -1,0 +1,53 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//bazel/connect:defs.bzl", "rust_connect_library")
+
+package(default_visibility = ["//visibility:private"])
+
+proto_library(
+    name = "bazel_proto",
+    srcs = ["bazel.proto"],
+)
+
+rust_connect_library(
+    name = "bazel_rust_connect",
+    protos = [":bazel_proto"],
+    visibility = [
+        "//buildbox/cli:__pkg__",
+        "//buildbox/server:__pkg__",
+    ],
+)
+
+rust_library(
+    name = "server",
+    srcs = [
+        "command.rs",
+        "commands.rs",
+        "output.rs",
+        "repos.rs",
+        "server.rs",
+        "service.rs",
+        "workspace.rs",
+    ],
+    crate_name = "bazel_server",
+    crate_root = "server.rs",
+    visibility = [
+        "//buildbox/cli:__pkg__",
+        "//buildbox/server:__pkg__",
+    ],
+    deps = [
+        ":bazel_rust_connect",
+        "//buildbox/bazel/fs",
+        "//buildbox/bazel/label",
+        "//buildbox/bazel/loading",
+        "//buildbox/bazel/options",
+        "//buildbox/bazel/query",
+        "//buildbox/intern",
+        "//buildbox/skycodec",
+        "//buildbox/skyframe",
+        "@crates//:connectrpc",
+        "@crates//:futures",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)

@@ -78,10 +78,15 @@ pub async fn format<C: Compute>(
             }
         }
         OutputFormat::Package => {
-            let packages: BTreeSet<PackageId> = targets.iter().map(|label| label.package).collect();
+            let packages: BTreeSet<String> = targets
+                .iter()
+                .map(|label| {
+                    let display = display_package(label.package, &mapping);
+                    display.strip_prefix("//").map(str::to_string).unwrap_or(display)
+                })
+                .collect();
             for package in packages {
-                let display = display_package(package, &mapping);
-                writeln!(out, "{}", display.strip_prefix("//").unwrap_or(&display)).ok();
+                writeln!(out, "{package}").ok();
             }
         }
         OutputFormat::Location => {
@@ -201,6 +206,18 @@ fn write_build(out: &mut String, target: &TargetRef, rule: &Rule, location: &str
     writeln!(out, "# {location}").ok();
     writeln!(out, "{kind}(").ok();
     writeln!(out, "  name = \"{}\",", rule.name).ok();
+    if let Some(generator) = &rule.generator {
+        let package = &target.package().id;
+        let build_file = if package.path.is_root() {
+            target.package().build_file.name.to_string()
+        } else {
+            format!("{}/{}", package.path, target.package().build_file.name)
+        };
+        let name = if generator.name.is_empty() { rule.name } else { generator.name };
+        writeln!(out, "  generator_name = \"{name}\",").ok();
+        writeln!(out, "  generator_function = \"{}\",", generator.function).ok();
+        writeln!(out, "  generator_location = \"{build_file}:{}:{}\",", generator.location.line, generator.location.column).ok();
+    }
     for (attr, value) in &rule.attrs {
         writeln!(out, "  {attr} = {},", build_value(value, mapping)).ok();
     }

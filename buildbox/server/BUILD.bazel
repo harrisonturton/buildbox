@@ -10,6 +10,7 @@ rust_library(
         "//buildbox/admin",
         "//buildbox/artifacts",
         "//buildbox/artifacts:fs",
+        "//buildbox/bazel/server",
         "//buildbox/cas",
         "//buildbox/cas:fs",
         "//buildbox/config",

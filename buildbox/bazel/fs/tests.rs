@@ -110,3 +110,26 @@ fn patterns_match_paths() {
         assert!(GlobPattern::parse(bad).is_err(), "{bad}");
     }
 }
+
+#[tokio::test]
+async fn changes_are_found_by_statting_again() {
+    let dir = tree();
+    let engine = Engine::default();
+    let changes = FileChanges::new();
+    let graph = engine.graph(Globals::new().with(workspace(dir.path())).with(changes.clone()));
+    let build = RootedPath::new(Root::Workspace, path("pkg/BUILD"));
+    let listing = RootedPath::new(Root::Workspace, path("pkg"));
+    {
+        let session = graph.session().await;
+        session.evaluate(&FileContentKey(build)).await.unwrap();
+        session.evaluate(&DirListingKey(listing)).await.unwrap();
+    }
+    assert_eq!(changes.len(), 2);
+    assert!(changes.changed().await.is_empty());
+
+    std::fs::write(dir.path().join("pkg/BUILD"), "changed and longer").unwrap();
+    std::fs::write(dir.path().join("pkg/new.cc"), "").unwrap();
+    let mut changed = changes.changed().await;
+    changed.sort_by_key(|p| p.path.to_string());
+    assert_eq!(changed, [listing, build]);
+}

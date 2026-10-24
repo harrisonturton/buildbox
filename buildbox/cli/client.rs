@@ -115,7 +115,7 @@ impl Admin {
 
 /// The URL to reach a server listening on `listen`. A server listening on
 /// every interface is reached through loopback.
-fn url_for(listen: SocketAddr) -> String {
+pub fn url_for(listen: SocketAddr) -> String {
     let ip = listen.ip();
     let ip = if !ip.is_unspecified() {
         ip

@@ -6,7 +6,10 @@
 //! them, such as [`Glob`] results, is an ordinary key, shared between
 //! workspaces that have the same files.
 
+mod changes;
 mod glob;
+
+pub use changes::FileChanges;
 
 pub use glob::{Glob, GlobError, GlobPattern, GlobResult};
 
@@ -87,7 +90,13 @@ impl Key for FileStateKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<FileState, SkyError> {
         let path = self.0.resolve(ctx)?;
-        blocking(move || stat(&path)).await
+        let changes = ctx.global::<FileChanges>().ok();
+        let rooted = self.0;
+        blocking(move || {
+            record(changes.as_deref(), rooted, &path);
+            stat(&path)
+        })
+        .await
     }
 }
 
@@ -145,7 +154,13 @@ impl Key for DirListingKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<DirListing, SkyError> {
         let path = self.0.resolve(ctx)?;
-        blocking(move || list(&path)).await
+        let changes = ctx.global::<FileChanges>().ok();
+        let rooted = self.0;
+        blocking(move || {
+            record(changes.as_deref(), rooted, &path);
+            list(&path)
+        })
+        .await
     }
 }
 
@@ -211,7 +226,13 @@ impl Key for FileContentKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<FileContent, SkyError> {
         let path = self.0.resolve(ctx)?;
-        blocking(move || read(&path)).await
+        let changes = ctx.global::<FileChanges>().ok();
+        let rooted = self.0;
+        blocking(move || {
+            record(changes.as_deref(), rooted, &path);
+            read(&path)
+        })
+        .await
     }
 }
 
@@ -220,6 +241,12 @@ fn read(path: &Path) -> Result<FileContent, SkyError> {
         Ok(bytes) => Ok(FileContent { bytes: Some(bytes) }),
         Err(error) if is_missing(&error) || error.kind() == ErrorKind::IsADirectory => Ok(FileContent { bytes: None }),
         Err(error) => Err(io_error("read", path, error)),
+    }
+}
+
+fn record(changes: Option<&FileChanges>, rooted: RootedPath, path: &Path) {
+    if let Some(changes) = changes {
+        changes.record(rooted, path);
     }
 }
 

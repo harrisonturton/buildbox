@@ -5,6 +5,7 @@ package(default_visibility = ["//visibility:private"])
 rust_library(
     name = "fs",
     srcs = [
+        "changes.rs",
         "fs.rs",
         "glob.rs",
         "tests.rs",
@@ -19,6 +20,7 @@ rust_library(
         "@crates//:rustc-hash",
         "@crates//:thiserror",
         "@crates//:tokio",
+        "@crates//:tracing",
     ],
 )
 

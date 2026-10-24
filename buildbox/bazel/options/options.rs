@@ -1,0 +1,254 @@
+//! Bazel's command lines: startup options, the command, its options from
+//! `.bazelrc` files and the command line, and the residue (target patterns
+//! or a query).
+
+mod rc;
+
+pub use rc::{RcFile, RcError, parse_rc_files};
+
+use std::collections::HashMap;
+
+/// The kind of value an option takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionKind {
+    /// `--flag`, `--noflag`, or `--flag=true|false|yes|no|1|0`.
+    Bool,
+    /// `--flag=value` or `--flag value`; the last one given wins.
+    Value,
+    /// `--flag=value` or `--flag value`, which may be given many times.
+    Multi,
+}
+
+/// The options a command knows, and their kinds.
+#[derive(Clone, Debug, Default)]
+pub struct OptionSpec {
+    kinds: HashMap<&'static str, OptionKind>,
+}
+
+impl OptionSpec {
+    pub fn new(options: &[(&'static str, OptionKind)]) -> OptionSpec {
+        OptionSpec {
+            kinds: options.iter().copied().collect(),
+        }
+    }
+
+    pub fn kind(&self, name: &str) -> Option<OptionKind> {
+        self.kinds.get(name).copied()
+    }
+}
+
+/// Options after parsing: each option's values in the order given, and the
+/// arguments that weren't options.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ParsedOptions {
+    values: Vec<(String, String)>,
+    pub residue: Vec<String>,
+    /// Options this command doesn't know, which were ignored.
+    pub unknown: Vec<String>,
+}
+
+impl ParsedOptions {
+    /// The last value given for `name`.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.values.iter().rev().find(|(option, _)| option == name).map(|(_, value)| value.as_str())
+    }
+
+    /// Every value given for `name`, in order.
+    pub fn all(&self, name: &str) -> Vec<&str> {
+        self.values.iter().filter(|(option, _)| option == name).map(|(_, value)| value.as_str()).collect()
+    }
+
+    /// A boolean option's value, or `default` if it wasn't given.
+    pub fn flag(&self, name: &str, default: bool) -> bool {
+        match self.get(name) {
+            Some(value) => parse_bool(value).unwrap_or(default),
+            None => default,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OptionsError {
+    #[error("expected a value after '--{0}'")]
+    MissingValue(String),
+
+    #[error("invalid value '{value}' for boolean option '--{name}'")]
+    InvalidBool { name: String, value: String },
+
+    #[error("config value '{0}' is not defined in any .rc file")]
+    UnknownConfig(String),
+
+    #[error("config expansion of '{0}' is recursive")]
+    RecursiveConfig(String),
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" | "yes" | "1" => Some(true),
+        "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse `args` against `spec`. `--config=name` is expanded with `rc`'s
+/// definitions for `command`. Unknown options are recorded and skipped, so
+/// tools that pass options this implementation lacks still work.
+pub fn parse(args: &[String], spec: &OptionSpec, rc: &RcFile, command: &str) -> Result<ParsedOptions, OptionsError> {
+    let mut parsed = ParsedOptions::default();
+    let mut expanding = Vec::new();
+    parse_into(args, spec, rc, command, &mut parsed, &mut expanding)?;
+    Ok(parsed)
+}
+
+fn parse_into(
+    args: &[String],
+    spec: &OptionSpec,
+    rc: &RcFile,
+    command: &str,
+    parsed: &mut ParsedOptions,
+    expanding: &mut Vec<String>,
+) -> Result<(), OptionsError> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        index += 1;
+        if arg == "--" {
+            parsed.residue.extend(args[index..].iter().cloned());
+            return Ok(());
+        }
+        let Some(option) = arg.strip_prefix("--") else {
+            if arg == "-k" {
+                parsed.values.push(("keep_going".into(), "true".into()));
+                continue;
+            }
+            parsed.residue.push(arg.clone());
+            continue;
+        };
+        let (name, inline) = match option.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (option, None),
+        };
+        if name == "config" {
+            let config = match inline {
+                Some(value) => value,
+                None => next_value(args, &mut index, name)?,
+            };
+            expand_config(&config, spec, rc, command, parsed, expanding)?;
+            continue;
+        }
+        match option_kind(spec, name) {
+            Some((name, OptionKind::Bool, negated)) => {
+                let value = match inline {
+                    Some(value) => parse_bool(&value).ok_or(OptionsError::InvalidBool {
+                        name: name.to_string(),
+                        value: value.clone(),
+                    })?,
+                    None => true,
+                };
+                parsed.values.push((name.to_string(), (value != negated).to_string()));
+            }
+            Some((name, _, _)) => {
+                let value = match inline {
+                    Some(value) => value,
+                    None => next_value(args, &mut index, name)?,
+                };
+                parsed.values.push((name.to_string(), value));
+            }
+            None => {
+                parsed.unknown.push(arg.clone());
+                if inline.is_none() && args.get(index).is_some_and(|next| !next.starts_with('-') && looks_like_value(next)) {
+                    index += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether an argument after an unknown `--option` is probably its value
+/// rather than a target pattern or query.
+fn looks_like_value(next: &str) -> bool {
+    !next.contains("//") && !next.contains(':') && !next.contains('(')
+}
+
+/// Find an option's kind, allowing `--noname` for boolean options.
+fn option_kind<'a>(spec: &OptionSpec, name: &'a str) -> Option<(&'a str, OptionKind, bool)> {
+    if let Some(kind) = spec.kind(name) {
+        return Some((name, kind, false));
+    }
+    let stripped = name.strip_prefix("no")?;
+    match spec.kind(stripped) {
+        Some(OptionKind::Bool) => Some((stripped, OptionKind::Bool, true)),
+        _ => None,
+    }
+}
+
+fn next_value(args: &[String], index: &mut usize, name: &str) -> Result<String, OptionsError> {
+    let Some(value) = args.get(*index) else {
+        return Err(OptionsError::MissingValue(name.to_string()));
+    };
+    *index += 1;
+    Ok(value.clone())
+}
+
+fn expand_config(
+    config: &str,
+    spec: &OptionSpec,
+    rc: &RcFile,
+    command: &str,
+    parsed: &mut ParsedOptions,
+    expanding: &mut Vec<String>,
+) -> Result<(), OptionsError> {
+    if expanding.iter().any(|name| name == config) {
+        return Err(OptionsError::RecursiveConfig(config.to_string()));
+    }
+    let Some(args) = rc.config_args(command, config) else {
+        return Err(OptionsError::UnknownConfig(config.to_string()));
+    };
+    expanding.push(config.to_string());
+    let mut expanded = ParsedOptions::default();
+    parse_into(&args, spec, rc, command, &mut expanded, expanding)?;
+    expanding.pop();
+    parsed.values.extend(expanded.values);
+    parsed.unknown.extend(expanded.unknown);
+    parsed.residue.extend(expanded.residue);
+    Ok(())
+}
+
+/// The commands each command inherits `.bazelrc` options from, most general
+/// first, as Bazel defines them.
+pub fn inherited_commands(command: &str) -> Vec<&'static str> {
+    let chain: &[&str] = match command {
+        "build" => &["build"],
+        "test" => &["build", "test"],
+        "run" => &["build", "run"],
+        "coverage" => &["build", "test", "coverage"],
+        "cquery" => &["build", "cquery"],
+        "aquery" => &["build", "aquery"],
+        "query" => &["query"],
+        "fetch" => &["fetch"],
+        "sync" => &["fetch", "sync"],
+        "info" => &["build", "info"],
+        "clean" => &["build", "clean"],
+        "mod" => &["mod"],
+        "print_action" => &["build", "print_action"],
+        "version" => &["version"],
+        _ => &[],
+    };
+    chain.to_vec()
+}
+
+/// A command's full argument list: options from `.bazelrc` files for the
+/// commands it inherits from, then the command line's.
+pub fn command_args(rc: &RcFile, command: &str, command_line: &[String]) -> Vec<String> {
+    let mut args = rc.command_args("always");
+    args.extend(rc.command_args("common"));
+    for inherited in inherited_commands(command) {
+        args.extend(rc.command_args(inherited));
+    }
+    args.extend(command_line.iter().cloned());
+    args
+}
+
+#[cfg(test)]
+mod tests;

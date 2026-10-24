@@ -3,6 +3,7 @@
 use actioncache::{ActionCache, ActionCacheError};
 use actioncache_fs::FsActionCache;
 use admin::{AdminService, Components};
+use bazel_server::{BazelServer, BazelService, ServerConfig};
 use artifacts::{ArtifactError, ArtifactStore};
 use artifacts_fs::FsArtifactStore;
 use cas::{Cas, CasError};
@@ -81,6 +82,11 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     let cas_service = reapi::ContentAddressableStorageService::new(cas.clone());
     let bytestream_service = reapi::ByteStreamService::new(cas.clone());
     let capabilities_service = reapi::CapabilitiesService::default();
+    let bazel_server = Arc::new(BazelServer::new(ServerConfig {
+        bazel_dir: config.bazel_dir.clone(),
+        home: std::env::var_os("HOME").map(PathBuf::from),
+    }));
+    let bazel_service = BazelService::new(bazel_server);
     let admin_service = AdminService::new(Components {
         cas: cas.clone(),
         cas_location: config.cas_dir.display().to_string(),
@@ -99,7 +105,8 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
         .add_service(Arc::new(cas_service))
         .add_service(Arc::new(bytestream_service))
         .add_service(Arc::new(capabilities_service))
-        .add_service(Arc::new(admin_service));
+        .add_service(Arc::new(admin_service))
+        .add_service(Arc::new(bazel_service));
     let limits = Limits::default()
         .with_max_message_size(MAX_MESSAGE_SIZE_BYTES)
         .with_max_request_body_size(MAX_MESSAGE_SIZE_BYTES);

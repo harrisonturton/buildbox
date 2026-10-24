@@ -116,6 +116,7 @@ fn native_classes() -> Vec<RuleClass> {
                 a("output_licenses", StringList),
                 a("output_to_bindir", Bool).nonconfigurable(),
                 a("stamp", Tristate).default(AttrValue::Int(0)),
+                a("$genrule_setup", Label).default(label("@@bazel_tools//tools/genrule:genrule-setup.sh")),
             ],
             false,
             false,

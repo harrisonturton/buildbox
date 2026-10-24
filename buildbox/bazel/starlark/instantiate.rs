@@ -113,12 +113,53 @@ fn call_site(eval: &Evaluator<'_, '_, '_>) -> (Location, Option<Generator>) {
     if stack.frames.len() < 2 {
         return (location, None);
     }
+    let name = outermost.location.as_ref().and_then(|span| literal_name(span.source_span()));
     let generator = Generator {
         function: Symbol::intern(&outermost.name),
-        name: Symbol::EMPTY,
+        name: name.map(|name| Symbol::intern(&name)).unwrap_or(Symbol::EMPTY),
         location,
     };
     (location, Some(generator))
+}
+
+/// The `name = "..."` argument of a call, if it's given as a literal at
+/// the call's top level, as macros' names almost always are.
+fn literal_name(call: &str) -> Option<String> {
+    let open = call.find('(')?;
+    let mut depth = 0;
+    let bytes = call.as_bytes();
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'"' | b'\'' => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() && bytes[index] != quote {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'n' if depth == 0 && call[index..].starts_with("name") && !is_ident(bytes.get(index.wrapping_sub(1))) => {
+                let rest = call[index + 4..].trim_start();
+                if let Some(value) = rest.strip_prefix('=') {
+                    let value = value.trim_start();
+                    let quote = value.chars().next()?;
+                    if quote == '"' || quote == '\'' {
+                        let end = value[1..].find(quote)?;
+                        return Some(value[1..1 + end].to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_ident(byte: Option<&u8>) -> bool {
+    byte.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 /// Where a call is, as Bazel reports it: at the call's opening

@@ -6,6 +6,7 @@ rust_binary(
     srcs = [
         "actions.rs",
         "artifacts.rs",
+        "bazel.rs",
         "blobs.rs",
         "client.rs",
         "config_args.rs",
@@ -20,6 +21,7 @@ rust_binary(
     visibility = ["//buildbox:__pkg__"],
     deps = [
         "//buildbox/admin:admin_rust_connect",
+        "//buildbox/bazel/server:bazel_rust_connect",
         "//buildbox/cas",
         "//buildbox/config",
         "//buildbox/container:namespaces",

@@ -60,6 +60,7 @@ impl ConfigArgs {
             action_cache_dir: self.action_cache_dir.clone(),
             sandbox_dir: self.sandbox_dir.clone(),
             artifacts_dir: self.artifacts_dir.clone(),
+            bazel_dir: None,
             max_concurrent_actions: self.max_concurrent_actions,
             keep_sandboxes: self.keep_sandboxes.then_some(true),
             trace_file: self.trace_file.clone(),

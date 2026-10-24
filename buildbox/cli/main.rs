@@ -2,6 +2,7 @@
 
 mod actions;
 mod artifacts;
+mod bazel;
 mod blobs;
 mod client;
 mod config_args;
@@ -56,6 +57,10 @@ fn main() -> ExitCode {
         return container_namespaces::helper_main(&args[2..]);
     }
 
+    if bazel::is_bazel_command(&args[0], &args[1..]) {
+        return run_bazel(args[1..].to_vec());
+    }
+
     let cli = Cli::parse();
     // The server sets up logging itself, once it has read its config, which
     // says where to send traces.
@@ -78,6 +83,26 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run a Bazel command in the server.
+fn run_bazel(args: Vec<OsString>) -> ExitCode {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("error: failed to start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(bazel::run(args));
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    match result {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("ERROR: {error}");
+            ExitCode::from(37)
         }
     }
 }
