@@ -52,6 +52,9 @@ static ALLOCATOR: dhat::Alloc = dhat::Alloc;
 /// which can't be cancelled.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The stack each runtime thread gets. See [`new_runtime`].
+const THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
+
 fn main() -> ExitCode {
     // The server runs this binary as its container helper, which must stay
     // single-threaded, so this comes before anything that might start
@@ -72,7 +75,7 @@ fn main() -> ExitCode {
         telemetry::init_logging();
     }
 
-    let runtime = match tokio::runtime::Runtime::new() {
+    let runtime = match new_runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("error: failed to start the async runtime: {error}");
@@ -89,6 +92,16 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The async runtime. Its threads evaluate Starlark, whose compiler
+/// recurses once per level of a nested expression, so they get more stack
+/// than the default 2 MiB; it's committed only as it's used.
+fn new_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(THREAD_STACK_SIZE)
+        .build()
 }
 
 /// Run a Bazel command in the server.
