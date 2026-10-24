@@ -13,6 +13,7 @@
 //! worktrees of one repository share almost all of their work and memory.
 
 mod cache;
+mod compute;
 mod ctx;
 mod engine;
 mod error;
@@ -23,6 +24,7 @@ mod kinds;
 mod trace;
 
 pub use cache::CacheStats;
+pub use compute::Compute;
 pub use ctx::Ctx;
 pub use engine::{Engine, EngineConfig, EngineStats, KindRow};
 pub use error::{ErrorKind, SkyError};

@@ -1,0 +1,47 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "loading",
+    srcs = [
+        "bzl.rs",
+        "loading.rs",
+        "package.rs",
+        "recursive.rs",
+        "rule_class.rs",
+    ],
+    crate_name = "bazel_loading",
+    crate_root = "loading.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/bazel/fs",
+        "//buildbox/bazel/label",
+        "//buildbox/bazel/packages",
+        "//buildbox/bazel/starlark",
+        "//buildbox/intern",
+        "//buildbox/skycodec",
+        "//buildbox/skyframe",
+        "@crates//:anyhow",
+        "@crates//:futures",
+        "@crates//:starlark",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "loading_test",
+    srcs = ["tests.rs"],
+    deps = [
+        ":loading",
+        "//buildbox/bazel/fs",
+        "//buildbox/bazel/label",
+        "//buildbox/bazel/packages",
+        "//buildbox/intern",
+        "//buildbox/skyframe",
+        "@crates//:futures",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+    ],
+)

@@ -6,6 +6,7 @@ rust_library(
     name = "skyframe",
     srcs = [
         "cache.rs",
+        "compute.rs",
         "ctx.rs",
         "engine.rs",
         "error.rs",
