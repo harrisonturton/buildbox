@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use cas::{CasError, Digest};
-use remote_execution_proto::build::bazel::remote::execution::v2::{ActionResult, Command};
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::{ActionResult, Command};
 use std::time::Duration;
 
 /// An action to run.

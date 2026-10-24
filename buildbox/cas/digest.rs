@@ -1,7 +1,7 @@
 //! Content digests: the SHA-256 hash and size of a blob.
 
 use data_encoding::HEXLOWER;
-use remote_execution_proto::build::bazel::remote::execution::v2 as reapi;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2 as reapi;
 use ring::digest::{Context, SHA256};
 use std::fmt;
 
@@ -87,6 +87,7 @@ impl Digest {
             hash: self.hash.clone(),
             // Can't truncate: `new` guarantees the size fits in an i64.
             size_bytes: self.size_bytes as i64,
+            ..Default::default()
         }
     }
 }
@@ -184,6 +185,7 @@ mod tests {
         let proto = reapi::Digest {
             hash: HELLO_HASH.to_string(),
             size_bytes: -1,
+            ..Default::default()
         };
         assert_eq!(Digest::from_proto(&proto), Err(DigestError::InvalidSize(-1)));
     }

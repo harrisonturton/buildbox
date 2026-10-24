@@ -2,9 +2,9 @@
 
 use actioncache::{ActionCache, ActionCacheError, Usage};
 use async_trait::async_trait;
+use buffa::Message;
 use cas::Digest;
-use prost::Message;
-use remote_execution_proto::build::bazel::remote::execution::v2::ActionResult;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::ActionResult;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 

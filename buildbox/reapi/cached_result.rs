@@ -2,15 +2,15 @@
 
 use crate::status;
 use actioncache::ActionCache;
+use buffa::Message;
 use cas::{Cas, CasError, Digest, DigestError};
-use prost::Message;
-use remote_execution_proto::build::bazel::remote::execution::v2::{ActionResult, Tree};
-use tonic::Status;
+use connectrpc::ConnectError;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::{ActionResult, Tree};
 
 /// Look up the cached result of an action, returning it only if every output
 /// it refers to is still in the CAS. Otherwise the client couldn't download
 /// the outputs, so the result is treated as missing.
-pub async fn lookup(cas: &dyn Cas, action_cache: &dyn ActionCache, action: &Digest) -> Result<Option<ActionResult>, Status> {
+pub async fn lookup(cas: &dyn Cas, action_cache: &dyn ActionCache, action: &Digest) -> Result<Option<ActionResult>, ConnectError> {
     let result = action_cache.get(action).await.map_err(status::from_action_cache_error)?;
     let Some(result) = result else {
         return Ok(None);
@@ -51,13 +51,14 @@ async fn outputs_present(cas: &dyn Cas, result: &ActionResult) -> Result<bool, O
     let mut digests = vec![];
 
     for file in &result.output_files {
-        digests.push(Digest::from_required_proto(file.digest.as_ref())?);
+        digests.push(Digest::from_required_proto(file.digest.as_option())?);
     }
-    for proto in [&result.stdout_digest, &result.stderr_digest].into_iter().flatten() {
+    let std_streams = [&result.stdout_digest, &result.stderr_digest];
+    for proto in std_streams.into_iter().filter_map(|digest| digest.as_option()) {
         digests.push(Digest::from_proto(proto)?);
     }
     for directory in &result.output_directories {
-        let tree_digest = Digest::from_required_proto(directory.tree_digest.as_ref())?;
+        let tree_digest = Digest::from_required_proto(directory.tree_digest.as_option())?;
         let Some(tree) = read_tree(cas, &tree_digest).await? else {
             return Ok(false);
         };
@@ -75,14 +76,14 @@ async fn read_tree(cas: &dyn Cas, digest: &Digest) -> Result<Option<Tree>, Outpu
         Err(CasError::NotFound(_)) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    Ok(Tree::decode(data.as_slice()).ok())
+    Ok(Tree::decode_from_slice(&data).ok())
 }
 
 fn add_tree_files(tree: &Tree, digests: &mut Vec<Digest>) -> Result<(), OutputsError> {
-    let directories = tree.root.iter().chain(&tree.children);
+    let directories = tree.root.as_option().into_iter().chain(&tree.children);
     for directory in directories {
         for file in &directory.files {
-            digests.push(Digest::from_required_proto(file.digest.as_ref())?);
+            digests.push(Digest::from_required_proto(file.digest.as_option())?);
         }
     }
     Ok(())
@@ -93,13 +94,13 @@ mod tests {
     use super::*;
     use actioncache_mem::MemActionCache;
     use cas_mem::MemCas;
-    use remote_execution_proto::build::bazel::remote::execution::v2::{Directory, FileNode, OutputDirectory, OutputFile};
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::{Directory, FileNode, OutputDirectory, OutputFile};
 
     fn result_with_output(digest: &Digest) -> ActionResult {
         ActionResult {
             output_files: vec![OutputFile {
                 path: "out".to_string(),
-                digest: Some(digest.to_proto()),
+                digest: digest.to_proto().into(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -148,21 +149,22 @@ mod tests {
         let cache = MemActionCache::new();
         let action = Digest::of_bytes(b"action");
         let tree = Tree {
-            root: Some(Directory {
+            root: Directory {
                 files: vec![FileNode {
                     name: "gone".to_string(),
-                    digest: Some(Digest::of_bytes(b"gone").to_proto()),
+                    digest: Digest::of_bytes(b"gone").to_proto().into(),
                     ..Default::default()
                 }],
                 ..Default::default()
-            }),
-            children: vec![],
+            }
+            .into(),
+            ..Default::default()
         };
         let tree_digest = cas.put_bytes(&tree.encode_to_vec()).await.unwrap();
         let result = ActionResult {
             output_directories: vec![OutputDirectory {
                 path: "dir".to_string(),
-                tree_digest: Some(tree_digest.to_proto()),
+                tree_digest: tree_digest.to_proto().into(),
                 ..Default::default()
             }],
             ..Default::default()

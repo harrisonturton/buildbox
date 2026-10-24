@@ -1,10 +1,10 @@
 //! Preparing for, and collecting, an action's outputs.
 
 use crate::paths;
+use buffa::Message;
 use cas::{Cas, Digest};
 use executor::ExecuteError;
-use prost::Message;
-use remote_execution_proto::build::bazel::remote::execution::v2::{
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::{
     Command, Directory, DirectoryNode, FileNode, OutputDirectory, OutputFile, SymlinkNode, Tree,
 };
 use std::fs::Metadata;
@@ -72,7 +72,7 @@ async fn collect_file(cas: &dyn Cas, output: &str, working_dir: &Path) -> Result
     let digest = cas.put_file(&path).await?;
     Ok(Some(OutputFile {
         path: output.to_string(),
-        digest: Some(digest.to_proto()),
+        digest: digest.to_proto().into(),
         is_executable: is_executable(&metadata),
         ..Default::default()
     }))
@@ -94,14 +94,15 @@ async fn collect_directory(
     let mut children = vec![];
     let root = build_directory(cas, path, &mut children).await?;
     let tree = Tree {
-        root: Some(root),
+        root: root.into(),
         children,
+        ..Default::default()
     };
     let tree_digest = cas.put_bytes(&tree.encode_to_vec()).await?;
 
     Ok(Some(OutputDirectory {
         path: output.to_string(),
-        tree_digest: Some(tree_digest.to_proto()),
+        tree_digest: tree_digest.to_proto().into(),
         ..Default::default()
     }))
 }
@@ -137,13 +138,14 @@ fn build_directory<'a>(
                 children.push(child);
                 directory.directories.push(DirectoryNode {
                     name,
-                    digest: Some(digest.to_proto()),
+                    digest: digest.to_proto().into(),
+                    ..Default::default()
                 });
             } else {
                 let digest = cas.put_file(&entry_path).await?;
                 directory.files.push(FileNode {
                     name,
-                    digest: Some(digest.to_proto()),
+                    digest: digest.to_proto().into(),
                     is_executable: is_executable(&metadata),
                     ..Default::default()
                 });
@@ -247,7 +249,7 @@ mod tests {
         assert_eq!(outputs.files.len(), 1);
         let file = &outputs.files[0];
         assert_eq!(file.path, "out.txt");
-        assert_eq!(file.digest, Some(Digest::of_bytes(b"output").to_proto()));
+        assert_eq!(file.digest, Digest::of_bytes(b"output").to_proto().into());
         assert!(!file.is_executable);
         assert_eq!(cas.read_bytes(&Digest::of_bytes(b"output")).await.unwrap(), b"output");
     }
@@ -292,8 +294,8 @@ mod tests {
 
         let outputs = collect_outputs(&cas, &command, dir.path()).await.unwrap();
 
-        let tree_digest = Digest::from_required_proto(outputs.directories[0].tree_digest.as_ref()).unwrap();
-        let tree = Tree::decode(cas.read_bytes(&tree_digest).await.unwrap().as_slice()).unwrap();
+        let tree_digest = Digest::from_required_proto(outputs.directories[0].tree_digest.as_option()).unwrap();
+        let tree = Tree::decode_from_slice(&cas.read_bytes(&tree_digest).await.unwrap()).unwrap();
         let root = tree.root.unwrap();
         let file_names: Vec<&str> = root.files.iter().map(|file| file.name.as_str()).collect();
         assert_eq!(file_names, ["a.txt", "b.txt"]);

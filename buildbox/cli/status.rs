@@ -2,7 +2,7 @@
 
 use crate::client::ClientArgs;
 use crate::format;
-use admin_proto::buildbox::admin::v1::{GetStatusRequest, StorageUsage};
+use admin_rust_connect::buildbox::admin::v1::StorageUsage;
 use clap::Args;
 use std::error::Error;
 use std::time::Duration;
@@ -14,19 +14,19 @@ pub struct StatusArgs {
 }
 
 pub async fn run(args: StatusArgs) -> Result<(), Box<dyn Error>> {
-    let mut client = args.client.connect().await?;
-    let status = client.get_status(GetStatusRequest {}).await?.into_inner();
+    let admin = args.client.connect()?;
+    let status = admin.get_status().await?;
 
     let uptime = format::duration(Duration::from_secs(status.uptime_seconds));
     println!("buildbox {}, up {uptime}", status.version);
 
-    if let Some(cas) = &status.cas {
+    if let Some(cas) = status.cas.as_option() {
         println!("{:<14}{}", "CAS", storage_line(cas, "blobs"));
     }
-    if let Some(action_cache) = &status.action_cache {
+    if let Some(action_cache) = status.action_cache.as_option() {
         println!("{:<14}{}", "Action cache", storage_line(action_cache, "entries"));
     }
-    if let Some(execution) = &status.execution {
+    if let Some(execution) = status.execution.as_option() {
         println!(
             "{:<14}{} running, {} queued, limit {}",
             "Actions", execution.running_actions, execution.queued_actions, execution.max_concurrent_actions

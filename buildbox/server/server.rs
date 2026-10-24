@@ -1,28 +1,23 @@
-//! Assembles the stores, executor and gRPC services, and serves them.
+//! Assembles the stores, executor and RPC services, and serves them.
 
 use actioncache::{ActionCache, ActionCacheError};
 use actioncache_fs::FsActionCache;
 use admin::AdminService;
-use admin_proto::buildbox::admin::v1::admin_server::AdminServer;
-use bytestream_proto::google::bytestream::byte_stream_server::ByteStreamServer;
 use cas::{Cas, CasError};
 use cas_fs::FsCas;
 use config::Config;
+use connectrpc::{ConnectRpcService, Limits, Router, Server};
 use executor::Executor;
 use executor_local::LocalExecutor;
 use reapi::MAX_MESSAGE_SIZE_BYTES;
-use remote_execution_proto::build::bazel::remote::execution::v2::action_cache_server::ActionCacheServer;
-use remote_execution_proto::build::bazel::remote::execution::v2::capabilities_server::CapabilitiesServer;
-use remote_execution_proto::build::bazel::remote::execution::v2::content_addressable_storage_server::ContentAddressableStorageServer;
-use remote_execution_proto::build::bazel::remote::execution::v2::execution_server::ExecutionServer;
 use scheduler::Scheduler;
+use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::oneshot;
-use tonic::transport::Server;
 
 /// How long requests may keep running after the server is asked to stop,
 /// before they are stopped too.
@@ -39,10 +34,16 @@ pub enum ServerError {
     #[error("failed to prepare the sandbox directory {}: {error}", path.display())]
     Sandbox { path: PathBuf, error: std::io::Error },
 
+    #[error("failed to listen on {addr}: {error}")]
+    Listen {
+        addr: SocketAddr,
+        error: Box<dyn Error + Send + Sync>,
+    },
+
     #[error("failed to serve on {addr}: {error}")]
     Serve {
         addr: SocketAddr,
-        error: tonic::transport::Error,
+        error: Box<dyn Error + Send + Sync>,
     },
 }
 
@@ -71,36 +72,33 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
         scheduler.clone(),
     );
 
+    // The services speak gRPC, which Bazel uses, as well as the Connect
+    // protocol and gRPC-Web.
+    let router = Router::new()
+        .add_service(Arc::new(execution_service))
+        .add_service(Arc::new(action_cache_service))
+        .add_service(Arc::new(cas_service))
+        .add_service(Arc::new(bytestream_service))
+        .add_service(Arc::new(capabilities_service))
+        .add_service(Arc::new(admin_service));
+    let limits = Limits::default()
+        .with_max_message_size(MAX_MESSAGE_SIZE_BYTES)
+        .with_max_request_body_size(MAX_MESSAGE_SIZE_BYTES);
+    let service = ConnectRpcService::new(router).with_limits(limits);
+
+    let listener = Server::bind(config.listen)
+        .await
+        .map_err(|error| ServerError::Listen {
+            addr: config.listen,
+            error,
+        })?;
     tracing::info!("listening on {}", config.listen);
     tracing::info!("running up to {} actions at once", config.max_concurrent_actions);
 
     let (stop, stopped) = oneshot::channel::<()>();
-    let serve = Server::builder()
-        .add_service(
-            ExecutionServer::new(execution_service)
-                .max_decoding_message_size(MAX_MESSAGE_SIZE_BYTES)
-                .max_encoding_message_size(MAX_MESSAGE_SIZE_BYTES),
-        )
-        .add_service(
-            ActionCacheServer::new(action_cache_service)
-                .max_decoding_message_size(MAX_MESSAGE_SIZE_BYTES)
-                .max_encoding_message_size(MAX_MESSAGE_SIZE_BYTES),
-        )
-        .add_service(
-            ContentAddressableStorageServer::new(cas_service)
-                .max_decoding_message_size(MAX_MESSAGE_SIZE_BYTES)
-                .max_encoding_message_size(MAX_MESSAGE_SIZE_BYTES),
-        )
-        .add_service(
-            ByteStreamServer::new(bytestream_service)
-                .max_decoding_message_size(MAX_MESSAGE_SIZE_BYTES)
-                .max_encoding_message_size(MAX_MESSAGE_SIZE_BYTES),
-        )
-        .add_service(CapabilitiesServer::new(capabilities_service))
-        .add_service(AdminServer::new(admin_service))
-        .serve_with_shutdown(config.listen, async {
-            let _ = stopped.await;
-        });
+    let serve = listener.serve_with_service_and_shutdown(service, async {
+        let _ = stopped.await;
+    });
     tokio::pin!(serve);
 
     tokio::select! {
@@ -119,7 +117,7 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     Ok(())
 }
 
-fn serve_result(config: &Config, result: Result<(), tonic::transport::Error>) -> Result<(), ServerError> {
+fn serve_result(config: &Config, result: Result<(), Box<dyn Error + Send + Sync>>) -> Result<(), ServerError> {
     result.map_err(|error| ServerError::Serve {
         addr: config.listen,
         error,

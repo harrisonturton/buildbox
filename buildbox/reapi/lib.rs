@@ -19,29 +19,26 @@ mod cached_result;
 mod status;
 
 use cas::{Cas, CasError, Digest};
-use std::pin::Pin;
-use tokio_stream::Stream;
-use tonic::Status;
-
-pub type ResponseStream<T> = Pin<Box<dyn Stream<Item = T> + Send + 'static>>;
+use connectrpc::ConnectError;
 
 /// The most data a client may send or request in one batch CAS call.
 pub const MAX_BATCH_TOTAL_SIZE_BYTES: u64 = 4 * 1024 * 1024;
 
-/// The largest gRPC message the services accept or send. Larger than the
-/// batch limit, to leave room for the rest of the message.
+/// The largest message the services accept. Larger than the batch limit, to
+/// leave room for the rest of the message.
 pub const MAX_MESSAGE_SIZE_BYTES: usize = 2 * MAX_BATCH_TOTAL_SIZE_BYTES as usize;
 
 /// Read a proto message the client stored in the CAS.
-async fn read_message<T: prost::Message + Default>(cas: &dyn Cas, digest: &Digest) -> Result<T, Status> {
+async fn read_message<T: buffa::Message>(cas: &dyn Cas, digest: &Digest) -> Result<T, ConnectError> {
     let data = match cas.read_bytes(digest).await {
         Ok(data) => data,
         Err(CasError::NotFound(digest)) => {
-            return Err(Status::failed_precondition(format!("blob {digest} not found")));
+            return Err(ConnectError::failed_precondition(format!("blob {digest} not found")));
         }
         Err(error) => return Err(status::from_cas_error(error)),
     };
 
     let type_name = std::any::type_name::<T>();
-    T::decode(data.as_slice()).map_err(|error| Status::invalid_argument(format!("blob {digest} isn't a {type_name}: {error}")))
+    T::decode_from_slice(&data)
+        .map_err(|error| ConnectError::invalid_argument(format!("blob {digest} isn't a {type_name}: {error}")))
 }

@@ -5,7 +5,7 @@
 
 use actioncache::ActionCache;
 use cas::Digest;
-use remote_execution_proto::build::bazel::remote::execution::v2::ActionResult;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::ActionResult;
 use std::future::Future;
 use std::path::PathBuf;
 
@@ -40,7 +40,7 @@ where
 fn result_with_exit_code(exit_code: i32) -> ActionResult {
     ActionResult {
         exit_code,
-        stdout_digest: Some(Digest::of_bytes(b"stdout").to_proto()),
+        stdout_digest: Digest::of_bytes(b"stdout").to_proto().into(),
         ..Default::default()
     }
 }

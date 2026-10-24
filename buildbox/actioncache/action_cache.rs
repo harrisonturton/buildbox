@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use cas::Digest;
-use remote_execution_proto::build::bazel::remote::execution::v2::ActionResult;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::ActionResult;
 
 /// Maps action digests to the results of running those actions.
 ///

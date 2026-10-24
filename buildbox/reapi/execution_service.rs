@@ -1,27 +1,21 @@
 //! The Execution service, which runs actions.
 
-use crate::{cached_result, status, ResponseStream};
+use crate::{cached_result, status};
 use actioncache::ActionCache;
-use any_proto::google::protobuf::Any;
+use buffa_types::google::protobuf::Any;
 use cas::{Cas, Digest};
-use error_details_proto::google::rpc::precondition_failure::Violation;
-use error_details_proto::google::rpc::PreconditionFailure;
+use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
 use executor::{ExecuteError, Executor};
-use operations_proto::google::longrunning::{operation, Operation};
-use prost::Message;
-use remote_execution_proto::build::bazel::remote::execution::v2::execution_server::Execution;
-use remote_execution_proto::build::bazel::remote::execution::v2::{
-    Action, ActionResult, Command, ExecuteRequest, ExecuteResponse, WaitExecutionRequest,
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::{
+    Action, ActionResult, Command, ExecuteRequest, ExecuteResponse, Execution, WaitExecutionRequest,
 };
-use status_proto::google::rpc;
+use remote_execution_rust_connect::google::longrunning::{operation, Operation};
+use remote_execution_rust_connect::google::rpc;
+use remote_execution_rust_connect::google::rpc::precondition_failure::Violation;
+use remote_execution_rust_connect::google::rpc::PreconditionFailure;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status};
-
-const EXECUTE_RESPONSE_TYPE_URL: &str = "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteResponse";
-const PRECONDITION_FAILURE_TYPE_URL: &str = "type.googleapis.com/google.rpc.PreconditionFailure";
 
 /// The violation type the protocol uses for blobs missing from the CAS.
 const MISSING_VIOLATION_TYPE: &str = "MISSING";
@@ -47,8 +41,8 @@ impl ExecutionService {
     ///
     /// Problems with the request itself are returned as errors. Problems
     /// running the action are reported in the response's status.
-    async fn run(&self, request: &ExecuteRequest) -> Result<ExecuteResponse, Status> {
-        let action_digest = Digest::from_required_proto(request.action_digest.as_ref())
+    async fn run(&self, request: &ExecuteRequest) -> Result<ExecuteResponse, ConnectError> {
+        let action_digest = Digest::from_required_proto(request.action_digest.as_option())
             .map_err(|error| status::invalid_digest("action_digest", error))?;
 
         if !request.skip_cache_lookup {
@@ -77,16 +71,16 @@ impl ExecutionService {
     }
 
     /// Fetch everything the executor needs to run `action`.
-    async fn resolve(&self, action_digest: &Digest, action: &Action) -> Result<executor::Action, Status> {
-        let command_digest = Digest::from_required_proto(action.command_digest.as_ref())
+    async fn resolve(&self, action_digest: &Digest, action: &Action) -> Result<executor::Action, ConnectError> {
+        let command_digest = Digest::from_required_proto(action.command_digest.as_option())
             .map_err(|error| status::invalid_digest("command_digest", error))?;
         let command: Command = crate::read_message(&*self.cas, &command_digest).await?;
 
-        let input_root = Digest::from_required_proto(action.input_root_digest.as_ref())
+        let input_root = Digest::from_required_proto(action.input_root_digest.as_option())
             .map_err(|error| status::invalid_digest("input_root_digest", error))?;
 
-        let timeout = match &action.timeout {
-            Some(timeout) => Some(parse_timeout(timeout.seconds, timeout.nanos)?),
+        let timeout = match action.timeout.as_option() {
+            Some(timeout) => Some(parse_timeout(timeout)?),
             None => None,
         };
 
@@ -104,58 +98,57 @@ impl ExecutionService {
     }
 }
 
-#[tonic::async_trait]
+// Generated traits return `impl Encodable<M>`; handlers narrow that to `M`.
+#[allow(refining_impl_trait)]
 impl Execution for ExecutionService {
-    type ExecuteStream = ReceiverStream<Result<Operation, Status>>;
-
-    async fn execute(&self, request: Request<ExecuteRequest>) -> Result<Response<Self::ExecuteStream>, Status> {
-        let request = request.into_inner();
+    async fn execute(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, ExecuteRequest>,
+    ) -> ServiceResult<ServiceStream<Operation>> {
+        let request = request.to_owned_message();
         // Run the action before responding, so that if the client goes away
         // this future is dropped, which stops the action.
         let response = self.run(&request).await?;
 
         let operation = Operation {
             name: self.new_operation_name(),
-            metadata: None,
             done: true,
-            result: Some(operation::Result::Response(Any {
-                type_url: EXECUTE_RESPONSE_TYPE_URL.to_string(),
-                value: response.encode_to_vec(),
-            })),
+            result: Some(operation::Result::Response(Box::new(Any::pack(
+                &response,
+                ExecuteResponse::TYPE_URL,
+            )))),
+            ..Default::default()
         };
-
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        // The receiver is still held, so this can't fail.
-        let _ = sender.send(Ok(operation)).await;
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        let stream: ServiceStream<Operation> = Box::pin(tokio_stream::once(Ok(operation)));
+        Response::ok(stream)
     }
-
-    type WaitExecutionStream = ResponseStream<Result<Operation, Status>>;
 
     /// Operations are complete by the time `Execute` returns them, so there
     /// is never one to wait for. NOT_FOUND tells the client to execute again.
     async fn wait_execution(
         &self,
-        request: Request<WaitExecutionRequest>,
-    ) -> Result<Response<Self::WaitExecutionStream>, Status> {
-        let name = request.into_inner().name;
-        Err(Status::not_found(format!("operation {name:?} not found")))
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, WaitExecutionRequest>,
+    ) -> ServiceResult<ServiceStream<Operation>> {
+        let name = request.name;
+        Err(ConnectError::not_found(format!("operation {name:?} not found")))
     }
 }
 
 fn cached_response(result: ActionResult) -> ExecuteResponse {
     ExecuteResponse {
-        result: Some(result),
+        result: result.into(),
         cached_result: true,
-        status: Some(rpc::Status::default()),
+        status: rpc::Status::default().into(),
         ..Default::default()
     }
 }
 
 fn executed_response(result: ActionResult) -> ExecuteResponse {
     ExecuteResponse {
-        result: Some(result),
-        status: Some(rpc::Status::default()),
+        result: result.into(),
+        status: rpc::Status::default().into(),
         ..Default::default()
     }
 }
@@ -167,13 +160,12 @@ fn error_response(error: ExecuteError) -> ExecuteResponse {
         _ => vec![],
     };
 
-    let status = status::from_execute_error(error);
+    let status = rpc::Status {
+        details,
+        ..status::to_rpc_status(status::from_execute_error(error))
+    };
     ExecuteResponse {
-        status: Some(rpc::Status {
-            code: status.code() as i32,
-            message: status.message().to_string(),
-            details,
-        }),
+        status: status.into(),
         ..Default::default()
     }
 }
@@ -186,31 +178,29 @@ fn missing_blobs_details(digests: &[Digest]) -> Any {
         .map(|digest| Violation {
             r#type: MISSING_VIOLATION_TYPE.to_string(),
             subject: format!("blobs/{digest}"),
-            description: String::new(),
+            ..Default::default()
         })
         .collect();
 
-    let failure = PreconditionFailure { violations };
-    Any {
-        type_url: PRECONDITION_FAILURE_TYPE_URL.to_string(),
-        value: failure.encode_to_vec(),
-    }
+    let failure = PreconditionFailure {
+        violations,
+        ..Default::default()
+    };
+    Any::pack(&failure, PreconditionFailure::TYPE_URL)
 }
 
-fn parse_timeout(seconds: i64, nanos: i32) -> Result<Duration, Status> {
-    let (Ok(seconds), Ok(nanos)) = (u64::try_from(seconds), u32::try_from(nanos)) else {
-        return Err(Status::invalid_argument("timeout must not be negative"));
-    };
-    Ok(Duration::new(seconds, nanos))
+fn parse_timeout(timeout: &buffa_types::google::protobuf::Duration) -> Result<Duration, ConnectError> {
+    Duration::try_from(timeout.clone()).map_err(|error| ConnectError::invalid_argument(format!("timeout: {error}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tonic::Code;
     use actioncache_mem::MemActionCache;
+    use buffa::Message;
     use cas_mem::MemCas;
-    use remote_execution_proto::build::bazel::remote::execution::v2::Directory;
+    use connectrpc::ErrorCode;
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::Directory;
     use std::sync::atomic::AtomicUsize;
 
     /// An executor that returns a fixed outcome and counts its calls.
@@ -242,7 +232,7 @@ mod tests {
         }
     }
 
-    #[tonic::async_trait]
+    #[async_trait::async_trait]
     impl Executor for FakeExecutor {
         async fn execute(&self, _action: &executor::Action) -> Result<ActionResult, ExecuteError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -267,8 +257,8 @@ mod tests {
         let command = cas.put_bytes(&Command::default().encode_to_vec()).await.unwrap();
         let input_root = cas.put_bytes(&Directory::default().encode_to_vec()).await.unwrap();
         let action = Action {
-            command_digest: Some(command.to_proto()),
-            input_root_digest: Some(input_root.to_proto()),
+            command_digest: command.to_proto().into(),
+            input_root_digest: input_root.to_proto().into(),
             do_not_cache,
             ..Default::default()
         };
@@ -284,7 +274,7 @@ mod tests {
 
     fn request(action_digest: &Digest, skip_cache_lookup: bool) -> ExecuteRequest {
         ExecuteRequest {
-            action_digest: Some(action_digest.to_proto()),
+            action_digest: action_digest.to_proto().into(),
             skip_cache_lookup,
             ..Default::default()
         }
@@ -341,8 +331,8 @@ mod tests {
         let response = f.service.run(&request(&f.action_digest, false)).await.unwrap();
 
         let status = response.status.unwrap();
-        assert_eq!(status.code, Code::FailedPrecondition as i32);
-        let failure = PreconditionFailure::decode(status.details[0].value.as_slice()).unwrap();
+        assert_eq!(status.code, ErrorCode::FailedPrecondition.grpc_code() as i32);
+        let failure: PreconditionFailure = status.details[0].unpack_unchecked().unwrap();
         assert_eq!(failure.violations[0].r#type, "MISSING");
         assert_eq!(failure.violations[0].subject, format!("blobs/{missing}"));
     }
@@ -354,6 +344,6 @@ mod tests {
 
         let err = f.service.run(&request(&absent, false)).await.unwrap_err();
 
-        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert_eq!(err.code, ErrorCode::FailedPrecondition);
     }
 }

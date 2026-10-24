@@ -1,12 +1,15 @@
 //! Connecting to a running server's admin API.
 
-use admin_proto::buildbox::admin::v1::admin_client::AdminClient;
+use admin_rust_connect::buildbox::admin::v1::{
+    AdminClient, GetStatusRequest, GetStatusResponse, ListActionsRequest, ListActionsResponse,
+};
 use clap::Args;
 use config::{Environment, Settings};
+use connectrpc::client::{ClientConfig, HttpClient};
+use connectrpc::ConnectError;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use tonic::transport::{Channel, Endpoint};
 
 #[derive(Args, Debug)]
 pub struct ClientArgs {
@@ -21,23 +24,53 @@ pub struct ClientArgs {
 }
 
 impl ClientArgs {
-    pub async fn connect(&self) -> Result<AdminClient<Channel>, Box<dyn Error>> {
+    pub fn connect(&self) -> Result<Admin, Box<dyn Error>> {
         let url = match &self.server {
             Some(url) => url.clone(),
             None => self.configured_url()?,
         };
 
-        let endpoint = Endpoint::from_shared(url.clone())?;
-        match AdminClient::connect(endpoint).await {
-            Ok(client) => Ok(client),
-            Err(error) => Err(format!("failed to connect to {url}: {error}").into()),
-        }
+        let uri = match url.parse() {
+            Ok(uri) => uri,
+            Err(error) => return Err(format!("invalid server URL {url:?}: {error}").into()),
+        };
+        let client = AdminClient::new(HttpClient::plaintext(), ClientConfig::new(uri));
+        Ok(Admin { client, url })
     }
 
     fn configured_url(&self) -> Result<String, Box<dyn Error>> {
         let env = Environment::from_process();
         let config = config::load(self.config.as_deref(), Settings::default(), &env)?;
         Ok(url_for(config.listen))
+    }
+}
+
+/// A client for a server's admin API. Connections are made as calls need
+/// them, so an unreachable server is reported by the first call.
+pub struct Admin {
+    client: AdminClient<HttpClient>,
+    url: String,
+}
+
+impl Admin {
+    pub async fn get_status(&self) -> Result<GetStatusResponse, Box<dyn Error>> {
+        let response = self.client.get_status(GetStatusRequest::default()).await;
+        match response {
+            Ok(response) => Ok(response.into_owned()),
+            Err(error) => Err(self.call_error(error)),
+        }
+    }
+
+    pub async fn list_actions(&self) -> Result<ListActionsResponse, Box<dyn Error>> {
+        let response = self.client.list_actions(ListActionsRequest::default()).await;
+        match response {
+            Ok(response) => Ok(response.into_owned()),
+            Err(error) => Err(self.call_error(error)),
+        }
+    }
+
+    fn call_error(&self, error: ConnectError) -> Box<dyn Error> {
+        format!("request to {} failed: {error}", self.url).into()
     }
 }
 

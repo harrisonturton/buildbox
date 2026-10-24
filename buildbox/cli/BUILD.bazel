@@ -16,13 +16,13 @@ rust_binary(
     version = VERSION,
     visibility = ["//buildbox:__pkg__"],
     deps = [
-        "//buildbox/admin:admin_rust_proto",
+        "//buildbox/admin:admin_rust_connect",
         "//buildbox/config",
         "//buildbox/server",
         "@crates//:clap",
+        "@crates//:connectrpc",
         "@crates//:tokio",
         "@crates//:toml",
-        "@crates//:tonic",
         "@crates//:tracing-subscriber",
     ],
 )

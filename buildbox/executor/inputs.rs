@@ -1,10 +1,10 @@
 //! Laying out an action's input tree in its sandbox.
 
 use crate::paths;
+use buffa::Message;
 use cas::{Cas, CasError, Digest};
 use executor::ExecuteError;
-use prost::Message;
-use remote_execution_proto::build::bazel::remote::execution::v2::Directory;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::Directory;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -61,7 +61,7 @@ async fn read_directory(cas: &dyn Cas, digest: &Digest) -> Result<Directory, Exe
         Err(error) => return Err(error.into()),
     };
 
-    Directory::decode(data.as_slice())
+    Directory::decode_from_slice(&data)
         .map_err(|error| ExecuteError::InvalidAction(format!("input directory {digest} isn't a Directory: {error}")))
 }
 
@@ -77,7 +77,7 @@ fn add_entries(
         paths::validate_name(&file.name).map_err(ExecuteError::InvalidAction)?;
         tree.files.push(InputFile {
             path: path.join(&file.name),
-            digest: parse_digest(file.digest.as_ref(), &file.name)?,
+            digest: parse_digest(file.digest.as_option(), &file.name)?,
             executable: file.is_executable,
         });
     }
@@ -92,14 +92,14 @@ fn add_entries(
 
     for child in &directory.directories {
         paths::validate_name(&child.name).map_err(ExecuteError::InvalidAction)?;
-        let digest = parse_digest(child.digest.as_ref(), &child.name)?;
+        let digest = parse_digest(child.digest.as_option(), &child.name)?;
         pending.push((path.join(&child.name), digest));
     }
     Ok(())
 }
 
 fn parse_digest(
-    proto: Option<&remote_execution_proto::build::bazel::remote::execution::v2::Digest>,
+    proto: Option<&remote_execution_rust_connect::build::bazel::remote::execution::v2::Digest>,
     name: &str,
 ) -> Result<Digest, ExecuteError> {
     Digest::from_required_proto(proto)
@@ -150,7 +150,7 @@ fn internal_error(action: &str, path: &Path, error: std::io::Error) -> ExecuteEr
 mod tests {
     use super::*;
     use cas_mem::MemCas;
-    use remote_execution_proto::build::bazel::remote::execution::v2::{DirectoryNode, FileNode, SymlinkNode};
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::{DirectoryNode, FileNode, SymlinkNode};
 
     async fn put_directory(cas: &MemCas, directory: &Directory) -> Digest {
         cas.put_bytes(&directory.encode_to_vec()).await.unwrap()
@@ -159,7 +159,7 @@ mod tests {
     fn file_node(name: &str, digest: &Digest, executable: bool) -> FileNode {
         FileNode {
             name: name.to_string(),
-            digest: Some(digest.to_proto()),
+            digest: digest.to_proto().into(),
             is_executable: executable,
             ..Default::default()
         }
@@ -168,7 +168,8 @@ mod tests {
     fn dir_node(name: &str, digest: &Digest) -> DirectoryNode {
         DirectoryNode {
             name: name.to_string(),
-            digest: Some(digest.to_proto()),
+            digest: digest.to_proto().into(),
+            ..Default::default()
         }
     }
 

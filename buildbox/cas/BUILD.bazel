@@ -12,7 +12,7 @@ rust_library(
     proc_macro_deps = ["@crates//:async-trait"],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
-        "//third_party/remoteapis:remote_execution_rust_proto",
+        "//third_party/remoteapis:remote_execution_rust_connect",
         "@crates//:data-encoding",
         "@crates//:ring",
         "@crates//:thiserror",

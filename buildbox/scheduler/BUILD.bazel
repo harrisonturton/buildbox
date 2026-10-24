@@ -11,7 +11,7 @@ rust_library(
     deps = [
         "//buildbox/cas",
         "//buildbox/executor",
-        "//third_party/remoteapis:remote_execution_rust_proto",
+        "//third_party/remoteapis:remote_execution_rust_connect",
         "@crates//:tokio",
     ],
 )

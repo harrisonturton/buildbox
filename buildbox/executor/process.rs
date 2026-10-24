@@ -1,7 +1,7 @@
 //! Running an action's command.
 
 use executor::ExecuteError;
-use remote_execution_proto::build::bazel::remote::execution::v2::Command;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::Command;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -173,7 +173,7 @@ fn exit_code(status: ExitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use remote_execution_proto::build::bazel::remote::execution::v2::command::EnvironmentVariable;
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::command::EnvironmentVariable;
 
     fn shell_command(script: &str) -> Command {
         Command {
@@ -201,6 +201,7 @@ mod tests {
         command.environment_variables = vec![EnvironmentVariable {
             name: "GREETING".to_string(),
             value: "hello".to_string(),
+            ..Default::default()
         }];
 
         let output = run(&command, dir.path(), None).await.unwrap();

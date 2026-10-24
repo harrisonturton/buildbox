@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use cas::Digest;
 use executor::{Action, ExecuteError, Executor};
-use remote_execution_proto::build::bazel::remote::execution::v2::ActionResult;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::ActionResult;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -133,7 +133,7 @@ impl Drop for Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use remote_execution_proto::build::bazel::remote::execution::v2::Command;
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::Command;
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
     use tokio::sync::Notify;

@@ -2,7 +2,7 @@
 
 use crate::client::ClientArgs;
 use crate::format;
-use admin_proto::buildbox::admin::v1::{ActionInfo, ActionState, ListActionsRequest};
+use admin_rust_connect::buildbox::admin::v1::{ActionInfo, ActionState};
 use clap::Args;
 use std::error::Error;
 use std::time::Duration;
@@ -17,8 +17,8 @@ pub struct ActionsArgs {
 }
 
 pub async fn run(args: ActionsArgs) -> Result<(), Box<dyn Error>> {
-    let mut client = args.client.connect().await?;
-    let response = client.list_actions(ListActionsRequest {}).await?.into_inner();
+    let admin = args.client.connect()?;
+    let response = admin.list_actions().await?;
 
     if response.actions.is_empty() {
         println!("No actions are queued or running.");
@@ -33,10 +33,10 @@ pub async fn run(args: ActionsArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn action_line(action: &ActionInfo) -> String {
-    let (state, millis) = match action.state() {
-        ActionState::Running => ("running", action.running_millis),
-        ActionState::Queued => ("queued", action.queued_millis),
-        ActionState::Unspecified => ("unknown", action.queued_millis),
+    let (state, millis) = match action.state.as_known() {
+        Some(ActionState::ACTION_STATE_RUNNING) => ("running", action.running_millis),
+        Some(ActionState::ACTION_STATE_QUEUED) => ("queued", action.queued_millis),
+        Some(ActionState::ACTION_STATE_UNSPECIFIED) | None => ("unknown", action.queued_millis),
     };
     let time = format::duration(Duration::from_millis(millis));
     let command = format::truncate(&action.arguments.join(" "), MAX_COMMAND_WIDTH);

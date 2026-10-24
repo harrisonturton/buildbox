@@ -3,12 +3,12 @@
 use crate::{cached_result, status};
 use actioncache::ActionCache;
 use cas::{Cas, Digest};
-use remote_execution_proto::build::bazel::remote::execution::v2::action_cache_server;
-use remote_execution_proto::build::bazel::remote::execution::v2::{
+use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult};
+use remote_execution_rust_connect::build::bazel::remote::execution::v2;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::{
     ActionResult, GetActionResultRequest, UpdateActionResultRequest,
 };
 use std::sync::Arc;
-use tonic::{Request, Response, Status};
 
 pub struct ActionCacheService {
     cas: Arc<dyn Cas>,
@@ -21,38 +21,41 @@ impl ActionCacheService {
     }
 }
 
-#[tonic::async_trait]
-impl action_cache_server::ActionCache for ActionCacheService {
+// Generated traits return `impl Encodable<M>`; handlers narrow that to `M`.
+#[allow(refining_impl_trait)]
+impl v2::ActionCache for ActionCacheService {
     async fn get_action_result(
         &self,
-        request: Request<GetActionResultRequest>,
-    ) -> Result<Response<ActionResult>, Status> {
-        let request = request.into_inner();
-        let action = Digest::from_required_proto(request.action_digest.as_ref())
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, GetActionResultRequest>,
+    ) -> ServiceResult<ActionResult> {
+        let request = request.to_owned_message();
+        let action = Digest::from_required_proto(request.action_digest.as_option())
             .map_err(|error| status::invalid_digest("action_digest", error))?;
 
         let result = cached_result::lookup(&*self.cas, &*self.action_cache, &action).await?;
         match result {
-            Some(result) => Ok(Response::new(result)),
-            None => Err(Status::not_found(format!("no cached result for action {action}"))),
+            Some(result) => Response::ok(result),
+            None => Err(ConnectError::not_found(format!("no cached result for action {action}"))),
         }
     }
 
     async fn update_action_result(
         &self,
-        request: Request<UpdateActionResultRequest>,
-    ) -> Result<Response<ActionResult>, Status> {
-        let request = request.into_inner();
-        let action = Digest::from_required_proto(request.action_digest.as_ref())
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, UpdateActionResultRequest>,
+    ) -> ServiceResult<ActionResult> {
+        let request = request.to_owned_message();
+        let action = Digest::from_required_proto(request.action_digest.as_option())
             .map_err(|error| status::invalid_digest("action_digest", error))?;
-        let Some(result) = request.action_result else {
-            return Err(Status::invalid_argument("action_result is missing"));
+        let Some(result) = request.action_result.into_option() else {
+            return Err(ConnectError::invalid_argument("action_result is missing"));
         };
 
         self.action_cache
             .put(&action, &result)
             .await
             .map_err(status::from_action_cache_error)?;
-        Ok(Response::new(result))
+        Response::ok(result)
     }
 }

@@ -7,14 +7,14 @@ mod process;
 mod sandbox;
 
 use async_trait::async_trait;
+use buffa_types::google::protobuf::Timestamp;
 use cas::Cas;
 use executor::{Action, ExecuteError, Executor};
-use remote_execution_proto::build::bazel::remote::execution::v2::{ActionResult, ExecutedActionMetadata};
-use remote_execution_proto::timestamp_proto::google::protobuf::Timestamp;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::{ActionResult, ExecutedActionMetadata};
 use sandbox::Sandbox;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 const WORKER_NAME: &str = "buildbox-local";
 
@@ -82,45 +82,36 @@ impl Executor for LocalExecutor {
 
         let metadata = ExecutedActionMetadata {
             worker: WORKER_NAME.to_string(),
-            execution_start_timestamp: Some(timestamp(start)),
-            execution_completed_timestamp: Some(timestamp(completed)),
+            execution_start_timestamp: Timestamp::from(start).into(),
+            execution_completed_timestamp: Timestamp::from(completed).into(),
             ..Default::default()
         };
         Ok(ActionResult {
             output_files: outputs.files,
             output_directories: outputs.directories,
             exit_code: process_output.exit_code,
-            stdout_digest: Some(stdout.to_proto()),
-            stderr_digest: Some(stderr.to_proto()),
-            execution_metadata: Some(metadata),
+            stdout_digest: stdout.to_proto().into(),
+            stderr_digest: stderr.to_proto().into(),
+            execution_metadata: metadata.into(),
             ..Default::default()
         })
-    }
-}
-
-fn timestamp(time: SystemTime) -> Timestamp {
-    // A clock set before 1970 is reported as 1970.
-    let since_epoch = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    Timestamp {
-        seconds: since_epoch.as_secs() as i64,
-        nanos: since_epoch.subsec_nanos() as i32,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buffa::Message;
     use cas::Digest;
     use cas_mem::MemCas;
-    use prost::Message;
-    use remote_execution_proto::build::bazel::remote::execution::v2::{Command, Directory, FileNode};
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::{Command, Directory, FileNode};
 
     async fn action_with_input(cas: &MemCas, script: &str, output_files: &[&str]) -> Action {
         let input = cas.put_bytes(b"input data").await.unwrap();
         let root = Directory {
             files: vec![FileNode {
                 name: "input.txt".to_string(),
-                digest: Some(input.to_proto()),
+                digest: input.to_proto().into(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -151,8 +142,8 @@ mod tests {
 
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.output_files[0].path, "out/copy.txt");
-        assert_eq!(result.output_files[0].digest, Some(Digest::of_bytes(b"input data").to_proto()));
-        let stdout = Digest::from_required_proto(result.stdout_digest.as_ref()).unwrap();
+        assert_eq!(result.output_files[0].digest.as_option(), Some(&Digest::of_bytes(b"input data").to_proto()));
+        let stdout = Digest::from_required_proto(result.stdout_digest.as_option()).unwrap();
         assert_eq!(cas.read_bytes(&stdout).await.unwrap(), b"done\n");
     }
 
@@ -179,7 +170,7 @@ mod tests {
         let result = executor.execute(&action).await.unwrap();
 
         assert_eq!(result.exit_code, 1);
-        let stderr = Digest::from_required_proto(result.stderr_digest.as_ref()).unwrap();
+        let stderr = Digest::from_required_proto(result.stderr_digest.as_option()).unwrap();
         assert_eq!(cas.read_bytes(&stderr).await.unwrap(), b"broken\n");
     }
 

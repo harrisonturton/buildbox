@@ -2,6 +2,7 @@ load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 load("//bazel:version.bzl", "VERSION")
+load("//bazel/connect:defs.bzl", "rust_connect_library")
 
 proto_library(
     name = "admin_proto",
@@ -11,6 +12,11 @@ proto_library(
 rust_prost_library(
     name = "admin_rust_proto",
     proto = ":admin_proto",
+)
+
+rust_connect_library(
+    name = "admin_rust_connect",
+    protos = [":admin_proto"],
     visibility = [
         "//buildbox/cli:__pkg__",
         "//buildbox/server:__pkg__",
@@ -23,22 +29,23 @@ rust_library(
     version = VERSION,
     visibility = ["//buildbox/server:__pkg__"],
     deps = [
-        ":admin_rust_proto",
+        ":admin_rust_connect",
         "//buildbox/actioncache",
         "//buildbox/cas",
         "//buildbox/scheduler",
-        "@crates//:tonic",
+        "@crates//:connectrpc",
     ],
 )
 
 rust_test(
     name = "admin_test",
     crate = ":admin",
+    proc_macro_deps = ["@crates//:async-trait"],
     deps = [
         "//buildbox/actioncache:mem",
         "//buildbox/cas:mem",
         "//buildbox/executor",
-        "//third_party/remoteapis:remote_execution_rust_proto",
+        "//third_party/remoteapis:remote_execution_rust_connect",
         "@crates//:tokio",
     ],
 )

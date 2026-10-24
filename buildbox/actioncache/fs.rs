@@ -2,10 +2,10 @@
 
 use actioncache::{ActionCache, ActionCacheError, Usage};
 use async_trait::async_trait;
+use buffa::Message;
 use cas::Digest;
 use fsutil::run_blocking;
-use prost::Message;
-use remote_execution_proto::build::bazel::remote::execution::v2::ActionResult;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::ActionResult;
 use std::fs::File;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ impl ActionCache for FsActionCache {
             Err(error) => return Err(io_error("failed to read", &path, error)),
         };
 
-        match ActionResult::decode(data.as_slice()) {
+        match ActionResult::decode_from_slice(&data) {
             Ok(result) => Ok(Some(result)),
             Err(error) => {
                 // A corrupt entry is as good as a missing one: the action will

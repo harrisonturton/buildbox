@@ -9,7 +9,7 @@ rust_library(
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         "//buildbox/cas",
-        "//third_party/remoteapis:remote_execution_rust_proto",
+        "//third_party/remoteapis:remote_execution_rust_connect",
         "@crates//:thiserror",
     ],
 )
@@ -32,9 +32,10 @@ rust_library(
         ":executor",
         "//buildbox/cas",
         "//buildbox/fsutil",
-        "//third_party/remoteapis:remote_execution_rust_proto",
+        "//third_party/remoteapis:remote_execution_rust_connect",
+        "@crates//:buffa",
+        "@crates//:buffa-types",
         "@crates//:libc",
-        "@crates//:prost",
         "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:tracing",

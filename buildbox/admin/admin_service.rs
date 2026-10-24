@@ -1,16 +1,15 @@
 //! The admin service, for inspecting and managing a running server.
 
 use actioncache::ActionCache;
-use admin_proto::buildbox::admin::v1::admin_server::Admin;
-use admin_proto::buildbox::admin::v1::{
-    ActionInfo, ActionState, ExecutionStatus, GetStatusRequest, GetStatusResponse, ListActionsRequest,
+use admin_rust_connect::buildbox::admin::v1::{
+    ActionInfo, ActionState, Admin, ExecutionStatus, GetStatusRequest, GetStatusResponse, ListActionsRequest,
     ListActionsResponse, StorageUsage,
 };
 use cas::Cas;
+use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult};
 use scheduler::Scheduler;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tonic::{Request, Response, Status};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -43,25 +42,38 @@ impl AdminService {
         }
     }
 
-    async fn cas_usage(&self) -> Result<StorageUsage, Status> {
-        let usage = self.cas.usage().await.map_err(|error| Status::internal(error.to_string()))?;
+    async fn status(&self) -> Result<GetStatusResponse, ConnectError> {
+        Ok(GetStatusResponse {
+            version: VERSION.to_string(),
+            uptime_seconds: self.started.elapsed().as_secs(),
+            cas: self.cas_usage().await?.into(),
+            action_cache: self.action_cache_usage().await?.into(),
+            execution: self.execution_status().into(),
+            ..Default::default()
+        })
+    }
+
+    async fn cas_usage(&self) -> Result<StorageUsage, ConnectError> {
+        let usage = self.cas.usage().await.map_err(|error| ConnectError::internal(error.to_string()))?;
         Ok(StorageUsage {
             location: self.cas_location.clone(),
             entries: usage.blobs,
             bytes: usage.bytes,
+            ..Default::default()
         })
     }
 
-    async fn action_cache_usage(&self) -> Result<StorageUsage, Status> {
+    async fn action_cache_usage(&self) -> Result<StorageUsage, ConnectError> {
         let usage = self
             .action_cache
             .usage()
             .await
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(|error| ConnectError::internal(error.to_string()))?;
         Ok(StorageUsage {
             location: self.action_cache_location.clone(),
             entries: usage.entries,
             bytes: usage.bytes,
+            ..Default::default()
         })
     }
 
@@ -76,27 +88,11 @@ impl AdminService {
             max_concurrent_actions: saturating_u32(self.scheduler.max_concurrent()),
             running_actions: saturating_u32(running),
             queued_actions: saturating_u32(actions.len() - running),
+            ..Default::default()
         }
     }
-}
 
-#[tonic::async_trait]
-impl Admin for AdminService {
-    async fn get_status(&self, _request: Request<GetStatusRequest>) -> Result<Response<GetStatusResponse>, Status> {
-        let response = GetStatusResponse {
-            version: VERSION.to_string(),
-            uptime_seconds: self.started.elapsed().as_secs(),
-            cas: Some(self.cas_usage().await?),
-            action_cache: Some(self.action_cache_usage().await?),
-            execution: Some(self.execution_status()),
-        };
-        Ok(Response::new(response))
-    }
-
-    async fn list_actions(
-        &self,
-        _request: Request<ListActionsRequest>,
-    ) -> Result<Response<ListActionsResponse>, Status> {
+    fn actions(&self) -> ListActionsResponse {
         let now = SystemTime::now();
         let actions = self
             .scheduler
@@ -104,14 +100,37 @@ impl Admin for AdminService {
             .into_iter()
             .map(|action| action_info(action, now))
             .collect();
-        Ok(Response::new(ListActionsResponse { actions }))
+        ListActionsResponse {
+            actions,
+            ..Default::default()
+        }
+    }
+}
+
+// Generated traits return `impl Encodable<M>`; handlers narrow that to `M`.
+#[allow(refining_impl_trait)]
+impl Admin for AdminService {
+    async fn get_status(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, GetStatusRequest>,
+    ) -> ServiceResult<GetStatusResponse> {
+        Response::ok(self.status().await?)
+    }
+
+    async fn list_actions(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, ListActionsRequest>,
+    ) -> ServiceResult<ListActionsResponse> {
+        Response::ok(self.actions())
     }
 }
 
 fn action_info(action: scheduler::ActionInfo, now: SystemTime) -> ActionInfo {
     let state = match action.state {
-        scheduler::ActionState::Queued => ActionState::Queued,
-        scheduler::ActionState::Running => ActionState::Running,
+        scheduler::ActionState::Queued => ActionState::ACTION_STATE_QUEUED,
+        scheduler::ActionState::Running => ActionState::ACTION_STATE_RUNNING,
     };
     let running_millis = match action.started_at {
         Some(started_at) => millis_since(started_at, now),
@@ -125,6 +144,7 @@ fn action_info(action: scheduler::ActionInfo, now: SystemTime) -> ActionInfo {
         arguments: action.arguments,
         queued_millis: millis_since(action.queued_at, now),
         running_millis,
+        ..Default::default()
     }
 }
 
@@ -143,7 +163,7 @@ mod tests {
     use actioncache_mem::MemActionCache;
     use cas_mem::MemCas;
     use executor::{Action, ExecuteError, Executor};
-    use remote_execution_proto::build::bazel::remote::execution::v2::{ActionResult, Command};
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::{ActionResult, Command};
     use tokio::sync::Notify;
 
     /// An executor whose actions run until released.
@@ -152,7 +172,7 @@ mod tests {
         release: Notify,
     }
 
-    #[tonic::async_trait]
+    #[async_trait::async_trait]
     impl Executor for BlockingExecutor {
         async fn execute(&self, _action: &Action) -> Result<ActionResult, ExecuteError> {
             self.release.notified().await;
@@ -215,20 +235,21 @@ mod tests {
         }
         wait_for_actions(&scheduler, 2).await;
 
-        let status = service.get_status(Request::new(GetStatusRequest {})).await.unwrap().into_inner();
+        let status = service.status().await.unwrap();
 
-        let cas = status.cas.unwrap();
+        let cas = status.cas.as_option().unwrap();
         assert_eq!(cas.location, "/cas");
         // The empty blob and "hello".
         assert_eq!((cas.entries, cas.bytes), (2, 5));
-        assert_eq!(status.action_cache.unwrap().entries, 0);
+        assert_eq!(status.action_cache.entries, 0);
         assert_eq!(
-            status.execution.unwrap(),
-            ExecutionStatus {
+            status.execution.as_option(),
+            Some(&ExecutionStatus {
                 max_concurrent_actions: 1,
                 running_actions: 1,
                 queued_actions: 1,
-            }
+                ..Default::default()
+            })
         );
 
         for task in tasks {
@@ -246,11 +267,11 @@ mod tests {
         };
         wait_for_actions(&scheduler, 1).await;
 
-        let response = service.list_actions(Request::new(ListActionsRequest {})).await.unwrap().into_inner();
+        let response = service.actions();
 
         let info = &response.actions[0];
         assert_eq!(info.action_digest, cas::Digest::of_bytes(b"compile").to_string());
-        assert_eq!(info.state, ActionState::Running as i32);
+        assert_eq!(info.state.as_known(), Some(ActionState::ACTION_STATE_RUNNING));
         assert_eq!(info.arguments, ["compile", "--flag"]);
 
         release_until_finished(&executor, task).await;
