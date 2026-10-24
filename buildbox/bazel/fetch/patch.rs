@@ -205,7 +205,9 @@ fn apply_change(dir: &Path, change: &FileChange, strip: usize, name: &str) -> Re
     let old = change.old_path.as_deref().map(|path| strip_path(path, strip, name)).transpose()?;
     let new = change.new_path.as_deref().map(|path| strip_path(path, strip, name)).transpose()?;
 
+    let creates = change.hunks.iter().all(|hunk| hunk.lines.iter().all(|line| matches!(line, HunkLine::Add(_))));
     let original = match &old {
+        Some(old) if creates && !dir.join(old).exists() => String::new(),
         Some(old) => std::fs::read_to_string(dir.join(old)).map_err(io(format!("{name}: failed to read {}", old.display())))?,
         None => String::new(),
     };
@@ -339,6 +341,14 @@ deleted file mode 100644
         let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+2\n";
         apply_patch(dir.path(), patch, 1, "test.patch").unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "added\nadded\none\n2\n");
+    }
+
+    #[test]
+    fn hunks_from_nothing_create_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let patch = "--- MODULE.bazel\n+++ MODULE.bazel\n@@ -0,0 +1,2 @@\n+module(\n+)\n";
+        apply_patch(dir.path(), patch, 0, "p").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("MODULE.bazel")).unwrap(), "module(\n)\n");
     }
 
     #[test]

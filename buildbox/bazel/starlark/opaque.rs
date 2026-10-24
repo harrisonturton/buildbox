@@ -3,7 +3,7 @@
 use allocative::Allocative;
 use starlark::eval::{Arguments, Evaluator};
 use starlark::starlark_simple_value;
-use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, starlark_value};
+use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
 use std::fmt;
 
 /// A value of a Bazel API that loading doesn't look inside, such as an
@@ -44,9 +44,24 @@ impl<'v> StarlarkValue<'v> for Opaque {
         true
     }
 
+    /// Opaque values are equal when they stand for the same API, as the
+    /// real objects are.
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(other.downcast_ref::<Opaque>().is_some_and(|other| other.type_name == self.type_name))
+    }
+
+    fn write_hash(&self, hasher: &mut starlark::collections::StarlarkHasher) -> starlark::Result<()> {
+        use std::hash::Hash;
+        self.type_name.hash(hasher);
+        Ok(())
+    }
+
     fn invoke(&self, _me: Value<'v>, args: &Arguments<'v, '_>, eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<Value<'v>> {
         if self.type_name == "_builtins.toplevel.config_common.toolchain_type" {
             return builtins_toolchain_type(args, eval).map_err(starlark::Error::new_other);
+        }
+        if is_flag_getter(&self.type_name) {
+            return Ok(Value::new_bool(false));
         }
         Ok(eval.heap().alloc(Opaque::new(&format!("{}()", self.type_name))))
     }
@@ -66,6 +81,14 @@ impl<'v> StarlarkValue<'v> for Opaque {
     fn to_bool(&self) -> bool {
         true
     }
+}
+
+/// Whether an API call reads an `--incompatible_*` or `--experimental_*`
+/// flag. Such flags default to off, and code branches on them, so they
+/// must be false rather than opaque.
+fn is_flag_getter(type_name: &str) -> bool {
+    let name = type_name.rsplit('.').next().unwrap_or(type_name);
+    name.starts_with("incompatible_") || name.starts_with("experimental_")
 }
 
 /// `_builtins.toplevel.config_common.toolchain_type`, which the builtin
@@ -109,5 +132,19 @@ pub const BUILTIN_NAMESPACES: &[&str] = &[
     "DebugPackageInfo",
     "PackageSpecificationInfo",
     "AnalysisTestResultInfo",
+    "AnalysisFailureInfo",
     "Actions",
+];
+
+/// What `native.legacy_globals` holds in Bazel 8: the symbols Bazel moved
+/// to rule sets, for rule sets that still need the originals.
+pub const LEGACY_GLOBALS: &[&str] = &[
+    "JavaInfo",
+    "JavaPluginInfo",
+    "ProtoInfo",
+    "PyInfo",
+    "PyRuntimeInfo",
+    "PyCcLinkParamsProvider",
+    "CcSharedLibraryInfo",
+    "CcSharedLibraryHintInfo",
 ];

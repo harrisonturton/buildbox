@@ -71,7 +71,9 @@ impl Key for FetchSpecKey {
     }
 }
 
-/// The directory a repository with this spec is fetched to.
+/// The directory a repository with this spec is fetched to. `spec_bytes`
+/// must identify the spec the same way in every process, so it can't hold
+/// interned ids: use strings.
 pub fn repo_dir(config: &BzlmodConfig, repo: RepoName, spec_bytes: &[u8]) -> PathBuf {
     let digest = Fingerprint::of(spec_bytes).to_string();
     config.repos_dir.join(format!("{}-{}", repo, &digest[..16]))
@@ -118,7 +120,7 @@ pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) 
 }
 
 async fn fetch_archive(ctx: &Ctx, config: &BzlmodConfig, repo: RepoName, archive: &ArchiveSpec) -> Result<FetchedRepo, SkyError> {
-    let dest = repo_dir(config, repo, &skycodec::to_bytes(archive));
+    let dest = repo_dir(config, repo, format!("{archive:?}").as_bytes());
     let label_patches = read_label_patches(ctx, archive).await?;
     let module_file = match &archive.module_file {
         Some(url) => ctx.compute(&crate::registry::RegistryFileKey(url.clone())).await?.0.clone(),

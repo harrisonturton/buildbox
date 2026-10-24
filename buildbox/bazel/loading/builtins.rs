@@ -22,8 +22,8 @@ use std::sync::Arc;
 pub const BUILTINS_REPO: &str = "_builtins";
 
 /// Top-level values builtins export that Bazel 8 doesn't give `.bzl` files
-/// by default, since they moved to rule sets.
-const HIDDEN_TOPLEVELS: [&str; 6] = ["JavaInfo", "JavaPluginInfo", "java_common", "py_internal", "_builtins_dummy", "proto_common_do_not_use"];
+/// by default, since rule sets define their own.
+const HIDDEN_TOPLEVELS: [&str; 3] = ["JavaInfo", "JavaPluginInfo", "_builtins_dummy"];
 
 /// A graph service: the directory of Bazel's `builtins_bzl` files, if one
 /// was found.

@@ -3,7 +3,8 @@
 use crate::bzl::{load_all, mappings, transitive_repos};
 use crate::{RepoMappingKey, RepoRootKey, blocking};
 use bazel_fs::{FileContentKey, FileState, FileStateKey, Glob, GlobPattern, Root, RootedPath};
-use bazel_label::PackageId;
+use bazel_label::{Label, PackageId, RepoMapping, RepoName};
+use starlark::values::OwnedFrozenValue;
 use bazel_packages::Package;
 use bazel_starlark::{EvalContext, FileKind, Globber, Loads, PackageBuilder};
 use intern::{PathId, Symbol};
@@ -88,11 +89,12 @@ impl Key for PackageKey {
         let source = String::from_utf8(bytes.clone()).map_err(|_| SkyError::new(format!("{build_label}: not valid UTF-8")))?;
 
         let mapping = ctx.compute(&RepoMappingKey(id.repo)).await?;
-        let ast = match bazel_starlark::parse(build_label, source) {
+        let ast = match bazel_starlark::parse(build_label, source.clone()) {
             Ok(ast) => ast,
             Err(error) => return Ok(LoadedPackage(failed_package(id, build_file, error.message))),
         };
         let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), &mapping.0).await?;
+        let predeclared = autoloads(ctx, &source, &bazel_starlark::loaded_names(&ast)).await?;
         let repos = transitive_repos(id.repo, loaded.iter().map(|(_, module)| &**module));
         let mappings = mappings(ctx, &repos).await?;
         let load_labels = loaded.iter().map(|(_, module)| module.label).collect();
@@ -113,7 +115,7 @@ impl Key for PackageKey {
             context.globber = Some(Box::new(globber));
             context.module = module;
             let builder = PackageBuilder::new(id, build_file);
-            bazel_starlark::eval_build(ast, &builtins.build, &loads, context, builder)
+            bazel_starlark::eval_build(ast, &builtins.build, &loads, &predeclared, context, builder)
         })
         .await?;
         for line in printed {
@@ -122,6 +124,37 @@ impl Key for PackageKey {
         package.loads = load_labels;
         Ok(LoadedPackage(package))
     }
+}
+
+/// The autoloaded rules a BUILD file uses without loading them, resolved
+/// as `@bazel_tools` sees their rule sets. Rule sets the build doesn't
+/// have are skipped, leaving the name undefined, as in Bazel.
+async fn autoloads(ctx: &Ctx, source: &str, loaded: &[String]) -> Result<Vec<(String, OwnedFrozenValue)>, SkyError> {
+    let used = bazel_starlark::autoload::used_autoloads(source, loaded);
+    if used.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bazel_tools = ctx.compute(&RepoMappingKey(RepoName::new("bazel_tools"))).await?;
+    let mut keys = Vec::new();
+    let mut symbols = Vec::new();
+    for (symbol, repo, file) in used {
+        let Some(repo) = bazel_tools.0.resolve(repo) else {
+            continue;
+        };
+        let Ok(label) = Label::parse_canonical(&format!("@@{repo}{file}")) else {
+            continue;
+        };
+        keys.push(crate::BzlLoadKey(label));
+        symbols.push(*symbol);
+    }
+    let mut predeclared = Vec::new();
+    for (symbol, module) in symbols.into_iter().zip(ctx.compute_many(&keys).await) {
+        let module = module?;
+        if let Ok(value) = module.module.get(symbol) {
+            predeclared.push((symbol.to_string(), value));
+        }
+    }
+    Ok(predeclared)
 }
 
 /// A package whose BUILD file couldn't be parsed: it has no targets but the

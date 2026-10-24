@@ -6,6 +6,7 @@ rust_library(
     name = "starlark",
     srcs = [
         "attr_module.rs",
+        "autoload.rs",
         "build_api.rs",
         "bzl_api.rs",
         "context.rs",

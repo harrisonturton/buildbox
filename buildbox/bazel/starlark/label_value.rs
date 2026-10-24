@@ -34,11 +34,11 @@ impl<'v> StarlarkValue<'v> for LabelValue {
         Some(METHODS.methods())
     }
 
+    /// The canonical form, as `str()` gives. Bazel's `repr()` wraps it in
+    /// `Label(...)`, but starlark's `"{}".format(x)` and `"%s" % x` use
+    /// `repr()` for values that aren't strings, and those must give the
+    /// canonical form as Bazel's do.
     fn collect_repr(&self, collector: &mut String) {
-        collector.push_str(&format!("Label({:?})", self.0.canonical_form()));
-    }
-
-    fn collect_str(&self, collector: &mut String) {
         collector.push_str(&self.0.canonical_form());
     }
 

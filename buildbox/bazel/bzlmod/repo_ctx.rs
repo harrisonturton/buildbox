@@ -108,7 +108,8 @@ pub async fn fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec) -> Result<Fet
     let module = ctx.compute(&BzlLoadKey(spec.bzl)).await?;
     let mappings = mappings(ctx, &module, spec.base_repo).await?;
     let inputs = main_repo_inputs(ctx, spec).await?;
-    let dest = repo_dir(&config, repo, &[skycodec::to_bytes(spec), inputs].concat());
+    let stable_spec = format!("{spec:?}");
+    let dest = repo_dir(&config, repo, &[stable_spec.as_bytes(), &inputs].concat());
     let access = GraphAccess::new(ctx.clone());
     let downloads = config.downloads.clone();
     let spec = spec.clone();

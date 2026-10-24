@@ -136,8 +136,11 @@ pub(crate) async fn load_all(
     Ok(loaded)
 }
 
+/// The repositories whose mappings code in a file may need: its own, those
+/// of the modules it loads, and `@_builtins`, whose functions any file can
+/// call.
 pub(crate) fn transitive_repos<'a>(own: RepoName, loaded: impl Iterator<Item = &'a BzlModule>) -> Vec<RepoName> {
-    let mut repos = BTreeSet::from([own]);
+    let mut repos = BTreeSet::from([own, RepoName::new(crate::BUILTINS_REPO)]);
     for module in loaded {
         repos.extend(module.repos.iter().copied());
     }

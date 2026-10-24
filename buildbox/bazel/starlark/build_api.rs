@@ -68,7 +68,7 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
 
     /// `exports_files(srcs, visibility = None, licenses = None)`.
     fn exports_files<'v>(
-        #[starlark(require = pos)] srcs: Value<'v>,
+        srcs: Value<'v>,
         visibility: Option<Value<'v>>,
         licenses: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -97,7 +97,7 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
     }
 
     /// `licenses(license_types)`: accepted and ignored.
-    fn licenses<'v>(#[starlark(require = pos)] license_types: Value<'v>) -> anyhow::Result<NoneType> {
+    fn licenses<'v>(license_types: Value<'v>) -> anyhow::Result<NoneType> {
         let _ = license_types;
         Ok(NoneType)
     }
@@ -168,7 +168,7 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
     }
 
     /// Like `Label()`, relative to the package being defined.
-    fn package_relative_label<'v>(#[starlark(require = pos)] input: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<crate::label_value::LabelValue> {
+    fn package_relative_label<'v>(input: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<crate::label_value::LabelValue> {
         if let Some(label) = input.downcast_ref::<crate::label_value::LabelValue>() {
             return Ok(*label);
         }
@@ -181,7 +181,7 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
 
     /// The attributes of a rule already defined in this package, or `None`.
     /// In a module extension, the repositories it has defined so far.
-    fn existing_rule<'v>(#[starlark(require = pos)] name: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+    fn existing_rule<'v>(name: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
         let context = EvalContext::get(eval)?;
         if let Some(repos) = &context.repos {
             let defined = repos.borrow().iter().any(|repo| repo.name == name);

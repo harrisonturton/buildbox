@@ -131,12 +131,19 @@ pub enum EntryKind {
 /// A directory's entries, sorted by name. Empty if the directory is missing.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct DirListing {
+    /// Each entry's kind, following symlinks.
     pub entries: Vec<(Symbol, EntryKind)>,
+    /// The entries that are symlinks, sorted.
+    pub symlinks: Vec<Symbol>,
 }
 
 encoded_value!(DirListing);
 
 impl DirListing {
+    pub fn is_symlink(&self, name: Symbol) -> bool {
+        self.symlinks.binary_search_by(|entry| entry.as_str().cmp(name.as_str())).is_ok()
+    }
+
     pub fn get(&self, name: Symbol) -> Option<EntryKind> {
         let index = self.entries.binary_search_by(|(entry, _)| entry.as_str().cmp(name.as_str())).ok()?;
         Some(self.entries[index].1)
@@ -168,20 +175,28 @@ fn list(path: &Path) -> Result<DirListing, SkyError> {
     let reader = match std::fs::read_dir(path) {
         Ok(reader) => reader,
         Err(error) if is_missing(&error) || error.kind() == ErrorKind::NotADirectory => {
-            return Ok(DirListing { entries: Vec::new() });
+            return Ok(DirListing {
+                entries: Vec::new(),
+                symlinks: Vec::new(),
+            });
         }
         Err(error) => return Err(io_error("list", path, error)),
     };
     let mut entries = Vec::new();
+    let mut symlinks = Vec::new();
     for entry in reader {
         let entry = entry.map_err(|error| io_error("list", path, error))?;
         let Some(name) = entry.file_name().to_str().map(Symbol::intern) else {
             continue;
         };
+        if entry.file_type().is_ok_and(|file_type| file_type.is_symlink()) {
+            symlinks.push(name);
+        }
         entries.push((name, entry_kind(&entry)));
     }
     entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-    Ok(DirListing { entries })
+    symlinks.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    Ok(DirListing { entries, symlinks })
 }
 
 fn entry_kind(entry: &std::fs::DirEntry) -> EntryKind {

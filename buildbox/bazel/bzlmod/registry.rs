@@ -120,12 +120,12 @@ fn parse_source(registry: &str, name: &str, version: &str, json: &[u8], module_f
             if let Some(mirrors) = source.get("mirror_urls").and_then(|value| value.as_array()) {
                 urls.extend(mirrors.iter().filter_map(|mirror| mirror.as_str().map(str::to_string)));
             }
+            // Patches apply in the order source.json lists them.
             let entries = |field: &str, dir: &str| -> Vec<(String, RemoteFile)> {
                 let Some(map) = source.get(field).and_then(|value| value.as_object()) else {
                     return Vec::new();
                 };
-                let mut entries: Vec<(String, RemoteFile)> = map
-                    .iter()
+                map.iter()
                     .map(|(file, integrity)| {
                         let remote = RemoteFile {
                             url: format!("{base}/{dir}/{file}"),
@@ -133,9 +133,7 @@ fn parse_source(registry: &str, name: &str, version: &str, json: &[u8], module_f
                         };
                         (file.clone(), remote)
                     })
-                    .collect();
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-                entries
+                    .collect()
             };
             Ok(RepoSpec::Archive(ArchiveSpec {
                 urls,

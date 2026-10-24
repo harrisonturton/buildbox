@@ -7,6 +7,7 @@ use starlark::environment::Globals;
 use bazel_label::Label;
 use bazel_packages::Package;
 use starlark::environment::{FrozenModule, Module};
+use starlark::values::OwnedFrozenValue;
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::AstModule;
 use starlark::PrintHandler;
@@ -37,6 +38,14 @@ pub fn parse(file: Label, source: String) -> Result<AstModule, EvalError> {
 /// The modules a file's `load` statements name, as written.
 pub fn loads(ast: &AstModule) -> Vec<String> {
     ast.loads().into_iter().map(|load| load.module_id.to_string()).collect()
+}
+
+/// The names a file's `load` statements bind.
+pub fn loaded_names(ast: &AstModule) -> Vec<String> {
+    ast.loads()
+        .into_iter()
+        .flat_map(|load| load.symbols.keys().map(|name| name.to_string()).collect::<Vec<_>>())
+        .collect()
 }
 
 /// Gives evaluation the modules a file loads, by the strings its `load`
@@ -82,17 +91,22 @@ pub fn eval_bzl(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: E
 
 /// Evaluate a BUILD file into a package, and what it printed. An error
 /// partway through still returns the targets defined before it, with the
-/// error recorded in the package.
+/// error recorded in the package. `predeclared` are globals the file sees
+/// without loading them, such as autoloaded rules.
 pub fn eval_build(
     ast: AstModule,
     globals: &Globals,
     loads: &Loads<'_>,
+    predeclared: &[(String, OwnedFrozenValue)],
     mut context: EvalContext,
     builder: PackageBuilder,
 ) -> (Package, Vec<String>) {
     debug_assert_eq!(context.kind, FileKind::Build);
     context.package = Some(std::cell::RefCell::new(builder));
     let result = Module::with_temp_heap(|module| {
+        for (name, value) in predeclared {
+            module.set(name, module.heap().access_owned_frozen_value(value));
+        }
         let printer = Printer(&context);
         let mut eval = Evaluator::new(&module);
         eval.extra = Some(&context);

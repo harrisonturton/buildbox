@@ -35,13 +35,19 @@ pub struct StarlarkRuleGen<V: ValueLifetimeless> {
     pub executable: bool,
     /// The other arguments `rule()` was given, for analysis.
     pub options: Vec<(String, V)>,
-    /// The `.bzl` file that called `rule()`.
+    /// The `.bzl` file that called `rule()`, which resolves its attributes'
+    /// default labels.
     #[freeze(identity)]
     #[allocative(skip)]
     pub definition: Label,
+    /// The rule's schema and the `.bzl` file that exported it, which
+    /// identifies the rule class; set when it's assigned to a global.
     #[freeze(identity)]
     #[allocative(skip)]
     pub exported: OnceLock<Arc<RuleClass>>,
+    #[freeze(identity)]
+    #[allocative(skip)]
+    pub exported_from: OnceLock<Label>,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<StarlarkRuleGen<To>> for StarlarkRuleGen<From> {}
@@ -58,6 +64,29 @@ impl<'v, V: ValueLike<'v>> fmt::Display for StarlarkRuleGen<V> {
 }
 
 impl<'v, V: ValueLike<'v>> StarlarkRuleGen<V> {
+    /// Run the rule's `initializer`, if it has one, on the arguments of a
+    /// call. The values it returns replace those given.
+    fn initialize(&self, mut given: Vec<(String, Value<'v>)>, eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<Vec<(String, Value<'v>)>> {
+        let Some(initializer) = self.option("initializer").filter(|value| !value.is_none()) else {
+            return Ok(given);
+        };
+        let named: Vec<(&str, Value<'v>)> = given.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+        let result = eval.eval_function(initializer, &[], &named)?;
+        let Some(overrides) = DictRef::from_value(result) else {
+            return Err(starlark::Error::new_other(anyhow::anyhow!("a rule's initializer must return a dict")));
+        };
+        for (name, value) in overrides.iter() {
+            let Some(name) = name.unpack_str() else {
+                continue;
+            };
+            match given.iter_mut().find(|(existing, _)| existing == name) {
+                Some(entry) => entry.1 = value,
+                None => given.push((name.to_string(), value)),
+            }
+        }
+        Ok(given)
+    }
+
     /// The value `rule()` was given for `option`, such as `"toolchains"`.
     pub fn option(&self, option: &str) -> Option<Value<'v>> {
         self.options.iter().find(|(name, _)| name == option).map(|(_, value)| value.to_value())
@@ -65,9 +94,10 @@ impl<'v, V: ValueLike<'v>> StarlarkRuleGen<V> {
 
     pub fn class_ref(&self) -> Option<RuleClassRef> {
         let class = self.exported.get()?;
+        let file = self.exported_from.get().copied().unwrap_or(self.definition);
         Some(RuleClassRef {
             kind: class.kind,
-            definition: Some((self.definition, class.kind)),
+            definition: Some((file, class.kind)),
         })
     }
 }
@@ -84,6 +114,7 @@ where
         let context = EvalContext::get(eval).map_err(starlark::Error::new_other)?;
         let class = schema(self, variable_name, context).map_err(starlark::Error::new_other)?;
         let _ = self.exported.set(Arc::new(class));
+        let _ = self.exported_from.set(context.file);
         Ok(())
     }
 
@@ -95,9 +126,77 @@ where
         };
         args.no_positional_args(eval.heap())?;
         let names = args.names_map()?;
-        let kwargs: Vec<(&str, Value<'v>)> = names.iter().map(|(name, value)| (name.as_str(), *value)).collect();
-        instantiate(eval, class_ref, class, &kwargs).map_err(starlark::Error::new_other)?;
+        let given: Vec<(String, Value<'v>)> = names.iter().map(|(name, value)| (name.as_str().to_string(), *value)).collect();
+        let given = self.initialize(given, eval)?;
+        let kwargs: Vec<(&str, Value<'v>)> = given.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+        let computed = computed_defaults(&self.attrs, &kwargs, eval)?;
+        let computed: Vec<(&str, Value<'v>)> = computed.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+        instantiate(eval, class_ref, class, &kwargs, &computed).map_err(starlark::Error::new_other)?;
         Ok(Value::new_none())
+    }
+}
+
+/// Evaluate the computed defaults of the attributes a call didn't give:
+/// functions whose parameters name other attributes, called with their
+/// values.
+fn computed_defaults<'v, V: ValueLike<'v>>(
+    attrs: &[(String, V)],
+    kwargs: &[(&str, Value<'v>)],
+    eval: &mut Evaluator<'v, '_, '_>,
+) -> starlark::Result<Vec<(String, Value<'v>)>> {
+    let mut computed = Vec::new();
+    for (name, descriptor) in attrs {
+        if kwargs.iter().any(|(given, _)| given == name) {
+            continue;
+        }
+        let Some(attribute) = Attribute::from_value(descriptor.to_value()) else {
+            continue;
+        };
+        let Some(function) = attribute.default.filter(|default| is_computed(*default)) else {
+            continue;
+        };
+        let mut arguments = Vec::new();
+        for parameter in parameter_names(function) {
+            let value = kwargs
+                .iter()
+                .find(|(given, _)| **given == parameter)
+                .map(|(_, value)| *value)
+                .or_else(|| default_of(attrs, &parameter))
+                .unwrap_or_else(|| common_default(&parameter, eval.heap()));
+            arguments.push((parameter, value));
+        }
+        let named: Vec<(&str, Value<'v>)> = arguments.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+        if let Ok(value) = eval.eval_function(function, &[], &named) {
+            computed.push((name.clone(), value));
+        }
+    }
+    Ok(computed)
+}
+
+/// The names of a Starlark function's parameters.
+fn parameter_names(function: Value<'_>) -> Vec<String> {
+    let starlark::docs::DocItem::Member(starlark::docs::DocMember::Function(doc)) = function.documentation() else {
+        return Vec::new();
+    };
+    doc.params.pos_or_named.iter().chain(&doc.params.named_only).map(|param| param.name.clone()).collect()
+}
+
+/// An attribute's plain default value, for a computed default to read.
+fn default_of<'v, V: ValueLike<'v>>(attrs: &[(String, V)], name: &str) -> Option<Value<'v>> {
+    let (_, descriptor) = attrs.iter().find(|(attr, _)| attr == name)?;
+    let attribute = Attribute::from_value(descriptor.to_value())?;
+    attribute.default.filter(|default| !is_computed(*default))
+}
+
+/// A common attribute's default, for a computed default that reads it.
+fn common_default<'v>(name: &str, heap: starlark::values::Heap<'v>) -> Value<'v> {
+    let common = native_rules::common_attrs();
+    let Some(attr) = common.iter().find(|attr| attr.name.as_str() == name) else {
+        return Value::new_none();
+    };
+    match &attr.default {
+        AttrDefault::Value(value) => convert::to_starlark(value, heap),
+        _ => Value::new_none(),
     }
 }
 
@@ -131,7 +230,7 @@ fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelParser<'_>) 
     let default = match attribute.default {
         None => AttrDefault::Value(AttrValue::default_for(ty)),
         Some(value) if is_computed(value) => AttrDefault::Computed,
-        Some(value) if is_late_bound(value) => AttrDefault::LateBound(None),
+        Some(value) if is_late_bound(value) => AttrDefault::LateBound(late_bound_default(value)),
         Some(value) => AttrDefault::Value(
             convert::attr_value(value, ty, parser, name).map_err(|error| anyhow::anyhow!("default of attribute '{name}': {error}"))?,
         ),
@@ -177,9 +276,22 @@ fn build_setting_type<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> Option
 }
 
 fn is_late_bound(value: Value<'_>) -> bool {
-    value
-        .downcast_ref::<crate::opaque::Opaque>()
-        .is_some_and(|opaque| opaque.type_name == "LateBoundDefault")
+    value.downcast_ref::<crate::bzl_api::LateBoundDefault>().is_some()
+}
+
+/// The label a late-bound default has with Bazel's default options.
+fn late_bound_default(value: Value<'_>) -> Option<Label> {
+    let late_bound = value.downcast_ref::<crate::bzl_api::LateBoundDefault>()?;
+    let default = match (late_bound.fragment.as_str(), late_bound.name.as_str()) {
+        ("proto", "proto_compiler") => "@@bazel_tools//tools/proto:protoc",
+        ("proto", "proto_toolchain_for_cc") => "@@bazel_tools//tools/proto:cc_toolchain",
+        ("proto", "proto_toolchain_for_java") => "@@bazel_tools//tools/proto:java_toolchain",
+        ("proto", "proto_toolchain_for_java_lite") => "@@bazel_tools//tools/proto:javalite_toolchain",
+        ("cpp", "zipper") => "@@bazel_tools//tools/zip:unzip_fdo",
+        ("java", "java_toolchain_bytecode_optimizer") => "@@bazel_tools//tools/jdk:bytecode_optimizer",
+        _ => return None,
+    };
+    Label::parse_canonical(default).ok()
 }
 
 fn is_computed(value: Value<'_>) -> bool {
@@ -259,6 +371,7 @@ pub(crate) fn rule_function(builder: &mut GlobalsBuilder) {
             options,
             definition: context.caller_file(eval),
             exported: OnceLock::new(),
+            exported_from: OnceLock::new(),
         })
     }
 }

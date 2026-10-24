@@ -9,12 +9,14 @@ use starlark::codemap::FileSpan;
 use starlark::eval::Evaluator;
 use starlark::values::Value;
 
-/// Create a rule of class `schema` from the keyword arguments of a call.
+/// Create a rule of class `schema` from the keyword arguments of a call,
+/// and the values computed for attributes with computed defaults.
 pub fn instantiate<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     class: RuleClassRef,
     schema: &RuleClass,
     kwargs: &[(&str, Value<'v>)],
+    computed: &[(&str, Value<'v>)],
 ) -> anyhow::Result<()> {
     let context = EvalContext::get(eval)?;
     let (location, generator) = call_site(eval);
@@ -45,6 +47,20 @@ pub fn instantiate<'v>(
     }
     check_mandatory(schema, &attrs, name, &package)?;
 
+    let mut computed_attrs = Vec::with_capacity(computed.len());
+    for (attr, value) in computed {
+        let symbol = Symbol::intern(attr);
+        let Some(attr_schema) = schema.attr(symbol) else {
+            continue;
+        };
+        if value.is_none() {
+            continue;
+        }
+        if let Ok(converted) = convert::attr_value(*value, attr_schema.ty, &parser, attr) {
+            computed_attrs.push((symbol, converted));
+        }
+    }
+
     let outputs = outputs(schema, &attrs, name);
     let rule = Rule {
         name,
@@ -53,6 +69,7 @@ pub fn instantiate<'v>(
         location,
         generator,
         outputs,
+        computed: computed_attrs,
     };
     builder.add_rule(class, rule)
 }

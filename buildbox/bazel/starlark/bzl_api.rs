@@ -6,13 +6,15 @@ use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::values::none::NoneType;
-use starlark::values::{StringValue, Value};
+use allocative::Allocative;
+use starlark::starlark_simple_value;
+use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, StringValue, Value, starlark_value};
 
 #[starlark_module]
 pub(crate) fn bzl_functions(builder: &mut GlobalsBuilder) {
     /// `visibility(packages)`: restricts which packages may load this file.
     /// Accepted and not yet enforced.
-    fn visibility<'v>(#[starlark(require = pos)] value: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<NoneType> {
+    fn visibility<'v>(value: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<NoneType> {
         let _ = (value, EvalContext::get(eval)?);
         Ok(NoneType)
     }
@@ -38,9 +40,11 @@ pub(crate) fn bzl_functions(builder: &mut GlobalsBuilder) {
     }
 
     /// `configuration_field(fragment, name)`: a late-bound default.
-    fn configuration_field(#[starlark(require = named)] fragment: &str, #[starlark(require = named)] name: &str) -> anyhow::Result<crate::opaque::Opaque> {
-        let _ = (fragment, name);
-        Ok(crate::opaque::Opaque::new("LateBoundDefault"))
+    fn configuration_field(fragment: &str, name: &str) -> anyhow::Result<LateBoundDefault> {
+        Ok(LateBoundDefault {
+            fragment: fragment.to_string(),
+            name: name.to_string(),
+        })
     }
 
     fn exec_group<'v>(#[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> anyhow::Result<crate::opaque::Opaque> {
@@ -67,3 +71,22 @@ pub(crate) fn macro_function(builder: &mut GlobalsBuilder) {
         Ok(crate::symbolic_macro::SymbolicMacro { implementation })
     }
 }
+
+/// What `configuration_field()` returns: a default label the build's
+/// configuration chooses, such as `--proto_compiler`'s value.
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+pub struct LateBoundDefault {
+    pub fragment: String,
+    pub name: String,
+}
+
+starlark_simple_value!(LateBoundDefault);
+
+impl std::fmt::Display for LateBoundDefault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<late-bound default {}.{}>", self.fragment, self.name)
+    }
+}
+
+#[starlark_value(type = "LateBoundDefault")]
+impl<'v> StarlarkValue<'v> for LateBoundDefault {}

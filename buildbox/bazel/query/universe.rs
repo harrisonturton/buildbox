@@ -280,7 +280,10 @@ pub fn rule_deps(rule: &Rule, class: &RuleClass, options: &QueryOptions) -> Vec<
         }
         match rule.attr(attr.name) {
             Some(value) => value.labels(&mut labels),
-            None if options.implicit_deps => default_labels(attr, &mut labels),
+            None if options.implicit_deps => match rule.attr_or_computed(attr.name) {
+                Some(value) => value.labels(&mut labels),
+                None => default_labels(attr, &mut labels),
+            },
             None => {}
         }
     }

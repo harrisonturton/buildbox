@@ -48,7 +48,7 @@ impl Key for PackagesUnderDirectoryKey {
         let subdirs: Vec<Symbol> = listing
             .entries
             .iter()
-            .filter(|(name, kind)| *kind == EntryKind::Directory && !is_ignored(self.repo, self.dir, *name, &ignored.0))
+            .filter(|(name, kind)| *kind == EntryKind::Directory && !listing.is_symlink(*name) && !is_ignored(self.repo, self.dir, *name, &ignored.0))
             .map(|(name, _)| *name)
             .collect();
         let keys: Vec<PackagesUnderDirectoryKey> = subdirs
@@ -70,6 +70,8 @@ impl Key for PackagesUnderDirectoryKey {
 
 /// Directories that are never searched for packages: version control
 /// metadata, Bazel's convenience symlinks, and what `.bazelignore` lists.
+/// Symlinks to directories aren't followed either, which keeps the search
+/// out of output directories whatever `--symlink_prefix` is.
 fn is_ignored(repo: RepoName, dir: PathId, name: Symbol, ignored: &[PathId]) -> bool {
     let name_str = name.as_str();
     if name_str == ".git" || name_str == ".hg" || name_str == ".svn" {

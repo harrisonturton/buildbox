@@ -75,6 +75,9 @@ pub struct Rule {
     pub generator: Option<Generator>,
     /// The names of the files the rule declares as outputs.
     pub outputs: Vec<Symbol>,
+    /// The values of attributes with computed defaults that weren't given,
+    /// as computed when the rule was created.
+    pub computed: Vec<(Symbol, AttrValue)>,
 }
 
 /// Where in the BUILD file a rule was created.
@@ -140,7 +143,14 @@ impl Target {
 }
 
 impl Rule {
+    /// An attribute's value, if given explicitly.
     pub fn attr(&self, name: Symbol) -> Option<&AttrValue> {
         self.attrs.iter().find(|(attr, _)| *attr == name).map(|(_, value)| value)
+    }
+
+    /// An attribute's value, given explicitly or computed by its default.
+    pub fn attr_or_computed(&self, name: Symbol) -> Option<&AttrValue> {
+        self.attr(name)
+            .or_else(|| self.computed.iter().find(|(attr, _)| *attr == name).map(|(_, value)| value))
     }
 }

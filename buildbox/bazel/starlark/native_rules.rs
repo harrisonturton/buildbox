@@ -37,9 +37,21 @@ pub fn common_attrs() -> Vec<AttrSchema> {
     ]
 }
 
-/// The attributes test rules have.
+/// The attributes test rules have, including the implicit dependencies
+/// Bazel gives every test on its test runner.
 pub fn test_attrs() -> Vec<AttrSchema> {
+    let tool = |name: &str, target: &str| AttrSchema::new(name, AttrType::Label).default(label(target)).exec();
     vec![
+        tool("$test_wrapper", "@@bazel_tools//tools/test:test_wrapper"),
+        AttrSchema::new("$test_runtime", AttrType::LabelList)
+            .default(AttrValue::LabelList(vec![label_value("@@bazel_tools//tools/test:runtime")]))
+            .exec(),
+        tool("$test_setup_script", "@@bazel_tools//tools/test:test_setup"),
+        tool("$xml_generator_script", "@@bazel_tools//tools/test:test_xml_generator"),
+        tool("$collect_coverage_script", "@@bazel_tools//tools/test:collect_coverage"),
+        tool("$coverage_support", "@@bazel_tools//tools/test:coverage_support"),
+        tool("$xml_writer", "@@bazel_tools//tools/test:xml_writer"),
+        tool(":coverage_report_generator", "@@bazel_tools//tools/test:coverage_report_generator"),
         AttrSchema::new("size", AttrType::String).default(AttrValue::String("medium".into())).nonconfigurable(),
         AttrSchema::new("timeout", AttrType::String).nonconfigurable(),
         AttrSchema::new("flaky", AttrType::Bool).nonconfigurable(),
@@ -87,7 +99,11 @@ pub fn rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool
 }
 
 fn label(text: &str) -> AttrValue {
-    AttrValue::Label(bazel_label::Label::parse_canonical(text).expect("built-in default labels are valid"))
+    AttrValue::Label(label_value(text))
+}
+
+fn label_value(text: &str) -> bazel_label::Label {
+    bazel_label::Label::parse_canonical(text).expect("built-in default labels are valid")
 }
 
 fn native_classes() -> Vec<RuleClass> {
@@ -195,6 +211,26 @@ fn native_classes() -> Vec<RuleClass> {
             false,
             false,
         ),
+        rule_class("java_plugins_flag_alias", vec![], false, false),
+        rule_class("cc_libc_top_alias", vec![], false, false),
+        rule_class(
+            "action_listener",
+            vec![a("mnemonics", StringList).mandatory(), a("extra_actions", LabelList).mandatory()],
+            false,
+            false,
+        ),
+        rule_class(
+            "extra_action",
+            vec![
+                a("cmd", String).mandatory(),
+                a("tools", LabelList).exec(),
+                a("out_templates", StringList),
+                a("data", LabelList),
+                a("requires_action_output", Bool),
+            ],
+            false,
+            false,
+        ),
         rule_class(
             "starlark_doc_extract",
             vec![
@@ -240,7 +276,7 @@ impl<'v> StarlarkValue<'v> for NativeRule {
             kind: self.class.kind,
             definition: None,
         };
-        instantiate(eval, class, &self.class, &kwargs).map_err(starlark::Error::new_other)?;
+        instantiate(eval, class, &self.class, &kwargs, &[]).map_err(starlark::Error::new_other)?;
         Ok(Value::new_none())
     }
 }
