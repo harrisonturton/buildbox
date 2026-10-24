@@ -1,7 +1,7 @@
 //! The workspaces the server knows, each with its own graph.
 
 use crate::written::Written;
-use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvironment};
+use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
 use bazel_execution::SourceDigestKey;
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
 use skyframe::{Engine, Globals, Graph};
@@ -40,7 +40,13 @@ impl Workspace {
     /// Invalidate the files that changed since the graph read them, and the
     /// environment, if a command gives another.
     pub async fn refresh(&self, environment: RepoEnvironment) -> usize {
-        if self.client_env.set(environment) {
+        let env_changes = self.client_env.set(environment);
+        let mut env_keys: Vec<RepoEnvVarKey> = env_changes.names.into_iter().map(RepoEnvVarKey).collect();
+        env_keys.sort_by(|a, b| a.0.cmp(&b.0));
+        if !env_keys.is_empty() {
+            self.graph.invalidate(&env_keys).await;
+        }
+        if env_changes.overrides {
             self.graph.invalidate(&[RepoEnvKey]).await;
         }
         let changed = self.changes.changed().await;

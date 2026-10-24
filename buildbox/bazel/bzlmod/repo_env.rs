@@ -1,5 +1,11 @@
 //! The environment repository rules and module extensions see: the
 //! client's, with `--repo_env` on top.
+//!
+//! As in Bazel, a rule or extension is run again only when a variable it
+//! declares with `environ`, or a `--repo_env` value, changes: each of those
+//! is a key of its own, [`RepoEnvVarKey`]. What else they read of the
+//! environment, such as `PATH` for `execute`, is the latest command's,
+//! without depending on it.
 
 use skycodec::{Decode, Encode};
 use skyframe::{Ctx, Key, SkyError, encoded_value};
@@ -52,34 +58,91 @@ impl ClientEnv {
         Arc::new(ClientEnv::default())
     }
 
-    /// Set the environment, returning whether it changed, in which case
-    /// [`RepoEnvKey`] must be invalidated.
-    pub fn set(&self, environment: RepoEnvironment) -> bool {
+    /// Set the environment, returning what changed: the names of the
+    /// variables whose values differ, and whether the `--repo_env` set
+    /// did. The keys they name must be invalidated.
+    pub fn set(&self, environment: RepoEnvironment) -> EnvChanges {
         let mut current = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *current == environment {
-            return false;
+        let mut names: Vec<String> = Vec::new();
+        for (name, value) in &environment.env {
+            if current.get(name) != Some(value.as_str()) {
+                names.push(name.clone());
+            }
         }
+        for (name, _) in &current.env {
+            if environment.get(name).is_none() {
+                names.push(name.clone());
+            }
+        }
+        let overrides = current.overrides != environment.overrides;
         *current = environment;
-        true
+        EnvChanges { names, overrides }
     }
 
-    fn get(&self) -> RepoEnvironment {
+    /// The latest command's environment, without depending on it.
+    pub fn current(&self) -> RepoEnvironment {
         self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 }
 
-/// The environment repository rules see.
+/// What changed in the environment between commands.
+#[derive(Debug, Default)]
+pub struct EnvChanges {
+    pub names: Vec<String>,
+    pub overrides: bool,
+}
+
+/// The `--repo_env` variables, which identify the repositories they're
+/// fetched with.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct RepoEnvKey;
 
+/// The `--repo_env` variables, sorted by name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct RepoEnvOverrides(pub Vec<(String, String)>);
+
+encoded_value!(RepoEnvOverrides);
+
 impl Key for RepoEnvKey {
-    type Value = RepoEnvironment;
+    type Value = RepoEnvOverrides;
     const KIND: &'static str = "REPO_ENV";
     const EXTERNAL: bool = true;
 
-    async fn compute(&self, ctx: &Ctx) -> Result<RepoEnvironment, SkyError> {
-        Ok(ctx.global::<ClientEnv>()?.get())
+    async fn compute(&self, ctx: &Ctx) -> Result<RepoEnvOverrides, SkyError> {
+        Ok(RepoEnvOverrides(ctx.global::<ClientEnv>()?.current().overrides))
     }
+}
+
+/// One variable of the environment repository rules see.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct RepoEnvVarKey(pub String);
+
+/// A variable's value, if it's set.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct RepoEnvVar(pub Option<String>);
+
+encoded_value!(RepoEnvVar);
+
+impl Key for RepoEnvVarKey {
+    type Value = RepoEnvVar;
+    const KIND: &'static str = "REPO_ENV_VAR";
+    const EXTERNAL: bool = true;
+
+    async fn compute(&self, ctx: &Ctx) -> Result<RepoEnvVar, SkyError> {
+        Ok(RepoEnvVar(ctx.global::<ClientEnv>()?.current().get(&self.0).map(str::to_string)))
+    }
+}
+
+/// The values of `names`, depending on each, and on the `--repo_env` set:
+/// what a rule or extension that declares `names` is run again for.
+pub async fn declared(ctx: &Ctx, names: &[String]) -> Result<String, SkyError> {
+    let overrides = ctx.compute(&RepoEnvKey).await?;
+    let keys: Vec<RepoEnvVarKey> = names.iter().cloned().map(RepoEnvVarKey).collect();
+    let mut inputs = format!("{:?}", overrides.0);
+    for (name, value) in names.iter().zip(ctx.compute_many(&keys).await) {
+        inputs.push_str(&format!("\n{name}={:?}", value?.0));
+    }
+    Ok(inputs)
 }
 
 #[cfg(test)]

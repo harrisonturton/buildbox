@@ -48,6 +48,7 @@ impl Key for ExtensionKey {
             return Err(SkyError::new("no such module extension"));
         };
         let module = ctx.compute(&BzlLoadKey(info.bzl)).await?;
+        crate::repo_env::declared(ctx, &extension_environ(&module, &info.name)).await?;
         let mut repos: Vec<RepoName> = module.repos.clone();
         repos.push(info.bzl.repo());
         repos.sort();
@@ -62,7 +63,7 @@ impl Key for ExtensionKey {
             base_dir: work_dir.clone(),
             graph: GraphAccess::new(ctx.clone()),
             downloads: config.downloads.clone(),
-            env: ctx.compute(&crate::repo_env::RepoEnvKey).await?.env.iter().cloned().collect(),
+            env: ctx.global::<crate::repo_env::ClientEnv>()?.current().env.iter().cloned().collect(),
         };
         let span = tracing::info_span!("bzlmod.module_extension", extension = %info.prefix);
         let graph = graph.clone();
@@ -219,4 +220,12 @@ pub async fn extension_mapping(ctx: &Ctx, graph: &DepGraph, extension: usize, re
         entries.push((Symbol::intern(name), RepoName::new(&format!("{}+{name}", info.prefix))));
     }
     Ok(RepoMappingTable::new(repo, entries))
+}
+
+/// The variables a module extension declares, with `environ`, that it reads.
+fn extension_environ(module: &bazel_loading::BzlModule, name: &str) -> Vec<String> {
+    let Ok((value, _)) = module.module.get_any_visibility(name) else {
+        return Vec::new();
+    };
+    ModuleExtension::from_value(value.value()).map(|extension| extension.environ.clone()).unwrap_or_default()
 }
