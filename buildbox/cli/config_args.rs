@@ -16,8 +16,8 @@ pub struct ConfigArgs {
     #[arg(long, value_name = "ADDR")]
     pub listen: Option<SocketAddr>,
 
-    /// The directory holding the CAS, action cache and sandboxes, unless
-    /// they are set individually.
+    /// The directory holding the CAS, action cache, sandboxes and artifacts,
+    /// unless they are set individually.
     #[arg(long, value_name = "DIR")]
     pub root: Option<PathBuf>,
 
@@ -32,6 +32,10 @@ pub struct ConfigArgs {
     /// Where to run actions.
     #[arg(long, value_name = "DIR")]
     pub sandbox_dir: Option<PathBuf>,
+
+    /// Where to store artifacts, such as container images.
+    #[arg(long, value_name = "DIR")]
+    pub artifacts_dir: Option<PathBuf>,
 
     /// How many actions may run at once. Defaults to the number of CPUs.
     #[arg(long, short = 'j', value_name = "N")]
@@ -55,6 +59,7 @@ impl ConfigArgs {
             cas_dir: self.cas_dir.clone(),
             action_cache_dir: self.action_cache_dir.clone(),
             sandbox_dir: self.sandbox_dir.clone(),
+            artifacts_dir: self.artifacts_dir.clone(),
             max_concurrent_actions: self.max_concurrent_actions,
             keep_sandboxes: self.keep_sandboxes.then_some(true),
             trace_file: self.trace_file.clone(),

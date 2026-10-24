@@ -1,7 +1,9 @@
 //! Connecting to a running server's admin API.
 
+use crate::blobs::Blobs;
 use admin_rust_connect::buildbox::admin::v1::{
-    AdminClient, GetStatusRequest, GetStatusResponse, ListActionsRequest, ListActionsResponse,
+    AdminClient, Artifact, DeleteArtifactRequest, GetStatusRequest, GetStatusResponse, ImportContainerImageRequest,
+    ListActionsRequest, ListActionsResponse, ListArtifactsRequest,
 };
 use clap::Args;
 use config::{Environment, Settings};
@@ -25,17 +27,27 @@ pub struct ClientArgs {
 
 impl ClientArgs {
     pub fn connect(&self) -> Result<Admin, Box<dyn Error>> {
+        let (uri, url) = self.server_uri()?;
+        let client = AdminClient::new(HttpClient::plaintext(), ClientConfig::new(uri));
+        Ok(Admin { client, url })
+    }
+
+    /// Connect to the server's CAS, to upload blobs.
+    pub fn connect_blobs(&self) -> Result<Blobs, Box<dyn Error>> {
+        let (uri, url) = self.server_uri()?;
+        Ok(Blobs::new(uri, url))
+    }
+
+    fn server_uri(&self) -> Result<(http::Uri, String), Box<dyn Error>> {
         let url = match &self.server {
             Some(url) => url.clone(),
             None => self.configured_url()?,
         };
 
-        let uri = match url.parse() {
-            Ok(uri) => uri,
-            Err(error) => return Err(format!("invalid server URL {url:?}: {error}").into()),
-        };
-        let client = AdminClient::new(HttpClient::plaintext(), ClientConfig::new(uri));
-        Ok(Admin { client, url })
+        match url.parse() {
+            Ok(uri) => Ok((uri, url)),
+            Err(error) => Err(format!("invalid server URL {url:?}: {error}").into()),
+        }
     }
 
     fn configured_url(&self) -> Result<String, Box<dyn Error>> {
@@ -67,6 +79,33 @@ impl Admin {
             Ok(response) => Ok(response.into_owned()),
             Err(error) => Err(self.call_error(error)),
         }
+    }
+
+    pub async fn import_container_image(&self, name: &str, manifest: &cas::Digest) -> Result<Artifact, Box<dyn Error>> {
+        let request = ImportContainerImageRequest {
+            name: name.to_string(),
+            manifest_digest: manifest.to_string(),
+            ..Default::default()
+        };
+        let response = self.client.import_container_image(request).await;
+        let response = response.map_err(|error| self.call_error(error))?.into_owned();
+        Ok(response.artifact.into_option().unwrap_or_default())
+    }
+
+    pub async fn list_artifacts(&self) -> Result<Vec<Artifact>, Box<dyn Error>> {
+        let response = self.client.list_artifacts(ListArtifactsRequest::default()).await;
+        let response = response.map_err(|error| self.call_error(error))?;
+        Ok(response.into_owned().artifacts)
+    }
+
+    pub async fn delete_artifact(&self, name: &str) -> Result<(), Box<dyn Error>> {
+        let request = DeleteArtifactRequest {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        let response = self.client.delete_artifact(request).await;
+        response.map_err(|error| self.call_error(error))?;
+        Ok(())
     }
 
     fn call_error(&self, error: ConnectError) -> Box<dyn Error> {

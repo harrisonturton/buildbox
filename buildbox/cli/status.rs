@@ -26,6 +26,9 @@ pub async fn run(args: StatusArgs) -> Result<(), Box<dyn Error>> {
     if let Some(action_cache) = status.action_cache.as_option() {
         println!("{:<14}{}", "Action cache", storage_line(action_cache, "entries"));
     }
+    if let Some(artifacts) = status.artifacts.as_option() {
+        println!("{:<14}{}", "Artifacts", storage_line(artifacts, "artifacts"));
+    }
     if let Some(execution) = status.execution.as_option() {
         println!(
             "{:<14}{} running, {} queued, limit {}",

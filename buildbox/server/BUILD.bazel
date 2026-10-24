@@ -8,6 +8,8 @@ rust_library(
         "//buildbox/actioncache",
         "//buildbox/actioncache:fs",
         "//buildbox/admin",
+        "//buildbox/artifacts",
+        "//buildbox/artifacts:fs",
         "//buildbox/cas",
         "//buildbox/cas:fs",
         "//buildbox/config",

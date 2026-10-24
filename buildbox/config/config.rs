@@ -26,6 +26,9 @@ pub struct Config {
     /// Where actions run, each in its own subdirectory.
     pub sandbox_dir: PathBuf,
 
+    /// Where artifacts, such as container images, are stored.
+    pub artifacts_dir: PathBuf,
+
     /// How many actions may run at once.
     pub max_concurrent_actions: usize,
 
@@ -55,13 +58,14 @@ pub enum ExecutionEnvironment {
 pub struct Settings {
     pub listen: Option<SocketAddr>,
 
-    /// The directory that holds the CAS, action cache and sandboxes, unless
-    /// their locations are set individually.
+    /// The directory that holds the CAS, action cache, sandboxes and
+    /// artifacts, unless their locations are set individually.
     pub root: Option<PathBuf>,
 
     pub cas_dir: Option<PathBuf>,
     pub action_cache_dir: Option<PathBuf>,
     pub sandbox_dir: Option<PathBuf>,
+    pub artifacts_dir: Option<PathBuf>,
     pub max_concurrent_actions: Option<usize>,
     pub keep_sandboxes: Option<bool>,
     pub trace_file: Option<PathBuf>,
@@ -77,6 +81,7 @@ impl Settings {
             cas_dir: overrides.cas_dir.or(self.cas_dir),
             action_cache_dir: overrides.action_cache_dir.or(self.action_cache_dir),
             sandbox_dir: overrides.sandbox_dir.or(self.sandbox_dir),
+            artifacts_dir: overrides.artifacts_dir.or(self.artifacts_dir),
             max_concurrent_actions: overrides.max_concurrent_actions.or(self.max_concurrent_actions),
             keep_sandboxes: overrides.keep_sandboxes.or(self.keep_sandboxes),
             trace_file: overrides.trace_file.or(self.trace_file),
@@ -92,6 +97,7 @@ impl Settings {
             cas_dir: resolve_optional_path(self.cas_dir, base, env)?,
             action_cache_dir: resolve_optional_path(self.action_cache_dir, base, env)?,
             sandbox_dir: resolve_optional_path(self.sandbox_dir, base, env)?,
+            artifacts_dir: resolve_optional_path(self.artifacts_dir, base, env)?,
             trace_file: resolve_optional_path(self.trace_file, base, env)?,
             ..self
         })
@@ -215,6 +221,7 @@ fn resolve(settings: Settings, env: &Environment) -> Result<Config, ConfigError>
         cas_dir: dir_or_default(settings.cas_dir, root, "cas", "cas_dir")?,
         action_cache_dir: dir_or_default(settings.action_cache_dir, root, "ac", "action_cache_dir")?,
         sandbox_dir: dir_or_default(settings.sandbox_dir, root, "sandbox", "sandbox_dir")?,
+        artifacts_dir: dir_or_default(settings.artifacts_dir, root, "artifacts", "artifacts_dir")?,
         max_concurrent_actions,
         keep_sandboxes: settings.keep_sandboxes.unwrap_or(false),
         trace_file: settings.trace_file,
@@ -307,6 +314,7 @@ mod tests {
                 cas_dir: root.join("cas"),
                 action_cache_dir: root.join("ac"),
                 sandbox_dir: root.join("sandbox"),
+                artifacts_dir: root.join("artifacts"),
                 max_concurrent_actions: 8,
                 keep_sandboxes: false,
                 trace_file: None,
@@ -360,6 +368,7 @@ mod tests {
         assert_eq!(config.cas_dir, PathBuf::from("/data/buildbox/cas"));
         assert_eq!(config.action_cache_dir, PathBuf::from("/data/buildbox/ac"));
         assert_eq!(config.sandbox_dir, PathBuf::from("/fast/sandbox"));
+        assert_eq!(config.artifacts_dir, PathBuf::from("/data/buildbox/artifacts"));
     }
 
     #[test]

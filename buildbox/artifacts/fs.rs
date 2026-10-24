@@ -207,11 +207,13 @@ impl ArtifactStore for FsArtifactStore {
         let inner = self.inner.clone();
         run_blocking(move || {
             let records = read_records(&inner)?;
+            let mut usage = Usage {
+                artifacts: records.len() as u64,
+                bytes: 0,
+            };
+            // Artifacts with the same contents share them.
             let hashes: BTreeSet<String> = records.into_iter().map(|(_, record)| record.hash).collect();
-
-            let mut usage = Usage::default();
             for hash in hashes {
-                usage.artifacts += 1;
                 usage.bytes += read_image_record(&inner, &hash)?.size_bytes;
             }
             Ok(usage)
@@ -745,6 +747,7 @@ mod tests {
         store.import_container_image("a", &manifest).await.unwrap();
         store.import_container_image("b", &manifest).await.unwrap();
 
+        assert_eq!(store.usage().await.unwrap(), Usage { artifacts: 2, bytes: 4 });
         store.delete("a").await.unwrap();
 
         let image = store.container_image("b").await.unwrap();

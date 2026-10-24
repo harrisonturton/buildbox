@@ -1,9 +1,12 @@
 //! The buildbox command-line interface.
 
 mod actions;
+mod artifacts;
+mod blobs;
 mod client;
 mod config_args;
 mod format;
+mod image_layout;
 mod show_config;
 mod status;
 mod up;
@@ -34,6 +37,9 @@ enum Command {
 
     /// List the actions a running server is handling.
     Actions(actions::ActionsArgs),
+
+    /// Manage a running server's artifacts, such as container images.
+    Artifacts(artifacts::ArtifactsArgs),
 }
 
 /// How long to wait, on exit, for blocking work such as a large file copy,
@@ -73,6 +79,7 @@ async fn run(command: Command) -> Result<(), Box<dyn Error>> {
         Command::Config(args) => show_config::run(args),
         Command::Status(args) => status::run(args).await,
         Command::Actions(args) => actions::run(args).await,
+        Command::Artifacts(args) => artifacts::run(args).await,
     }
 }
 

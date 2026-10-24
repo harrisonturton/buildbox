@@ -25,9 +25,11 @@ rust_library(
     deps = [
         ":admin_rust_connect",
         "//buildbox/actioncache",
+        "//buildbox/artifacts",
         "//buildbox/cas",
         "//buildbox/scheduler",
         "@crates//:connectrpc",
+        "@crates//:tracing",
     ],
 )
 

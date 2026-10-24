@@ -28,6 +28,9 @@ pub enum DigestError {
 
     #[error("digest is missing")]
     Missing,
+
+    #[error("invalid digest {0:?}: expected {{hash}}/{{size}}")]
+    InvalidFormat(String),
 }
 
 impl Digest {
@@ -96,6 +99,18 @@ impl fmt::Display for Digest {
     /// Formats as `{hash}/{size}`, the form used in ByteStream resource names.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.hash, self.size_bytes)
+    }
+}
+
+impl std::str::FromStr for Digest {
+    type Err = DigestError;
+
+    /// Parses the `{hash}/{size}` form that [`Digest`] displays as.
+    fn from_str(s: &str) -> Result<Digest, DigestError> {
+        let invalid_format = || DigestError::InvalidFormat(s.to_string());
+        let (hash, size) = s.split_once('/').ok_or_else(invalid_format)?;
+        let size_bytes: u64 = size.parse().map_err(|_| invalid_format())?;
+        Digest::new(hash, size_bytes)
     }
 }
 
@@ -204,5 +219,15 @@ mod tests {
     #[test]
     fn displays_as_hash_and_size() {
         assert_eq!(Digest::of_bytes(b"hello").to_string(), format!("{HELLO_HASH}/5"));
+    }
+
+    #[test]
+    fn parses_what_it_displays() {
+        let digest = Digest::of_bytes(b"hello");
+
+        assert_eq!(digest.to_string().parse::<Digest>().unwrap(), digest);
+        assert!(matches!("nonsense".parse::<Digest>(), Err(DigestError::InvalidFormat(_))));
+        assert!(matches!(format!("{}/-1", digest.hash()).parse::<Digest>(), Err(DigestError::InvalidFormat(_))));
+        assert!(matches!("abc/1".parse::<Digest>(), Err(DigestError::InvalidHash(_))));
     }
 }

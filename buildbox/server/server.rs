@@ -2,7 +2,9 @@
 
 use actioncache::{ActionCache, ActionCacheError};
 use actioncache_fs::FsActionCache;
-use admin::AdminService;
+use admin::{AdminService, Components};
+use artifacts::{ArtifactError, ArtifactStore};
+use artifacts_fs::FsArtifactStore;
 use cas::{Cas, CasError};
 use cas_fs::FsCas;
 use config::{Config, ExecutionEnvironment};
@@ -33,6 +35,9 @@ pub enum ServerError {
     #[error("failed to open the action cache: {error}")]
     ActionCache { error: ActionCacheError },
 
+    #[error("failed to open the artifact store: {error}")]
+    Artifacts { error: ArtifactError },
+
     #[error("failed to prepare the sandbox directory {}: {error}", path.display())]
     Sandbox { path: PathBuf, error: std::io::Error },
 
@@ -58,6 +63,7 @@ pub enum ServerError {
 pub async fn run(config: &Config) -> Result<(), ServerError> {
     let cas: Arc<dyn Cas> = Arc::new(open_cas(config).await?);
     let action_cache: Arc<dyn ActionCache> = Arc::new(open_action_cache(config).await?);
+    let artifacts: Arc<dyn ArtifactStore> = Arc::new(open_artifacts(config, cas.clone()).await?);
     let environments = open_environments(config, cas.clone()).await?;
     let scheduler = Arc::new(Scheduler::new(environments, config.max_concurrent_actions));
 
@@ -66,13 +72,15 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     let cas_service = reapi::ContentAddressableStorageService::new(cas.clone());
     let bytestream_service = reapi::ByteStreamService::new(cas.clone());
     let capabilities_service = reapi::CapabilitiesService::default();
-    let admin_service = AdminService::new(
-        cas.clone(),
-        config.cas_dir.display().to_string(),
-        action_cache.clone(),
-        config.action_cache_dir.display().to_string(),
-        scheduler.clone(),
-    );
+    let admin_service = AdminService::new(Components {
+        cas: cas.clone(),
+        cas_location: config.cas_dir.display().to_string(),
+        action_cache: action_cache.clone(),
+        action_cache_location: config.action_cache_dir.display().to_string(),
+        artifacts: artifacts.clone(),
+        artifacts_location: config.artifacts_dir.display().to_string(),
+        scheduler: scheduler.clone(),
+    });
 
     // The services speak gRPC, which Bazel uses, as well as the Connect
     // protocol and gRPC-Web.
@@ -147,6 +155,13 @@ async fn open_action_cache(config: &Config) -> Result<FsActionCache, ServerError
     FsActionCache::open(&config.action_cache_dir)
         .await
         .map_err(|error| ServerError::ActionCache { error })
+}
+
+async fn open_artifacts(config: &Config, cas: Arc<dyn Cas>) -> Result<FsArtifactStore, ServerError> {
+    tracing::info!("using artifact directory {}", config.artifacts_dir.display());
+    FsArtifactStore::open(&config.artifacts_dir, cas)
+        .await
+        .map_err(|error| ServerError::Artifacts { error })
 }
 
 /// Create an executor for each configured environment. Unless configured

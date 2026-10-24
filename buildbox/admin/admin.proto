@@ -9,6 +9,17 @@ service Admin {
 
   // List the actions that are queued or running.
   rpc ListActions(ListActionsRequest) returns (ListActionsResponse);
+
+  // Import a container image as an artifact, replacing any artifact with
+  // the same name. The image's manifest, config and layers must already be
+  // in the CAS.
+  rpc ImportContainerImage(ImportContainerImageRequest) returns (ImportContainerImageResponse);
+
+  // List the stored artifacts.
+  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+
+  // Delete an artifact. Actions already using it are unaffected.
+  rpc DeleteArtifact(DeleteArtifactRequest) returns (DeleteArtifactResponse);
 }
 
 message GetStatusRequest {}
@@ -23,6 +34,7 @@ message GetStatusResponse {
   StorageUsage cas = 3;
   StorageUsage action_cache = 4;
   ExecutionStatus execution = 5;
+  StorageUsage artifacts = 6;
 }
 
 message StorageUsage {
@@ -75,4 +87,49 @@ enum ActionState {
   ACTION_STATE_UNSPECIFIED = 0;
   ACTION_STATE_QUEUED = 1;
   ACTION_STATE_RUNNING = 2;
+}
+
+message ImportContainerImageRequest {
+  // The artifact's name, e.g. "ubuntu:24.04".
+  string name = 1;
+
+  // The digest of the image's manifest, as "{hash}/{size}".
+  string manifest_digest = 2;
+}
+
+message ImportContainerImageResponse {
+  Artifact artifact = 1;
+}
+
+message ListArtifactsRequest {}
+
+message ListArtifactsResponse {
+  // The artifacts, ordered by name.
+  repeated Artifact artifacts = 1;
+}
+
+message DeleteArtifactRequest {
+  string name = 1;
+}
+
+message DeleteArtifactResponse {}
+
+message Artifact {
+  string name = 1;
+  ArtifactKind kind = 2;
+
+  // Identifies the artifact's contents, as "{hash}/{size}". For a container
+  // image, this is the digest of its manifest.
+  string digest = 3;
+
+  // How much space the artifact takes up.
+  uint64 size_bytes = 4;
+
+  // When the artifact was imported, in milliseconds since the Unix epoch.
+  uint64 imported_at_unix_millis = 5;
+}
+
+enum ArtifactKind {
+  ARTIFACT_KIND_UNSPECIFIED = 0;
+  ARTIFACT_KIND_CONTAINER_IMAGE = 1;
 }
