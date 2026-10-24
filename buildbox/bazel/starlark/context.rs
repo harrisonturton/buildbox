@@ -43,6 +43,9 @@ pub struct EvalContext {
     pub repos: Option<RefCell<Vec<crate::repo_api::RepoDefinition>>>,
     /// What `print()` printed.
     pub printed: RefCell<Vec<String>>,
+    /// The state of a higher layer's evaluation, such as the rule being
+    /// analyzed, for the builtins that layer adds.
+    pub extension: Option<Box<dyn std::any::Any>>,
 }
 
 impl EvalContext {
@@ -56,6 +59,7 @@ impl EvalContext {
             repos: None,
             module: None,
             printed: RefCell::new(Vec::new()),
+            extension: None,
         }
     }
 

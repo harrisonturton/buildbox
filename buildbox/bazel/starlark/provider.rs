@@ -12,10 +12,10 @@ use starlark::starlark_module;
 use starlark::values::dict::DictRef;
 use starlark::values::tuple::AllocTuple;
 use starlark::values::{
-    Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value,
+    Freeze, FrozenHeap, FrozenHeapRef, FrozenValue, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value,
     ValueLifetimeless, ValueLike, starlark_value,
 };
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::fmt;
 
 /// A provider defined with `provider()`, or built in. Calling it makes an
@@ -59,6 +59,17 @@ impl<'v, V: ValueLike<'v>> ProviderGen<V> {
     }
 }
 
+impl<'v, V: ValueLike<'v>> ProviderGen<V> {
+    /// Identifies the provider: its name and the file that defines it.
+    /// Providers are looked up in targets by this key.
+    pub fn key(&self) -> String {
+        match self.definition {
+            Some(file) => format!("{file}%{}", self.name()),
+            None => self.name().to_string(),
+        }
+    }
+}
+
 impl<'v, V: ValueLike<'v>> fmt::Display for ProviderGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<provider {}>", self.name())
@@ -72,6 +83,16 @@ where
 {
     fn export_as(&self, variable_name: &str, _eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<()> {
         let _ = self.name.set(variable_name.to_string());
+        Ok(())
+    }
+
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(Provider::from_value(other).is_some_and(|other| other.key() == self.key()))
+    }
+
+    fn write_hash(&self, hasher: &mut starlark::collections::StarlarkHasher) -> starlark::Result<()> {
+        use std::hash::Hash;
+        self.key().hash(hasher);
         Ok(())
     }
 
@@ -150,6 +171,92 @@ where
     fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
         self.fields.contains_key(attribute)
     }
+
+    /// Whether the instance has a field, as `"group" in OutputGroupInfo`
+    /// asks.
+    fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(other.unpack_str().is_some_and(|name| self.fields.contains_key(name)))
+    }
+}
+
+impl<'v> ProviderInstance<'v> {
+    /// The key of the provider this is an instance of.
+    pub fn provider_key(&self) -> Option<String> {
+        Provider::from_value(self.provider).map(|provider| provider.key())
+    }
+
+    pub fn field(&self, name: &str) -> Option<Value<'v>> {
+        self.fields.get(name).copied().filter(|value| !value.is_none())
+    }
+}
+
+impl<'v, V: ValueLike<'v>> ProviderInstanceGen<V> {
+    pub fn provider_name(&self) -> String {
+        Provider::from_value(self.provider.to_value()).map(|provider| provider.name().to_string()).unwrap_or_default()
+    }
+}
+
+/// The providers built into Bazel, with the fields each allows, or `None`
+/// for any.
+const BUILTIN_PROVIDERS: &[(&str, Option<&[&str]>)] = &[
+    ("DefaultInfo", Some(&["files", "runfiles", "data_runfiles", "default_runfiles", "executable", "files_to_run"])),
+    ("OutputGroupInfo", None),
+    ("RunEnvironmentInfo", Some(&["environment", "inherited_environment"])),
+    ("InstrumentedFilesInfo", None),
+];
+
+/// The providers of `platform_common`.
+const PLATFORM_PROVIDERS: &[(&str, Option<&[&str]>)] = &[
+    ("ToolchainInfo", None),
+    ("TemplateVariableInfo", Some(&["variables"])),
+    ("PlatformInfo", None),
+    ("ConstraintValueInfo", None),
+    ("ConstraintSettingInfo", None),
+];
+
+/// The builtin providers, allocated once, so every evaluation shares them.
+struct BuiltinProviders {
+    heap: FrozenHeapRef,
+    toplevel: Vec<(&'static str, FrozenValue)>,
+    platform_common: Vec<(String, FrozenValue)>,
+}
+
+static BUILTIN_PROVIDER_VALUES: LazyLock<BuiltinProviders> = LazyLock::new(|| {
+    let heap = FrozenHeap::new();
+    let alloc = |name: &str, fields: Option<&[&str]>| {
+        let fields = fields.map(|fields| fields.iter().map(|field| field.to_string()).collect());
+        heap.alloc_simple(FrozenProvider::builtin(name, fields))
+    };
+    let toplevel = BUILTIN_PROVIDERS.iter().map(|(name, fields)| (*name, alloc(name, *fields))).collect();
+    let platform_common = PLATFORM_PROVIDERS.iter().map(|(name, fields)| (name.to_string(), alloc(name, *fields))).collect();
+    BuiltinProviders {
+        heap: heap.into_ref(),
+        toplevel,
+        platform_common,
+    }
+});
+
+/// A builtin provider, such as `DefaultInfo` or `ToolchainInfo`, and the
+/// heap it's in, which a heap that refers to it must keep alive.
+pub fn builtin_provider(name: &str) -> Option<(FrozenValue, &'static FrozenHeapRef)> {
+    let providers = &*BUILTIN_PROVIDER_VALUES;
+    let toplevel = providers.toplevel.iter().map(|(name, value)| (*name, *value));
+    let platform = providers.platform_common.iter().map(|(name, value)| (name.as_str(), *value));
+    let mut all = toplevel.chain(platform);
+    let (_, value) = all.find(|(candidate, _)| *candidate == name)?;
+    Some((value, &providers.heap))
+}
+
+/// Define `DefaultInfo` and the other builtin providers, and the
+/// `platform_common` namespace.
+pub(crate) fn register_builtin_providers(builder: &mut GlobalsBuilder) {
+    let providers = &*BUILTIN_PROVIDER_VALUES;
+    builder.frozen_heap().add_reference(&providers.heap);
+    for (name, value) in &providers.toplevel {
+        builder.set(name, *value);
+    }
+    let namespace = builder.alloc(crate::opaque::Namespace::new("platform_common", providers.platform_common.clone()));
+    builder.set("platform_common", namespace);
 }
 
 #[starlark_module]

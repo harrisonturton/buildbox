@@ -147,7 +147,7 @@ pub(crate) fn transitive_repos<'a>(own: RepoName, loaded: impl Iterator<Item = &
 }
 
 /// The mappings of every repository in `repos`.
-pub(crate) async fn mappings(ctx: &Ctx, repos: &[RepoName]) -> Result<HashMap<RepoName, Arc<RepoMappingTable>>, SkyError> {
+pub async fn mappings(ctx: &Ctx, repos: &[RepoName]) -> Result<HashMap<RepoName, Arc<RepoMappingTable>>, SkyError> {
     let keys: Vec<RepoMappingKey> = repos.iter().map(|repo| RepoMappingKey(*repo)).collect();
     let mut mappings = HashMap::with_capacity(repos.len());
     for (repo, mapping) in repos.iter().zip(ctx.compute_many(&keys).await) {

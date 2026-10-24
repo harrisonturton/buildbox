@@ -12,7 +12,7 @@ mod recursive;
 mod rule_class;
 
 pub use builtins::{BUILTINS_REPO, Builtins, BuiltinsDir, BuiltinsKey, builtins_mapping};
-pub use bzl::{BzlLoadKey, BzlModule};
+pub use bzl::{BzlLoadKey, BzlModule, mappings};
 pub use package::{LoadedPackage, PackageKey, PackageLookup, PackageLookupKey, display as display_package};
 pub use recursive::{PackagesUnderDirectory, PackagesUnderDirectoryKey, packages_beneath};
 pub use rule_class::{RuleClassKey, RuleClassValue, rule_class};
@@ -95,7 +95,7 @@ static EVALUATIONS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| {
 
 /// Run CPU-heavy work, such as evaluating Starlark, on a blocking thread,
 /// once one of the limited evaluation slots is free.
-pub(crate) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, SkyError> {
+pub async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, SkyError> {
     let _permit = EVALUATIONS
         .acquire()
         .await

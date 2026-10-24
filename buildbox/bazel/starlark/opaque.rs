@@ -3,11 +3,11 @@
 use allocative::Allocative;
 use starlark::eval::{Arguments, Evaluator};
 use starlark::starlark_simple_value;
-use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
+use starlark::values::{FrozenValue, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
 use std::fmt;
 
 /// A value of a Bazel API that loading doesn't look inside, such as an
-/// aspect, a transition, or `platform_common.ToolchainInfo`.
+/// aspect, a transition, or `cc_common`.
 ///
 /// Its attributes are opaque values too, and calling it returns another,
 /// so code that only passes these values around at the top level of a
@@ -83,6 +83,46 @@ impl<'v> StarlarkValue<'v> for Opaque {
     }
 }
 
+/// A namespace of the Bazel API with some real members, such as
+/// `platform_common`. Members it doesn't have are opaque.
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+pub struct Namespace {
+    pub name: String,
+    #[allocative(skip)]
+    pub members: Vec<(String, FrozenValue)>,
+}
+
+starlark_simple_value!(Namespace);
+
+impl Namespace {
+    pub fn new(name: &str, members: Vec<(String, FrozenValue)>) -> Namespace {
+        Namespace {
+            name: name.to_string(),
+            members,
+        }
+    }
+}
+
+impl fmt::Display for Namespace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{}>", self.name)
+    }
+}
+
+#[starlark_value(type = "namespace")]
+impl<'v> StarlarkValue<'v> for Namespace {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        match self.members.iter().find(|(name, _)| name == attribute) {
+            Some((_, value)) => Some(value.to_value()),
+            None => Some(heap.alloc(Opaque::new(&format!("{}.{attribute}", self.name)))),
+        }
+    }
+
+    fn has_attr(&self, _attribute: &str, _heap: Heap<'v>) -> bool {
+        true
+    }
+}
+
 /// Whether an API call reads an `--incompatible_*` or `--experimental_*`
 /// flag. Such flags default to off, and code branches on them, so they
 /// must be false rather than opaque.
@@ -113,7 +153,6 @@ fn builtins_toolchain_type<'v>(args: &Arguments<'v, '_>, eval: &mut Evaluator<'v
 /// sets, such as `JavaInfo` and `PyInfo`, are deliberately missing, since
 /// rule sets check for them to decide whether to define their own.
 pub const BUILTIN_NAMESPACES: &[&str] = &[
-    "platform_common",
     "coverage_common",
     "testing",
     "apple_common",
@@ -121,10 +160,6 @@ pub const BUILTIN_NAMESPACES: &[&str] = &[
     "proto_common_do_not_use",
     "config",
     "proto",
-    "DefaultInfo",
-    "OutputGroupInfo",
-    "RunEnvironmentInfo",
-    "InstrumentedFilesInfo",
     "CcInfo",
     "CcToolchainConfigInfo",
     "CcSharedLibraryInfo",

@@ -107,6 +107,7 @@ fn bzl_globals_builder() -> GlobalsBuilder {
         let value = builder.alloc(opaque::Opaque::new(name));
         builder.set(name, value);
     }
+    provider::register_builtin_providers(&mut builder);
     builder
 }
 
