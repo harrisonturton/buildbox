@@ -1,0 +1,21 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "config",
+    srcs = ["config.rs"],
+    crate_name = "bazel_config",
+    crate_root = "config.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/bazel/label",
+        "//buildbox/intern",
+        "//buildbox/skycodec",
+    ],
+)
+
+rust_test(
+    name = "config_test",
+    crate = ":config",
+)
