@@ -149,6 +149,13 @@ impl Engine {
         }))
     }
 
+    /// Every value of key type `K` the engine holds as a live object.
+    pub fn live_values<K: Key>(&self) -> Vec<Arc<K::Value>> {
+        let kind = kinds::kind_of::<K>().value_store_kind();
+        let live = self.0.store.live_of_kind(kind);
+        live.into_iter().filter_map(|value| value.downcast::<K::Value>().ok()).collect()
+    }
+
     /// A new, empty graph for one workspace. `globals` are the services its
     /// keys' functions use, such as the workspace's filesystem.
     pub fn graph(&self, globals: Globals) -> Graph {

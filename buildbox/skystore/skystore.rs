@@ -243,6 +243,20 @@ impl ValueStore {
         shard.insert_live(kind, fingerprint, value, size)
     }
 
+    /// Every live object of `kind` the store holds.
+    pub fn live_of_kind(&self, kind: Kind) -> Vec<LiveValue> {
+        let mut values = Vec::new();
+        for shard in self.shards.iter() {
+            let shard = self.lock_shard(shard);
+            for entry in shard.entries.iter().filter(|entry| entry.kind == kind.0) {
+                if let Slot::Live { index, .. } = entry.slot {
+                    values.extend(shard.live[index as usize].clone());
+                }
+            }
+        }
+        values
+    }
+
     /// Whether the value is a live object the store doesn't have: one a
     /// restored store knows only the fingerprint of.
     pub fn is_absent(&self, value: ValueRef) -> bool {
