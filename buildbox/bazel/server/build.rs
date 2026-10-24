@@ -3,7 +3,7 @@
 
 use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
-use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Runfiles, TargetValue};
+use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Incompatibility, Runfiles, TargetValue};
 use bazel_config::{BuildOptions, ConfigId};
 use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
@@ -92,7 +92,7 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
     let session = workspace.graph.session().await;
     let built = match run(context, &session, &options, out).await {
         Ok(built) => built,
-        Err(code) => return code,
+        Err(code) => return failed(code, started, out).await,
     };
     report(context, &options, &built, out).await;
     out.info(&format!("Elapsed time: {:.3}s", started.elapsed().as_secs_f64())).await;
@@ -102,6 +102,15 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
     }
     out.info("Build completed successfully").await;
     exit::SUCCESS
+}
+
+/// End a command whose build failed before it finished, as Bazel does.
+pub async fn failed(code: i32, started: Instant, out: &Output) -> i32 {
+    if code == exit::BUILD_FAILURE {
+        out.info(&format!("Elapsed time: {:.3}s", started.elapsed().as_secs_f64())).await;
+        out.error("Build did NOT complete successfully").await;
+    }
+    code
 }
 
 /// Parse a build command's options.
@@ -137,8 +146,8 @@ pub async fn run_command(
         }
     };
     let keep_going = options.flag("keep_going", false);
-    let labels = match targets(context, session, options, &main_mapping).await {
-        Ok(labels) => labels,
+    let (labels, explicit) = match targets(context, session, options, &main_mapping).await {
+        Ok(requested) => requested,
         Err(message) => {
             out.error(&message).await;
             return Err(exit::BUILD_FAILURE);
@@ -152,16 +161,25 @@ pub async fn run_command(
         }
     };
     let (analyzed, mut errors) = analyze(session, &labels, config, &main_mapping, out).await;
+    let incompatible = report_explicitly_incompatible(&analyzed, &explicit, &main_mapping, out).await;
     if errors && !keep_going {
         out.error("Analysis of target failed; build aborted").await;
         return Err(exit::BUILD_FAILURE);
     }
+    if incompatible && !keep_going {
+        return Err(exit::BUILD_FAILURE);
+    }
+    errors |= incompatible;
     report_analysis(&analyzed, &main_mapping, testing, out).await;
 
     let exec_root = crate::commands::output_base_for(context.server, &context.workspace_root).join("execroot/_main");
     let backend = context.server.backend();
     let mut targets = Vec::new();
     for (label, target) in analyzed {
+        if target.incompatible.is_some() {
+            targets.push((label, target, Vec::new()));
+            continue;
+        }
         let artifacts = top_level_artifacts(&target);
         let (files, failed) = execute(session, &artifacts, out).await;
         errors |= failed;
@@ -183,6 +201,48 @@ pub async fn run_command(
         exec_root,
         errors,
     })
+}
+
+/// Report the targets that can't be built for the target platform but
+/// were named rather than matched by a wildcard, which is an error.
+async fn report_explicitly_incompatible(
+    analyzed: &[(Label, Arc<ConfiguredTarget>)],
+    explicit: &BTreeSet<Label>,
+    mapping: &RepoMappingTable,
+    out: &Output,
+) -> bool {
+    let mut errors = false;
+    for (label, target) in analyzed {
+        let Some(reason) = target.incompatible.as_ref().filter(|_| explicit.contains(label)) else {
+            continue;
+        };
+        errors = true;
+        let shown = bazel_query::display_label(*label, mapping);
+        let message = format!(
+            "Analysis of target '{shown}' failed; build aborted: Target {shown} is incompatible and cannot be built, but was explicitly requested.\nDependency chain:\n{}",
+            dependency_chain(reason, mapping)
+        );
+        out.error(&message).await;
+    }
+    errors
+}
+
+/// An incompatibility's chain of dependencies, as Bazel prints it.
+fn dependency_chain(reason: &Incompatibility, mapping: &RepoMappingTable) -> String {
+    let mut lines = Vec::with_capacity(reason.chain.len());
+    for (index, key) in reason.chain.iter().enumerate() {
+        let config = key.config.get();
+        let short = &config.checksum[..config.checksum.len().min(6)];
+        let mut line = format!("    {} ({short})", bazel_query::display_label(key.label, mapping));
+        if index + 1 == reason.chain.len() {
+            line.push_str(&format!(
+                "   <-- target platform ({}) didn't satisfy constraint {}",
+                config.options.platform, reason.constraint
+            ));
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
 }
 
 /// Say what was analyzed, as Bazel does.
@@ -223,9 +283,15 @@ fn plural(count: usize, word: &str) -> String {
     }
 }
 
-/// The targets the command line's patterns name. Wildcards skip targets
-/// tagged `manual`; patterns starting with `-` are subtracted.
-async fn targets(context: &CommandContext<'_>, session: &Session, options: &ParsedOptions, main_mapping: &Arc<RepoMappingTable>) -> Result<Vec<Label>, String> {
+/// The targets the command line's patterns name, and those of them named
+/// other than by a wildcard. Wildcards skip targets tagged `manual`;
+/// patterns starting with `-` are subtracted.
+async fn targets(
+    context: &CommandContext<'_>,
+    session: &Session,
+    options: &ParsedOptions,
+    main_mapping: &Arc<RepoMappingTable>,
+) -> Result<(Vec<Label>, BTreeSet<Label>), String> {
     let package = working_package(&context.workspace_root, &context.working_directory);
     let query_options = QueryOptions {
         implicit_deps: true,
@@ -235,14 +301,19 @@ async fn targets(context: &CommandContext<'_>, session: &Session, options: &Pars
     let universe = Universe::new(session, query_options, package, main_mapping.clone());
     let mut included = TargetSet::new();
     let mut excluded = TargetSet::new();
+    let mut explicit = BTreeSet::new();
     for pattern in &options.residue {
         let (negative, text) = match pattern.strip_prefix('-') {
             Some(text) => (true, text),
             None => (false, pattern.as_str()),
         };
         let mut labels = universe.resolve(text).await.map_err(|error| error.0)?;
-        if is_wildcard(text, package, main_mapping) {
+        let wildcard = is_wildcard(text, package, main_mapping);
+        if wildcard {
             labels = buildable_by_wildcard(&universe, labels).await;
+        }
+        if !wildcard && !negative {
+            explicit.extend(labels.iter().copied());
         }
         labels = expand_test_suites(&universe, labels).await?;
         match negative {
@@ -253,7 +324,8 @@ async fn targets(context: &CommandContext<'_>, session: &Session, options: &Pars
     if options.residue.is_empty() {
         return Err("No targets specified".to_string());
     }
-    Ok(included.into_iter().filter(|label| !excluded.contains(label)).collect())
+    let labels = included.into_iter().filter(|label| !excluded.contains(label)).collect();
+    Ok((labels, explicit))
 }
 
 fn is_wildcard(text: &str, package: bazel_label::PackageId, mapping: &RepoMappingTable) -> bool {
@@ -505,6 +577,9 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
         return;
     }
     for (label, target, files) in &built.targets {
+        if target.incompatible.is_some() {
+            continue;
+        }
         let shown = bazel_query::display_label(*label, &built.main_mapping);
         let defaults: Vec<Artifact> = default_files(target).into_iter().filter(|artifact| !artifact.is_source()).collect();
         if defaults.is_empty() {

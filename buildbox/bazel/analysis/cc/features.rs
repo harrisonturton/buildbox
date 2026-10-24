@@ -110,6 +110,42 @@ pub struct FeatureConfiguration {
     pub enabled: BTreeSet<String>,
 }
 
+/// The actions Bazel requests the action configs of, as features, so that
+/// a toolchain's configs for them are enabled.
+const ACTION_NAMES: [&str; 31] = [
+    "c-compile",
+    "c++-compile",
+    "c++-header-parsing",
+    "c++-module-compile",
+    "c++-module-codegen",
+    "c++-module-deps-scanning",
+    "c++20-module-compile",
+    "c++20-module-codegen",
+    "linkstamp-compile",
+    "lto-backend",
+    "lto-indexing",
+    "lto-index-for-executable",
+    "lto-index-for-dynamic-library",
+    "lto-index-for-nodeps-dynamic-library",
+    "clif-match",
+    "assemble",
+    "preprocess-assemble",
+    "c++-link-executable",
+    "c++-link-dynamic-library",
+    "c++-link-nodeps-dynamic-library",
+    "c++-link-static-library",
+    "strip",
+    "objcopy_embed_data",
+    "validate-static-library",
+    "llvm-cov",
+    "llvm-profdata",
+    "objc-compile",
+    "objc++-compile",
+    "objc-executable",
+    "objc-fully-link",
+    "cc-flags-make-variable",
+];
+
 impl ToolchainFeatures {
     fn feature(&self, name: &str) -> Option<&Feature> {
         self.features.iter().find(|feature| feature.name == name)
@@ -130,13 +166,15 @@ impl ToolchainFeatures {
         self.action_config(name).map(|config| config.implies.as_slice()).unwrap_or_default()
     }
 
-    /// Choose the enabled features: those enabled by default and those
-    /// requested, with what they imply, less the unsupported ones and those
-    /// whose requirements aren't met.
+    /// Choose the enabled features: those enabled by default, the action
+    /// configs of Bazel's actions, and those requested, with what they
+    /// imply, less the unsupported ones and those whose requirements aren't
+    /// met.
     pub fn configure(self: &Arc<Self>, requested: &[String], unsupported: &[String]) -> Result<FeatureConfiguration, FeatureError> {
         let unsupported: BTreeSet<&str> = unsupported.iter().map(String::as_str).collect();
         let mut wanted: Vec<&str> = self.features.iter().filter(|feature| feature.enabled).map(|feature| feature.name.as_str()).collect();
         wanted.extend(self.action_configs.iter().filter(|config| config.enabled).map(|config| config.action_name.as_str()));
+        wanted.extend(ACTION_NAMES);
         wanted.extend(requested.iter().map(String::as_str));
 
         let mut enabled = BTreeSet::new();

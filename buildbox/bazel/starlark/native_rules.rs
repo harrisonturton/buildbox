@@ -191,6 +191,12 @@ fn native_classes() -> Vec<RuleClass> {
             false,
             false,
         ),
+        rule_class(
+            "config_feature_flag",
+            vec![a("allowed_values", StringList).mandatory(), a("default_value", String)],
+            false,
+            false,
+        ),
         rule_class("label_flag", vec![a("build_setting_default", Label).mandatory()], false, false),
         rule_class("label_setting", vec![a("build_setting_default", Label).mandatory()], false, false),
         rule_class(

@@ -29,7 +29,7 @@ mod toolchains;
 
 pub use action::{Action, ActionKind, RunfilesTree, Spawn};
 pub use artifact::{Artifact, name_path, package_dir, repo_dir, runfiles_repo_name};
-pub use configured::{ConfiguredTarget, ConfiguredTargetKey};
+pub use configured::{ConfiguredTarget, ConfiguredTargetKey, Incompatibility};
 pub use file_value::FileValue;
 pub use platform::{Platform, PlatformKey};
 pub use runfiles::{FilesToRun, Runfiles};

@@ -45,7 +45,20 @@ pub struct ConfiguredTarget {
     pub generating: Vec<(PathId, u32)>,
     /// Identifies what the target was analyzed from.
     pub fingerprint: Fingerprint,
+    /// Why the target can't be built for the target platform, if it can't.
+    /// Such a target has no providers or actions.
+    pub incompatible: Option<Arc<Incompatibility>>,
     size: usize,
+}
+
+/// Why a target is incompatible with the target platform.
+#[derive(Debug)]
+pub struct Incompatibility {
+    /// The target, then the dependencies leading to the one whose
+    /// `target_compatible_with` the platform doesn't satisfy.
+    pub chain: Vec<ConfiguredTargetKey>,
+    /// The constraint the platform doesn't have.
+    pub constraint: Label,
 }
 
 impl Value for ConfiguredTarget {
@@ -118,6 +131,9 @@ fn no_such_target(label: Label, package: &Package) -> SkyError {
 pub enum Implementation {
     /// A function in a `.bzl` file.
     Starlark { module: Arc<BzlModule>, implementation: OwnedFrozenValue },
+    /// A rule of Bazel's builtins, defined in `file`, whose Starlark
+    /// implementation bb runs.
+    Builtin { file: Label, implementation: OwnedFrozenValue },
     /// Built into Bazel, by kind.
     Native(Symbol),
 }
@@ -135,6 +151,10 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     }
     let class = bazel_loading::rule_class(ctx, &class_ref).await?;
     let attrs = resolve_attrs(ctx, rule, &class, key.config).await?;
+    if let Some(constraint) = unsatisfied_constraint(ctx, &attrs, key.config).await? {
+        let reason = Incompatibility { chain: vec![key], constraint };
+        return incompatible(key, class_ref.kind, class.test, reason);
+    }
     let implementation = implementation(ctx, &class_ref)
         .await
         .map_err(|error| SkyError::new(format!("in {} rule {label}: {}", class_ref.kind, error.message())))?;
@@ -142,13 +162,16 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         true => BTreeMap::new(),
         false => analyze_deps(ctx, &class, &attrs, key.config).await?,
     };
+    if let Some(reason) = incompatible_dep(key, &deps) {
+        return incompatible(key, class_ref.kind, class.test, reason);
+    }
     let config = key.config.get();
     let platform = ctx.compute(&PlatformKey(config.options.platform)).await?;
     let toolchains = toolchains::resolve(ctx, &class, &config).await?;
     let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
     let mappings = match &implementation {
         Implementation::Starlark { module, .. } => bazel_loading::mappings(ctx, &module.repos).await?,
-        Implementation::Native(_) => Default::default(),
+        Implementation::Builtin { .. } | Implementation::Native(_) => Default::default(),
     };
     let fingerprint = fingerprint(key, rule, &implementation, &deps, &toolchains);
 
@@ -168,6 +191,37 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     let analyzed = bazel_loading::blocking(move || evaluate(input)).await?;
     let analyzed = analyzed.map_err(SkyError::new)?;
     Ok(configured(key, class_ref.kind, class.test, analyzed, fingerprint))
+}
+
+/// The first constraint of the rule's `target_compatible_with` that the
+/// target platform doesn't have.
+async fn unsatisfied_constraint(ctx: &Ctx, attrs: &[(Symbol, AttrValue)], config: ConfigId) -> Result<Option<Label>, SkyError> {
+    let name = Symbol::intern("target_compatible_with");
+    let Some((_, AttrValue::LabelList(constraints))) = attrs.iter().find(|(attr, _)| *attr == name) else {
+        return Ok(None);
+    };
+    let config = config.get();
+    for constraint in constraints {
+        let constraint = crate::platform::actual(ctx, *constraint).await?;
+        if !crate::condition::target_platform_has(ctx, &config, constraint).await? {
+            return Ok(Some(constraint));
+        }
+    }
+    Ok(None)
+}
+
+/// A target is incompatible when any of its dependencies is.
+fn incompatible_dep(key: ConfiguredTargetKey, deps: &BTreeMap<(Label, ConfigId), Dep>) -> Option<Incompatibility> {
+    let reason = deps.values().find_map(|dep| match dep {
+        Dep::Target(target) => target.incompatible.clone(),
+        Dep::File(..) => None,
+    })?;
+    let mut chain = vec![key];
+    chain.extend(reason.chain.iter().copied());
+    Some(Incompatibility {
+        chain,
+        constraint: reason.constraint,
+    })
 }
 
 /// Whether a rule is one bb stands in for with a rule that provides
@@ -252,6 +306,13 @@ async fn implementation(ctx: &Ctx, class: &RuleClassRef) -> Result<Implementatio
     if bzl.repo().as_str() == bazel_loading::BUILTINS_REPO && native {
         return Ok(Implementation::Native(class.kind));
     }
+    if bzl.repo().as_str() == bazel_loading::BUILTINS_REPO && crate::native::STARLARK_BUILTINS.contains(&class.kind.as_str()) {
+        let builtins = ctx.compute(&bazel_loading::BuiltinsKey).await?;
+        let implementation = builtins
+            .rule_implementation(class.kind.as_str())
+            .ok_or_else(|| SkyError::new(format!("builtins don't export a rule named '{}'", class.kind)))?;
+        return Ok(Implementation::Builtin { file: bzl, implementation });
+    }
     if bzl.repo().as_str() == bazel_loading::BUILTINS_REPO {
         return Err(SkyError::new(format!(
             "'{}' is implemented by Bazel's builtins, which bb can't analyze yet",
@@ -284,6 +345,7 @@ fn fingerprint(
     fingerprinter.bytes(&skycodec::to_bytes(rule));
     match implementation {
         Implementation::Starlark { module, .. } => fingerprinter.bytes(module.fingerprint.as_bytes()),
+        Implementation::Builtin { file, .. } => fingerprinter.bytes(file.to_string().as_bytes()),
         Implementation::Native(kind) => fingerprinter.bytes(kind.as_str().as_bytes()),
     };
     for dep in deps.values() {
@@ -318,6 +380,7 @@ async fn alias(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule) -> Result<Confi
         actions: Vec::new(),
         generating: Vec::new(),
         fingerprint: target.fingerprint,
+        incompatible: target.incompatible.clone(),
         size: 64,
     })
 }
@@ -348,8 +411,24 @@ fn configured(key: ConfiguredTargetKey, kind: Symbol, is_test: bool, analyzed: A
         actions: analyzed.actions,
         generating,
         fingerprint,
+        incompatible: None,
         size,
     }
+}
+
+/// The configured target of a target that can't be built for the target
+/// platform: it provides nothing.
+fn incompatible(key: ConfiguredTargetKey, kind: Symbol, is_test: bool, reason: Incompatibility) -> Result<ConfiguredTarget, SkyError> {
+    let mut fingerprinter = Fingerprinter::new();
+    fingerprinter.bytes(b"incompatible").bytes(key.label.to_string().as_bytes());
+    fingerprinter.bytes(key.config.get().output_directory.as_bytes());
+    for link in &reason.chain {
+        fingerprinter.bytes(link.label.to_string().as_bytes());
+    }
+    fingerprinter.bytes(reason.constraint.to_string().as_bytes());
+    let mut target = empty_target(key, kind.as_str(), is_test, fingerprinter.finish())?;
+    target.incompatible = Some(Arc::new(reason));
+    Ok(target)
 }
 
 /// Run the rule's implementation, on a blocking thread.
@@ -379,6 +458,11 @@ fn file(key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> Result<Conf
 /// The configured target of something with no files, such as a package
 /// group.
 fn file_less(key: ConfiguredTargetKey, kind: &str) -> Result<ConfiguredTarget, SkyError> {
+    empty_target(key, kind, false, Fingerprint::of(key.label.to_string().as_bytes()))
+}
+
+/// A configured target with only an empty `DefaultInfo`.
+fn empty_target(key: ConfiguredTargetKey, kind: &str, is_test: bool, fingerprint: Fingerprint) -> Result<ConfiguredTarget, SkyError> {
     let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<Analyzed> {
         let defaults = providers::Defaults {
             files: Vec::new(),
@@ -390,5 +474,5 @@ fn file_less(key: ConfiguredTargetKey, kind: &str) -> Result<ConfiguredTarget, S
         Ok(Analyzed { module, actions: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
-    Ok(configured(key, Symbol::intern(kind), false, analyzed, Fingerprint::of(key.label.to_string().as_bytes())))
+    Ok(configured(key, Symbol::intern(kind), is_test, analyzed, fingerprint))
 }

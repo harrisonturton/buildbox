@@ -68,6 +68,10 @@ where
             _ => None,
         }
     }
+
+    fn dir_attr(&self) -> Vec<String> {
+        vec!["modules".to_string(), "root_module_has_non_dev_dependency".to_string()]
+    }
 }
 
 #[starlark_module]

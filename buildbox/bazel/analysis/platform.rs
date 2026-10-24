@@ -2,7 +2,7 @@
 
 use bazel_label::Label;
 use bazel_loading::PackageKey;
-use bazel_packages::{AttrValue, Rule, Target};
+use bazel_packages::{AttrValue, Package, Rule, Target};
 use intern::Symbol;
 use skycodec::{Decode, Encode};
 use skyframe::{Ctx, Key, SkyError, encoded_value};
@@ -128,7 +128,7 @@ async fn load_actual_rule(ctx: &Ctx, label: Label, kind: &str) -> Result<(Label,
     for _ in 0..16 {
         let package = ctx.compute(&PackageKey(label.package)).await?;
         let Some(Target::Rule(rule)) = package.0.target(label.name) else {
-            return Err(SkyError::new(format!("{label} is not a {kind} rule")));
+            return Err(missing_rule(&package.0, label, kind));
         };
         let class = package.0.rule_class(rule).kind;
         if class.as_str() == "alias" {
@@ -144,6 +144,15 @@ async fn load_actual_rule(ctx: &Ctx, label: Label, kind: &str) -> Result<(Label,
         return Ok((label, rule.clone()));
     }
     Err(SkyError::new(format!("{label}: too many aliases")))
+}
+
+/// The error for a rule that isn't in its package: the package's own error,
+/// if it has one, since that may be why.
+fn missing_rule(package: &Package, label: Label, kind: &str) -> SkyError {
+    match package.errors.first() {
+        Some(error) => SkyError::new(format!("{label}: error loading package: {error}")),
+        None => SkyError::new(format!("{label} is not a {kind} rule")),
+    }
 }
 
 /// The labels of a label list attribute given explicitly.

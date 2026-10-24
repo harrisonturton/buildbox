@@ -12,7 +12,7 @@ use skycodec::{Decode, Encode, Fingerprint};
 use skyframe::{Ctx, Key, SkyError, Storage, Value};
 use starlark::environment::{FrozenModule, Globals};
 use starlark::values::dict::DictRef;
-use starlark::values::FrozenValue;
+use starlark::values::{FrozenValue, OwnedFrozenValue, ValueLike};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -120,6 +120,20 @@ fn evaluate(dir: &Path, mapping: RepoMappingTable) -> anyhow::Result<Builtins> {
         fingerprint: Fingerprint::of(dir.display().to_string().as_bytes()),
         _exports: Some(exports),
     })
+}
+
+impl Builtins {
+    /// The implementation function of a builtin rule, by name.
+    pub fn rule_implementation(&self, kind: &str) -> Option<OwnedFrozenValue> {
+        let rules = self._exports.as_ref()?.get("exported_rules").ok()?;
+        rules
+            .try_map(|rules| {
+                let rule = DictRef::from_value(rules.to_value()).and_then(|rules| rules.get_str(kind)).ok_or(())?;
+                let rule = StarlarkRule::from_value(rule).ok_or(())?;
+                rule.implementation.to_value().unpack_frozen().ok_or(())
+            })
+            .ok()
+    }
 }
 
 /// The entries of a dict a module exports.

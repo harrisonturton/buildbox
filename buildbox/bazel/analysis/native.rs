@@ -20,6 +20,7 @@ use starlark::values::{Heap, Value};
 /// or toolchain resolution, and provide nothing.
 const MARKER_RULES: &[&str] = &[
     "config_setting",
+    "config_feature_flag",
     "constraint_setting",
     "platform",
     "toolchain",
@@ -35,6 +36,10 @@ const MARKER_RULES: &[&str] = &[
 /// Rules Bazel's builtins implement that bb stands in for with rules that
 /// provide nothing, since nothing uses them any more.
 pub const STUBBED_BUILTINS: &[&str] = &[];
+
+/// Rules of Bazel's builtins whose Starlark implementations bb runs, since
+/// they need only the APIs bb has.
+pub const STARLARK_BUILTINS: &[&str] = &["xcode_config", "xcode_version", "available_xcodes", "xcode_config_alias"];
 
 /// Run a native rule's implementation, returning its providers.
 pub fn analyze<'v>(kind: Symbol, input: &RuleInput, prepared: &Prepared<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {

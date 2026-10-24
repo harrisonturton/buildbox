@@ -67,7 +67,7 @@ impl ConditionKey {
     }
 }
 
-async fn target_platform_has(ctx: &Ctx, config: &BuildConfiguration, value: Label) -> Result<bool, SkyError> {
+pub(crate) async fn target_platform_has(ctx: &Ctx, config: &BuildConfiguration, value: Label) -> Result<bool, SkyError> {
     let platform = ctx.compute(&PlatformKey(config.options.platform)).await?;
     let value = ctx.compute(&ConstraintValueKey(value)).await?;
     Ok(platform.has(&value))
@@ -148,7 +148,12 @@ async fn flag_matches(ctx: &Ctx, config: &BuildConfiguration, flag: Label, expec
     let Some(Target::Rule(rule)) = package.0.target(flag.name) else {
         return Err(SkyError::new(format!("{flag} isn't a build setting")));
     };
-    let default = rule.attr(Symbol::intern("build_setting_default")).cloned().unwrap_or(AttrValue::None);
+    // A `config_feature_flag` names its default `default_value`.
+    let default = rule
+        .attr(Symbol::intern("build_setting_default"))
+        .or_else(|| rule.attr(Symbol::intern("default_value")))
+        .cloned()
+        .unwrap_or(AttrValue::None);
     let default = match default {
         AttrValue::Bool(value) => value.to_string(),
         AttrValue::Int(value) => value.to_string(),

@@ -151,8 +151,12 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
         #[starlark(default = false)] collect_default: bool,
         symlinks: Option<Value<'v>>,
         root_symlinks: Option<Value<'v>>,
+        #[starlark(require = named, default = false)] skip_conflict_checking: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Runfiles<'v>> {
+        // Conflicting runfiles are never an error here, so there is nothing
+        // to skip.
+        let _ = skip_conflict_checking;
         let heap = eval.heap();
         let direct: Vec<Value<'v>> = actions::files(files, "files")?.into_iter().map(|artifact| heap.alloc(FileValue(artifact))).collect();
         let mut transitive = Vec::new();

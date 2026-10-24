@@ -191,6 +191,7 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Vec<Act
 
     let file = match &input.implementation {
         Implementation::Starlark { module, .. } => module.label,
+        Implementation::Builtin { file, .. } => *file,
         Implementation::Native(_) => input.build_file,
     };
     let mut context = EvalContext::new(FileKind::Bzl, file);
@@ -201,7 +202,7 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Vec<Act
         eval.extra = Some(&context);
         eval.set_print_handler(&Printer);
         match &input.implementation {
-            Implementation::Starlark { implementation, .. } => {
+            Implementation::Starlark { implementation, .. } | Implementation::Builtin { implementation, .. } => {
                 let implementation = heap.access_owned_frozen_value(implementation);
                 eval.eval_function(implementation, &[ctx], &[]).map_err(|error| anyhow::anyhow!("{error}"))?
             }
@@ -487,11 +488,24 @@ fn executable_struct<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepar
         if !schema.executable || schema.ty != AttrType::Label {
             continue;
         }
-        let executable = targets.first().and_then(|target| target_executable(*target));
-        let value = executable.map(|(artifact, _)| heap.alloc(FileValue(artifact))).unwrap_or_else(Value::new_none);
+        let executable = targets.first().and_then(|target| attr_executable(*target));
+        let value = executable.map(|artifact| heap.alloc(FileValue(artifact))).unwrap_or_else(Value::new_none);
         fields.push((schema.name.as_str(), value));
     }
     heap.alloc(AllocStruct(fields))
+}
+
+/// What an executable attribute runs: the target's executable, or the file
+/// itself when the target is a single file, such as a script in a source
+/// tree.
+fn attr_executable(target: Value<'_>) -> Option<Artifact> {
+    if let Some((executable, _)) = target_executable(target) {
+        return Some(executable);
+    }
+    match target_files(target).ok()?.as_slice() {
+        [file] if file.is_source() => Some(*file),
+        _ => None,
+    }
 }
 
 /// `ctx.outputs`: the predeclared outputs.

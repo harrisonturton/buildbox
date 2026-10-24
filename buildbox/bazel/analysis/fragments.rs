@@ -86,6 +86,9 @@ impl<'v> StarlarkValue<'v> for Fragment {
             ("cpp", "conlyopts") => words("conlyopt"),
             ("cpp", "linkopts") => words("linkopt"),
             ("cpp", "compilation_mode") | ("cpp", "_compilation_mode") => heap.alloc(self.options.compilation_mode.as_str()),
+            ("apple", "prefer_mutual_xcode") => Value::new_bool(true),
+            ("apple", "include_xcode_exec_requirements") => Value::new_bool(false),
+            ("apple", flag) if flag.ends_with("_flag") => Value::new_none(),
             _ => heap.alloc(Opaque::new(&format!("ctx.fragments.{}.{attribute}", self.name))),
         };
         Some(value)
@@ -107,6 +110,12 @@ fn fragment_methods(builder: &mut MethodsBuilder) {
     fn force_pic<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         let _ = this;
         Ok(false)
+    }
+
+    /// `cpp.minimum_os_version()`: `--minimum_os_version`, unset.
+    fn minimum_os_version<'v>(this: Value<'v>) -> anyhow::Result<starlark::values::none::NoneType> {
+        let _ = this;
+        Ok(starlark::values::none::NoneType)
     }
 
     fn generate_llvm_lcov<'v>(this: Value<'v>) -> anyhow::Result<bool> {

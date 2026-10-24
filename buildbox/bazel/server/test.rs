@@ -5,6 +5,7 @@ use crate::command::{CommandContext, exit};
 use crate::output::Output;
 use bazel_analysis::ConfiguredTargetKey;
 use bazel_execution::{Backend, TestKey, TestResult, TestStatus};
+use bazel_label::Label;
 use skyframe::Session;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,7 +32,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     let session = workspace.graph.session().await;
     let built = match build::run_command(context, &session, &options, true, out).await {
         Ok(built) => built,
-        Err(code) => return code,
+        Err(code) => return build::failed(code, started, out).await,
     };
     build::report(context, &options, &built, out).await;
     if built.errors {
@@ -43,10 +44,16 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     let tests: Vec<TestKey> = built
         .targets
         .iter()
-        .filter(|(_, target, _)| target.is_test)
+        .filter(|(_, target, _)| target.is_test && target.incompatible.is_none())
         .map(|(label, _, _)| TestKey(ConfiguredTargetKey { label: *label, config: built.config }))
         .collect();
-    if tests.is_empty() {
+    let skipped: Vec<Label> = built
+        .targets
+        .iter()
+        .filter(|(_, target, _)| target.is_test && target.incompatible.is_some())
+        .map(|(label, _, _)| *label)
+        .collect();
+    if tests.is_empty() && skipped.is_empty() {
         out.error("No test targets were found, yet testing was requested").await;
         return NO_TESTS_FOUND;
     }
@@ -62,11 +69,16 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
         1 => out.info("Build completed, 1 test FAILED").await,
         count => out.info(&format!("Build completed, {count} tests FAILED")).await,
     }
-    summarize(&results, &built, epoch, out).await;
+    summarize(&results, &skipped, &built, epoch, out).await;
     match failed.is_empty() {
         true => exit::SUCCESS,
         false => TESTS_FAILED,
     }
+}
+
+/// The width to pad a label to, so that statuses end in the same column.
+fn status_width(label: &str, prefix: &str, word: &str) -> usize {
+    (STATUS_COLUMN + "PASSED".len()).saturating_sub(prefix.len() + word.len()).max(label.len() + 1)
 }
 
 fn passed(result: &Result<Arc<TestResult>, String>) -> bool {
@@ -156,8 +168,13 @@ fn without_preamble(log: &str) -> &str {
     }
 }
 
-/// Print each test's status and the totals, as Bazel does: passes first.
-async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], built: &Built, epoch: u64, out: &Output) {
+/// Print each test's status and the totals, as Bazel does: skipped tests,
+/// then passes, then failures.
+async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipped: &[Label], built: &Built, epoch: u64, out: &Output) {
+    for label in skipped {
+        let label = bazel_query::display_label(*label, &built.main_mapping);
+        out.stdout(&format!("{label:<width$}SKIPPED\n", width = status_width(&label, "", "SKIPPED"))).await;
+    }
     let mut executed = 0;
     let mut passes = 0;
     let mut failures = 0;
@@ -182,13 +199,13 @@ async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], built
             _ => failures += 1,
         }
         let label = bazel_query::display_label(key.0.label, &built.main_mapping);
-        let width = STATUS_COLUMN.saturating_sub(prefix.len()).max(label.len() + 1);
+        let width = status_width(&label, prefix, word);
         out.stdout(&format!("{label:<width$}{prefix}{word} in {seconds:.1}s\n")).await;
         if word != "PASSED" {
             out.stdout(&format!("  {}\n", testlogs_dir(built, key).join("test.log").display())).await;
         }
     }
-    let total = results.len();
+    let total = results.len() + skipped.len();
     let tests = if total == 1 { "test" } else { "tests" };
     let mut parts = Vec::new();
     if passes > 0 {
@@ -196,6 +213,11 @@ async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], built
     }
     if failures > 0 {
         parts.push(format!("{failures} fails locally"));
+    }
+    match skipped.len() {
+        0 => {}
+        1 => parts.push("1 was skipped".to_string()),
+        count => parts.push(format!("{count} were skipped")),
     }
     out.stdout(&format!("\nExecuted {executed} out of {total} {tests}: {}.\n", parts.join(" and "))).await;
 }
