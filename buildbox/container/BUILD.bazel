@@ -1,0 +1,59 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "container",
+    srcs = ["container.rs"],
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/process",
+        "@crates//:thiserror",
+    ],
+)
+
+# A container runtime built directly on Linux namespaces.
+rust_library(
+    name = "namespaces",
+    srcs = [
+        "init.rs",
+        "mounts.rs",
+        "namespaces.rs",
+        "protocol.rs",
+        "sys.rs",
+        "tests.rs",
+    ],
+    crate_name = "container_namespaces",
+    crate_root = "namespaces.rs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = [
+        "//buildbox/cli:__pkg__",
+        "//buildbox/server:__pkg__",
+    ],
+    deps = [
+        ":container",
+        "//buildbox/fsutil",
+        "//buildbox/process",
+        "@crates//:libc",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+        "@crates//:tracing",
+    ],
+)
+
+# The helper on its own, for tests.
+rust_binary(
+    name = "container_init",
+    srcs = ["init_main.rs"],
+    deps = [":namespaces"],
+)
+
+rust_test(
+    name = "namespaces_test",
+    crate = ":namespaces",
+    data = [":container_init"],
+    env = {"CONTAINER_INIT": "$(rootpath :container_init)"},
+    deps = ["@crates//:tokio"],
+)
