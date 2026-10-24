@@ -556,6 +556,9 @@ fn convenience_symlinks(workspace: &Path, exec_root: &Path, prefix: &str, output
     ];
     for (name, target) in links {
         let link = workspace.join(format!("{prefix}{name}"));
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         if std::fs::read_link(&link).is_ok_and(|existing| existing == target) {
             continue;
         }
