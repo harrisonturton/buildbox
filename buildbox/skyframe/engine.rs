@@ -31,7 +31,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> EngineConfig {
         EngineConfig {
-            cache_bytes: 64 << 20,
+            cache_bytes: 16 << 20,
             traces_per_key: 4,
         }
     }

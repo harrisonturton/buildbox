@@ -15,15 +15,17 @@ const MIN_ALIGN: usize = 16;
 const MALLOCX_ZERO: c_int = 0x40;
 
 /// jemalloc's options, which it reads from its `malloc_conf` pointer:
-/// return freed pages a second after they're freed, and keep 8 arenas
-/// rather than 4 per CPU, which spread long-lived objects thinly across
-/// partly empty pages. Background threads,
+/// return freed pages a second after they're freed; keep 8 arenas rather
+/// than 4 per CPU, which spread long-lived objects thinly across partly
+/// empty pages; and cache only allocations of up to 8 KiB per thread, since
+/// each of the server's many threads otherwise holds megabytes. Background
+/// threads,
 /// which do that while threads are idle, are started by
 /// [`start_background_threads`], since some processes must stay
 /// single-threaded.
 #[used]
 #[unsafe(export_name = "_rjem_malloc_conf")]
-static MALLOC_CONF: Options = Options(c"narenas:8,dirty_decay_ms:1000,muzzy_decay_ms:0".as_ptr());
+static MALLOC_CONF: Options = Options(c"narenas:8,lg_tcache_max:13,dirty_decay_ms:1000,muzzy_decay_ms:0".as_ptr());
 
 /// A C string's address, as a `const char *` jemalloc reads.
 #[repr(transparent)]
