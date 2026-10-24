@@ -191,7 +191,7 @@ impl BazelServer {
         if let Err(error) = bazel_analysis::paging::set_up(&config.bazel_dir.join("paging")) {
             tracing::warn!("analysis won't be paged out of memory: {error}");
         }
-        bazel_analysis::cc::register();
+        bazel_analysis::register();
         let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), Some(bazel_starlark::BAZEL_VERSION));
         match &bazel_tools {
             Some(dir) => tracing::info!("using @bazel_tools from {}", dir.display()),

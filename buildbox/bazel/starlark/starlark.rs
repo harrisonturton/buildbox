@@ -22,6 +22,7 @@ pub mod provider;
 pub mod repo_api;
 pub mod rule_value;
 pub mod select;
+pub mod subrule;
 pub mod symbolic_macro;
 pub mod toolchain_type;
 
@@ -146,6 +147,7 @@ fn bzl_globals_builder() -> GlobalsBuilder {
         .with(select::select_function)
         .with(label_value::label_constructor)
         .with(rule_value::rule_function)
+        .with(subrule::subrule_function)
         .with(provider::provider_function)
         .with(bzl_api::bzl_functions)
         .with(bzl_api::macro_function)

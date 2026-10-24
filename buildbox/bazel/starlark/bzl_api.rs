@@ -51,11 +51,6 @@ pub(crate) fn bzl_functions(builder: &mut GlobalsBuilder) {
         let _ = kwargs;
         Ok(crate::opaque::Opaque::new("ExecGroup"))
     }
-
-    fn subrule<'v>(#[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> anyhow::Result<crate::opaque::Opaque> {
-        let _ = kwargs;
-        Ok(crate::opaque::Opaque::new("Subrule"))
-    }
 }
 
 #[starlark_module]

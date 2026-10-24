@@ -219,6 +219,9 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
         };
         own.push(attr_schema(name, attribute, &parser)?);
     }
+    for subrule in crate::subrule::subrules(rule.option("subrules"))? {
+        own.extend(subrule_attrs(subrule, context)?);
+    }
     if let Some(ty) = build_setting_type(rule) {
         own.push(AttrSchema::new("build_setting_default", ty).mandatory().nonconfigurable());
     }
@@ -229,6 +232,24 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     class.toolchain_types = toolchain_types;
     class.optional_toolchain_types = optional;
     Ok(class)
+}
+
+/// The hidden attributes a rule gets from a subrule it declares, whose
+/// default labels resolve in the subrule's `.bzl` file.
+fn subrule_attrs(subrule: &crate::subrule::Subrule<'_>, context: &EvalContext) -> anyhow::Result<Vec<AttrSchema>> {
+    let mapping = context.mapping_for(subrule.definition.repo());
+    let parser = LabelParser {
+        package: subrule.definition.package,
+        mapping: &*mapping,
+    };
+    let mut schemas = Vec::new();
+    for (name, attribute) in subrule.rule_attrs()? {
+        let Some(attribute) = Attribute::from_value(attribute) else {
+            anyhow::bail!("attribute '{name}' of a subrule isn't an attr.*() value");
+        };
+        schemas.push(attr_schema(&name, attribute, &parser)?);
+    }
+    Ok(schemas)
 }
 
 fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelParser<'_>) -> anyhow::Result<AttrSchema> {
@@ -307,9 +328,10 @@ fn is_computed(value: Value<'_>) -> bool {
 /// The toolchain types `rule(toolchains = [...])` names, and those of them
 /// that are optional.
 fn toolchain_types<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, parser: &LabelParser<'_>) -> anyhow::Result<(Vec<Label>, Vec<Label>)> {
-    let Some(toolchains) = rule.option("toolchains").and_then(convert::items) else {
-        return Ok((Vec::new(), Vec::new()));
-    };
+    let mut toolchains = rule.option("toolchains").and_then(convert::items).unwrap_or_default();
+    for subrule in crate::subrule::subrules(rule.option("subrules"))? {
+        toolchains.extend(subrule.rule_toolchains()?);
+    }
     let mut labels = Vec::with_capacity(toolchains.len());
     let mut optional = Vec::new();
     for toolchain in toolchains {

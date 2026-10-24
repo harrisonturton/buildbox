@@ -77,7 +77,7 @@ where
     }
 
     fn dir_attr(&self) -> Vec<String> {
-        self.fields.keys().cloned().collect()
+        self.fields.keys().filter(|name| !name.starts_with('$')).cloned().collect()
     }
 }
 

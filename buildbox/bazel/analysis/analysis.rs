@@ -40,3 +40,10 @@ pub use platform::{Platform, PlatformKey};
 pub use runfiles::{FilesToRun, Runfiles};
 pub use state::runfiles_tree;
 pub use target_value::{DEFAULT_INFO, TargetValue};
+
+/// Add the natives analysis provides to Starlark: the C++ API, and how
+/// subrules find their attributes. Call before any file is evaluated.
+pub fn register() {
+    cc::register();
+    build_ctx::register();
+}

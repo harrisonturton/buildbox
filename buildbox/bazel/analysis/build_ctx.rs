@@ -15,6 +15,7 @@ use crate::toolchains::{ResolvedToolchains, ToolchainContext};
 use bazel_config::{BuildConfiguration, ConfigId};
 use bazel_label::{Label, RepoMappingTable, RepoName};
 use bazel_packages::{AttrSchema, AttrType, AttrValue, Cfg, RuleClass};
+use bazel_starlark::attr_module::Attribute;
 use bazel_starlark::label_value::LabelValue;
 use bazel_starlark::opaque::Opaque;
 use bazel_starlark::{EvalContext, FileKind};
@@ -174,6 +175,10 @@ impl PrintHandler for Printer {
     }
 }
 
+/// Where the rule's `ctx` is kept in its module while its implementation
+/// runs, for subrules: a name Starlark can't refer to.
+const RULE_CTX: &str = bazel_starlark::subrule::RULE_CTX;
+
 /// Run the rule's implementation, leaving its `Target` in `module` and
 /// returning its actions.
 pub fn run<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Vec<Action>> {
@@ -199,6 +204,7 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Vec<Act
     let mut context = EvalContext::new(FileKind::Bzl, file);
     context.mappings = input.mappings.clone();
     context.extension = Some(Box::new(state));
+    module.set(RULE_CTX, ctx);
     let returned = {
         let mut eval = Evaluator::new(module);
         eval.extra = Some(&context);
@@ -211,6 +217,7 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Vec<Act
             Implementation::Native(kind) => crate::native::analyze(*kind, input, &prepared, &mut eval)?,
         }
     };
+    module.set(RULE_CTX, Value::new_none());
     let state = context.extension.take().and_then(|state| state.downcast::<RuleState>().ok()).ok_or_else(|| anyhow::anyhow!("lost the rule's state"))?;
     let defaults = defaults(&state, &prepared.outputs);
     check_outputs(&state, &prepared.outputs)?;
@@ -338,6 +345,9 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
         fields.insert(name.to_string(), value);
     };
     set("attr", attr_struct(input, prepared, heap));
+    for (name, value) in subrule_attrs(input, prepared, heap) {
+        set(name, value);
+    }
     set("file", file_struct(input, prepared, heap)?);
     set("files", files_struct(input, prepared, heap)?);
     set("executable", executable_struct(input, state, prepared, heap));
@@ -400,6 +410,45 @@ fn attr_struct<'v>(input: &RuleInput, prepared: &Prepared<'v>, heap: Heap<'v>) -
         fields.push((name, value));
     }
     heap.alloc(AllocStruct(fields))
+}
+
+/// The attributes the rule has for its subrules, which only they see, as
+/// `ctx.attr` would have them.
+fn subrule_attrs<'a, 'v>(input: &'a RuleInput, prepared: &Prepared<'v>, heap: Heap<'v>) -> Vec<(&'a str, Value<'v>)> {
+    let mut attrs = Vec::new();
+    for (schema, (name, value)) in input.class.attrs.iter().zip(&input.attrs) {
+        let name = name.as_str();
+        if name.starts_with('$') && name.contains('%') {
+            attrs.push((name, attr_value(input, prepared, schema, value, heap)));
+        }
+    }
+    attrs
+}
+
+/// The value a subrule's implementation gets for one of its attributes,
+/// named `name` in the rule whose `ctx` is `ctx`: an executable's files to
+/// run, a single file's file, or the targets, as Bazel passes them.
+fn subrule_attr_value<'v>(ctx: Value<'v>, name: &str, attribute: &Attribute<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+    let Some(value) = ctx.get_attr(name, eval.heap()).ok().flatten().filter(|value| !value.is_none()) else {
+        return Ok(Value::new_none());
+    };
+    if attribute.executable {
+        let files_to_run = TargetValue::from_value(value).and_then(|target| target.default_info("files_to_run"));
+        return Ok(files_to_run.unwrap_or_else(Value::new_none));
+    }
+    let single_file = attribute.allow_single_file.is_some_and(|allow| allow.to_bool());
+    if attribute.ty != AttrType::Label || !single_file {
+        return Ok(value);
+    }
+    match target_files(value)?.as_slice() {
+        [file] => Ok(eval.heap().alloc(FileValue(*file))),
+        _ => Ok(Value::new_none()),
+    }
+}
+
+/// Let subrules find their attributes' values in the rules calling them.
+pub fn register() {
+    bazel_starlark::subrule::set_attr_value_fn(subrule_attr_value);
 }
 
 /// Late-bound attributes for Apple platforms, which rules read

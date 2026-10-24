@@ -26,6 +26,7 @@ rust_library(
         "repo_api.rs",
         "rule_value.rs",
         "select.rs",
+        "subrule.rs",
         "symbolic_macro.rs",
         "toolchain_type.rs",
         "starlark.rs",
