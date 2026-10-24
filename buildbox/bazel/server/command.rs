@@ -1,6 +1,7 @@
 //! Running one Bazel command line.
 
 use crate::output::Output;
+use crate::running::RunningCommand;
 use crate::BazelServer;
 use crate::workspace;
 use bazel_bzlmod::repo_env::RepoEnvironment;
@@ -36,6 +37,7 @@ pub mod exit {
     pub const COMMAND_LINE_ERROR: i32 = 2;
     pub const PARTIAL_ANALYSIS_FAILURE: i32 = 3;
     pub const ANALYSIS_FAILURE: i32 = 7;
+    pub const INTERRUPTED: i32 = 8;
     pub const INTERNAL_ERROR: i32 = 37;
 }
 
@@ -146,6 +148,20 @@ async fn unsupported(command: &str, out: &Output) -> i32 {
         out.stderr(&format!("Command '{command}' not found. Try '{PRODUCT} help'.\n")).await;
     }
     exit::COMMAND_LINE_ERROR
+}
+
+/// End a command that was cancelled, as Bazel ends an interrupted one.
+pub async fn interrupted(command: &RunningCommand, out: &Output) -> i32 {
+    let name = split_startup_options(&command.args).1.first().cloned().unwrap_or_default();
+    match name.as_str() {
+        "build" | "test" | "run" => {
+            out.error("build interrupted").await;
+            crate::build::report_stats(command.started, out).await;
+            out.error("Build did NOT complete successfully").await;
+        }
+        _ => out.error(&format!("{name} interrupted")).await,
+    }
+    exit::INTERRUPTED
 }
 
 /// Separate the startup options, which come before the command, from the

@@ -1,31 +1,26 @@
 //! Running Bazel commands in the server, as `bb build`, `bb query` and so on,
 //! or as `bazel ...` when bb is installed under that name.
 
-use bazel_rust_connect::buildbox::bazel::v1::{BazelClient, EnvironmentVariable, Exec, RunRequest, RunResponse, run_response};
+use crate::daemon::Daemon;
+use bazel_rust_connect::buildbox::bazel::v1::{BazelClient, CancelRequest, EnvironmentVariable, Exec, RunRequest, run_response};
 use bazel_server::{PRODUCT, VERSION};
-use config::{Environment, Settings};
-use connectrpc::client::{ClientConfig, HttpClient};
+use connectrpc::client::HttpClient;
 use std::error::Error;
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
-use std::net::SocketAddr;
 use std::os::unix::process::CommandExt;
-use std::process::{ExitCode, Stdio};
-use std::time::{Duration, Instant};
-
-/// How long to wait for a server this command started to begin listening.
-const SERVER_START_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long a connection attempt may take before the server is presumed
-/// not to be running.
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+use std::process::ExitCode;
 
 /// The commands bb has of its own. Bazel has no commands by these names,
 /// so every other command line is a Bazel one.
-const BB_COMMANDS: [&str; 4] = ["up", "status", "actions", "artifacts"];
+const BB_COMMANDS: [&str; 3] = ["up", "server", "artifacts"];
 
 /// Bazel's exit code for a command cancelled by an interrupt.
 const INTERRUPTED: u8 = 8;
+
+/// How many interrupts abandon a command rather than waiting for it to
+/// stop.
+const ABANDONING_INTERRUPTS: u32 = 3;
 
 /// Whether a command line is a Bazel command rather than one of bb's own.
 pub fn is_bazel_command(args: &[OsString]) -> bool {
@@ -33,8 +28,17 @@ pub fn is_bazel_command(args: &[OsString]) -> bool {
     !first.is_some_and(|first| BB_COMMANDS.contains(&first))
 }
 
+/// How a command ended.
+enum Outcome {
+    Exited(ExitCode),
+    /// The server wouldn't run it, for this reason, and should be
+    /// restarted.
+    Restart(String),
+}
+
 /// Run a Bazel command line in the server, starting the server if it isn't
-/// running, and exit as the command does.
+/// running, or isn't the same build as this client, and exit as the
+/// command does.
 pub async fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
     let args: Vec<String> = args
         .into_iter()
@@ -44,12 +48,22 @@ pub async fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
         println!("{PRODUCT} {VERSION}");
         return Ok(ExitCode::SUCCESS);
     }
-    let config = config::load(None, Settings::default(), &Environment::from_process())?;
-    ensure_server(config.listen).await?;
+    let daemon = Daemon::new(None)?;
+    let request = run_request(args)?;
+    daemon.ensure_running().await?;
+    if let Outcome::Exited(code) = run_once(&daemon.client()?, request.clone()).await? {
+        return Ok(code);
+    }
+    daemon.stop(false).await?;
+    daemon.ensure_running().await?;
+    match run_once(&daemon.client()?, request).await? {
+        Outcome::Exited(code) => Ok(code),
+        Outcome::Restart(reason) => Err(format!("the server won't run the command: {reason}").into()),
+    }
+}
 
-    let uri = crate::client::url_for(config.listen).parse()?;
-    let client = BazelClient::new(HttpClient::plaintext(), ClientConfig::new(uri));
-    let request = RunRequest {
+fn run_request(args: Vec<String>) -> Result<RunRequest, Box<dyn Error>> {
+    Ok(RunRequest {
         args,
         working_directory: std::env::current_dir()?.display().to_string(),
         env: std::env::vars()
@@ -61,30 +75,65 @@ pub async fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
             .collect(),
         interactive: std::io::stderr().is_terminal(),
         terminal_columns: terminal_columns().unwrap_or(0),
+        build_id: bazel_server::build_id().unwrap_or_default().to_string(),
         ..Default::default()
-    };
+    })
+}
+
+/// Run a command, copying its output to stdout and stderr until it ends.
+/// An interrupt cancels it, and it ends as the server ends it; enough of
+/// them abandon it.
+async fn run_once(client: &BazelClient<HttpClient>, request: RunRequest) -> Result<Outcome, Box<dyn Error>> {
     let mut stream = client.run(request).await?;
-    let forward = async {
-        while let Some(message) = stream.message().await? {
-            if let Some(code) = write_output(message.to_owned_message())? {
-                return Ok(code);
+    let mut invocation = None;
+    let mut interrupts = 0;
+    loop {
+        tokio::select! {
+            message = stream.message() => {
+                let Some(message) = message? else {
+                    return Err("the server closed the connection before the command finished".into());
+                };
+                match message.to_owned_message().output {
+                    Some(run_response::Output::InvocationId(id)) => invocation = Some(id),
+                    Some(run_response::Output::Restart(restart)) => return Ok(Outcome::Restart(restart.reason)),
+                    output => {
+                        if let Some(code) = write_output(output)? {
+                            return Ok(Outcome::Exited(code));
+                        }
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                interrupts += 1;
+                if interrupts >= ABANDONING_INTERRUPTS {
+                    eprintln!("\n{PRODUCT} caught third interrupt signal; abandoning the command.\n");
+                    return Ok(Outcome::Exited(ExitCode::from(INTERRUPTED)));
+                }
+                eprintln!("\n{PRODUCT} caught interrupt signal; cancelling pending invocation.\n");
+                if let Some(id) = &invocation {
+                    cancel(client, id).await;
+                }
             }
         }
-        Err("the server closed the connection before the command finished".into())
+    }
+}
+
+/// Ask the server to cancel a command. If it can't be asked, the command
+/// is left to finish.
+async fn cancel(client: &BazelClient<HttpClient>, id: &str) {
+    let request = CancelRequest {
+        invocation_id: id.to_string(),
+        ..Default::default()
     };
-    tokio::select! {
-        result = forward => result,
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("\n{PRODUCT} caught interrupt signal; cancelling pending invocation.\n");
-            Ok(ExitCode::from(INTERRUPTED))
-        }
+    if let Err(error) = client.cancel(request).await {
+        eprintln!("ERROR: couldn't cancel the command: {error}");
     }
 }
 
 /// Write one message of a command's output to stdout or stderr, returning
 /// the exit code once the command has finished.
-fn write_output(message: RunResponse) -> Result<Option<ExitCode>, Box<dyn Error>> {
-    match message.output {
+fn write_output(output: Option<run_response::Output>) -> Result<Option<ExitCode>, Box<dyn Error>> {
+    match output {
         Some(run_response::Output::Stdout(bytes)) => std::io::stdout().write_all(&bytes)?,
         Some(run_response::Output::Stderr(bytes)) => std::io::stderr().write_all(&bytes)?,
         Some(run_response::Output::ExitCode(code)) => {
@@ -95,7 +144,7 @@ fn write_output(message: RunResponse) -> Result<Option<ExitCode>, Box<dyn Error>
             std::io::stdout().flush()?;
             return Err(exec_program(*exec).into());
         }
-        None => {}
+        Some(run_response::Output::InvocationId(_) | run_response::Output::Restart(_)) | None => {}
     }
     Ok(None)
 }
@@ -113,34 +162,6 @@ fn exec_program(exec: Exec) -> std::io::Error {
     command.exec()
 }
 
-/// Start the server in the background, unless it's already listening.
-async fn ensure_server(listen: SocketAddr) -> Result<(), Box<dyn Error>> {
-    let address = loopback(listen);
-    if is_listening(address).await {
-        return Ok(());
-    }
-    start_server()?;
-    let deadline = Instant::now() + SERVER_START_TIMEOUT;
-    while Instant::now() < deadline {
-        if is_listening(address).await {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    Err(format!("the server didn't start listening on {address} within {SERVER_START_TIMEOUT:?}").into())
-}
-
-async fn is_listening(address: SocketAddr) -> bool {
-    matches!(tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(address)).await, Ok(Ok(_)))
-}
-
-fn loopback(listen: SocketAddr) -> SocketAddr {
-    crate::client::url_for(listen)
-        .trim_start_matches("http://")
-        .parse()
-        .unwrap_or(listen)
-}
-
 /// The width of the terminal stderr is on, if it is one.
 fn terminal_columns() -> Option<u32> {
     let mut size = libc::winsize {
@@ -154,25 +175,6 @@ fn terminal_columns() -> Option<u32> {
     (result == 0 && size.ws_col > 0).then_some(u32::from(size.ws_col))
 }
 
-/// Run `bb up` detached from this process, logging to the bazel directory.
-fn start_server() -> Result<(), Box<dyn Error>> {
-    let config = config::load(None, Settings::default(), &Environment::from_process())?;
-    std::fs::create_dir_all(&config.bazel_dir)?;
-    let log_path = config.bazel_dir.join("server.log");
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
-    let program = std::env::current_exe()?;
-    eprintln!("Starting local {PRODUCT} server ({VERSION}) and connecting to it...");
-    let mut command = std::process::Command::new(program);
-    command
-        .arg("up")
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .process_group(0);
-    command.spawn()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,7 +186,8 @@ mod tests {
     #[test]
     fn only_bb_commands_are_not_bazel_commands() {
         assert!(!is_bazel_command(&args("up --root /data")));
-        assert!(!is_bazel_command(&args("status")));
+        assert!(!is_bazel_command(&args("server status")));
+        assert!(is_bazel_command(&args("status")));
         assert!(is_bazel_command(&args("")));
         assert!(is_bazel_command(&args("--help")));
         assert!(is_bazel_command(&args("config")));

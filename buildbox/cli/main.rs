@@ -6,9 +6,10 @@ mod bazel;
 mod blobs;
 mod client;
 mod config_args;
+mod daemon;
 mod format;
 mod image_layout;
-mod status;
+mod server_command;
 mod up;
 
 use clap::{Parser, Subcommand};
@@ -31,11 +32,9 @@ enum Command {
     /// Run the server.
     Up(up::UpArgs),
 
-    /// Summarise a running server's storage and load.
-    Status(status::StatusArgs),
-
-    /// List the actions a running server is handling.
-    Actions(actions::ActionsArgs),
+    /// Inspect and control the server: its status, commands and metrics,
+    /// and starting and stopping it.
+    Server(server_command::ServerArgs),
 
     /// Manage a running server's artifacts, such as container images.
     Artifacts(artifacts::ArtifactsArgs),
@@ -128,8 +127,7 @@ fn run_bazel(args: Vec<OsString>) -> ExitCode {
 async fn run(command: Command) -> Result<(), Box<dyn Error>> {
     match command {
         Command::Up(args) => up::run(args).await,
-        Command::Status(args) => status::run(args).await,
-        Command::Actions(args) => actions::run(args).await,
+        Command::Server(args) => server_command::run(args).await,
         Command::Artifacts(args) => artifacts::run(args).await,
     }
 }

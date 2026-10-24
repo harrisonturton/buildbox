@@ -61,19 +61,32 @@ build --remote_executor=grpc://[::1]:50051
 Actions run on the server's host, so toolchains need to work there. Toolchains
 that Bazel downloads (rather than ones installed on the host) make this easy.
 
-While the server runs, the CLI can inspect it:
+While the server runs, `bb server` inspects and controls it:
 
 ```
-$ bb status
-buildbox 0.1.0, up 2h 5m
+$ bb server status
+bb 0.1.0 (build 42a59e29c9c…), pid 3577846, up 2h 5m
 CAS           34102 blobs, 9.2 GiB      /home/me/.cache/buildbox/cas
 Action cache  381 entries, 161.6 KiB    /home/me/.cache/buildbox/ac
 Actions       48 running, 4 queued, limit 48
+Commands      1 running
+Workspaces    2 with 118204 keys
+Memory        1.1 GiB allocated, 1.3 GiB resident
 
-$ bb actions
+$ bb server actions
 ID      STATE    TIME      ENVIRONMENT   COMMAND
 52      running  822ms     default       /bin/bash -c source external/bazel_tools/tools/genrule/genrule-setup.sh; ...
 ```
+
+`bb server commands` lists the Bazel commands it's running, and `bb server
+cancel` cancels them; `bb server metrics` shows what its build graphs hold;
+`bb server logs` prints the log of a server started in the background; and
+`bb server start`, `stop` and `restart` do what they say. `stop` waits for
+running commands to finish, unless given `--now`.
+
+Every other command line is run as Bazel would run it, `bb build //...` say,
+starting a server in the background if none is running. A server that's a
+different build from the client finishes its commands and is replaced.
 
 ## Running actions in containers
 

@@ -1,1 +1,2 @@
-This command shuts down the memory resident bb server process.
+Frees the memory the bb server uses for this workspace's build graph.
+The server is shared by every workspace; 'bb server stop' stops it.

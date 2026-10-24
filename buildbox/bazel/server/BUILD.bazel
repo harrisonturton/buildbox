@@ -23,6 +23,7 @@ rust_library(
     name = "server",
     srcs = [
         "build.rs",
+        "build_id.rs",
         "command.rs",
         "commands.rs",
         "help.rs",
@@ -31,6 +32,7 @@ rust_library(
         "repos.rs",
         "run.rs",
         "runfiles.rs",
+        "running.rs",
         "server.rs",
         "service.rs",
         "test.rs",
@@ -87,4 +89,9 @@ rust_library(
         "@crates//:tracing",
         "@crates//:zip",
     ],
+)
+
+rust_test(
+    name = "server_test",
+    crate = ":server",
 )

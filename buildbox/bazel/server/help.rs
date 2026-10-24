@@ -56,7 +56,7 @@ const COMMANDS: &[CommandHelp] = &[
     },
     CommandHelp {
         name: "shutdown",
-        summary: "Stops the bb server.",
+        summary: "Frees the memory this workspace's build graph uses.",
         page: include_str!("help/shutdown.txt"),
     },
     CommandHelp {
@@ -73,10 +73,9 @@ const COMMANDS: &[CommandHelp] = &[
 
 /// bb's own commands, which the client runs.
 const BB_COMMANDS: &[(&str, &str)] = &[
-    ("actions", "Lists the actions the buildbox server is handling."),
-    ("artifacts", "Manages the buildbox server's artifacts, such as container images."),
-    ("status", "Summarises the buildbox server's storage and load."),
-    ("up", "Runs the buildbox server."),
+    ("artifacts", "Manages the server's artifacts, such as container images."),
+    ("server", "Inspects and controls the server: status, commands, metrics, logs, stop."),
+    ("up", "Runs the server in the foreground."),
 ];
 
 /// The startup options bb reads, as `help startup_options` lists them.

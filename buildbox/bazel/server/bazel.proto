@@ -7,6 +7,16 @@ package buildbox.bazel.v1;
 service Bazel {
   // Run a command, such as `build` or `query`, streaming its output.
   rpc Run(RunRequest) returns (stream RunResponse);
+
+  // Cancel a running command, which then ends as an interrupted one does.
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+
+  // Describe the server: its build, the commands it's running, its
+  // workspaces and what it holds in memory.
+  rpc GetServer(GetServerRequest) returns (GetServerResponse);
+
+  // Stop the server once its commands have finished, or cancelling them.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
 message RunRequest {
@@ -25,6 +35,10 @@ message RunRequest {
 
   // The width of the client's terminal, or 0 if it isn't on one.
   uint32 terminal_columns = 5;
+
+  // The client's build, which the server's must match to run the command.
+  // Empty if the client couldn't tell.
+  string build_id = 6;
 }
 
 message EnvironmentVariable {
@@ -46,8 +60,104 @@ message RunResponse {
     // `bazel run`: the client should run this program, then exit with its
     // exit code.
     Exec exec = 4;
+
+    // The command has started, with this id, by which it can be cancelled.
+    // Always the first message of a command that runs.
+    string invocation_id = 5;
+
+    // The server won't run the command, because it's a different build
+    // from the client or it's shutting down: the client should wait for
+    // it to stop, then start one of its own build. The only message.
+    Restart restart = 6;
   }
 }
+
+message Restart {
+  // Why the server won't run the command.
+  string reason = 1;
+}
+
+message CancelRequest {
+  string invocation_id = 1;
+}
+
+message CancelResponse {
+  // Whether a command with that id was running.
+  bool cancelled = 1;
+}
+
+message GetServerRequest {}
+
+message GetServerResponse {
+  string version = 1;
+  string build_id = 2;
+  uint32 pid = 3;
+  uint64 uptime_seconds = 4;
+  // Whether the server is waiting for its commands to finish to stop.
+  bool shutting_down = 5;
+  repeated RunningCommand commands = 6;
+  repeated WorkspaceInfo workspaces = 7;
+  EngineMetrics engine = 8;
+  MemoryMetrics memory = 9;
+}
+
+message RunningCommand {
+  string invocation_id = 1;
+  repeated string args = 2;
+  string working_directory = 3;
+  uint64 running_millis = 4;
+}
+
+message WorkspaceInfo {
+  string root = 1;
+  // The keys the workspace's graph has results for, and their bytes.
+  uint64 nodes = 2;
+  uint64 node_bytes = 3;
+  uint32 revision = 4;
+}
+
+// What the engine shared by every workspace holds.
+message EngineMetrics {
+  uint64 keys = 1;
+  uint64 key_bytes = 2;
+  uint64 memo_keys = 3;
+  uint64 memo_traces = 4;
+  uint64 values = 5;
+  uint64 live_values = 6;
+  // Bytes of values before and after compression.
+  uint64 raw_bytes = 7;
+  uint64 stored_bytes = 8;
+  uint64 cache_entries = 9;
+  uint64 cache_bytes = 10;
+  repeated KindMetrics kinds = 11;
+}
+
+// The engine's work and values for one kind of key.
+message KindMetrics {
+  string name = 1;
+  uint64 computed = 2;
+  uint64 verified = 3;
+  uint64 reused = 4;
+  uint64 values = 5;
+  uint64 raw_bytes = 6;
+  uint64 stored_bytes = 7;
+  uint64 compute_millis = 8;
+}
+
+// The allocator's view of the server's memory, if it can tell.
+message MemoryMetrics {
+  uint64 allocated_bytes = 1;
+  uint64 active_bytes = 2;
+  uint64 resident_bytes = 3;
+  uint64 mapped_bytes = 4;
+}
+
+message ShutdownRequest {
+  // Cancel the running commands, rather than waiting for them to finish.
+  bool cancel_commands = 1;
+}
+
+message ShutdownResponse {}
 
 message Exec {
   repeated string argv = 1;

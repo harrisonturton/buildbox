@@ -7,6 +7,7 @@
 //! server lock.
 
 mod build;
+mod build_id;
 mod command;
 mod commands;
 mod help;
@@ -15,13 +16,16 @@ mod output;
 mod repos;
 mod run;
 mod runfiles;
+mod running;
 mod service;
 mod test;
 mod top_level;
 mod workspace;
 mod written;
 
+pub use build_id::build_id;
 pub use command::{Invocation, PRODUCT, VERSION, exit};
+pub use running::{RunningCommand, RunningCommands};
 pub use memory::configure_allocator;
 pub use output::Output;
 pub use service::BazelService;
@@ -33,7 +37,9 @@ use persist::PersistedMap;
 use skycodec::{Fingerprint, Fingerprinter};
 use std::io::Read;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+use tokio::sync::Notify;
 use bazel_loading::{BuiltinsDir, Repositories};
 use skyframe::{Engine, EngineConfig, Globals, Persistence};
 use std::path::PathBuf;
@@ -53,8 +59,17 @@ pub struct BazelServer {
     config: ServerConfig,
     workspaces: Workspaces,
     saved: Arc<SavedState>,
-    /// How many commands are running; the engine is saved when none is.
-    running: Arc<AtomicUsize>,
+    /// The commands running; the engine is saved when none is.
+    commands: Arc<RunningCommands>,
+    started: Instant,
+    shutdown: Shutdown,
+}
+
+/// Whether the server has been asked to stop.
+#[derive(Default)]
+struct Shutdown {
+    requested: AtomicBool,
+    notify: Notify,
 }
 
 /// Above this many bytes of saved values, the engine keeps only each key's
@@ -197,11 +212,15 @@ impl BazelServer {
         if let Some(backend) = &config.backend {
             services = services.with(backend.clone());
         }
+        let workspaces = Workspaces::new(engine, services);
+        let commands = RunningCommands::new(after_command(saved.clone(), workspaces.engine().clone()));
         BazelServer {
             config,
-            workspaces: Workspaces::new(engine, services),
+            workspaces,
             saved,
-            running: Arc::new(AtomicUsize::new(0)),
+            commands,
+            started: Instant::now(),
+            shutdown: Shutdown::default(),
         }
     }
 
@@ -219,13 +238,60 @@ impl BazelServer {
     }
 
     /// Run a command line, writing its output to `out`, and return its exit
-    /// code.
+    /// code. A command that's cancelled stops where it is, as its work is
+    /// dropped, and ends as an interrupted command does.
     pub async fn run(&self, invocation: Invocation, out: &Output) -> i32 {
-        self.running.fetch_add(1, Ordering::SeqCst);
-        let code = command::run(self, invocation, out).await;
-        let idle = self.running.fetch_sub(1, Ordering::SeqCst) == 1;
-        let saved = self.saved.clone();
-        let engine = idle.then(|| self.workspaces.engine().clone());
+        let registration = self.commands.start(invocation.args.clone(), invocation.working_directory.clone());
+        let command = registration.command().clone();
+        out.started(&command.id).await;
+        tokio::select! {
+            code = command::run(self, invocation, out) => code,
+            () = command.cancelled() => command::interrupted(&command, out).await,
+        }
+    }
+
+    pub fn commands(&self) -> &Arc<RunningCommands> {
+        &self.commands
+    }
+
+    /// How long the server has been running.
+    pub fn uptime(&self) -> std::time::Duration {
+        self.started.elapsed()
+    }
+
+    /// Ask the server to stop: once its commands have finished, or at once,
+    /// cancelling them. It runs no more commands.
+    pub fn request_shutdown(&self, cancel_commands: bool) {
+        self.shutdown.requested.store(true, Ordering::SeqCst);
+        if cancel_commands {
+            self.commands.cancel_all();
+        }
+        self.shutdown.notify.notify_one();
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown.requested.load(Ordering::SeqCst)
+    }
+
+    /// Wait until the server is asked to stop.
+    pub async fn shutdown_requested(&self) {
+        self.shutdown.notify.notified().await;
+    }
+
+    /// Save the engine now, as when the server stops. Blocks on the
+    /// filesystem.
+    pub fn save(&self) {
+        self.saved.save();
+        checkpoint(self.workspaces.engine());
+    }
+}
+
+/// What to do after each command: save what changed, and once no command
+/// is running, the engine, paging analysis out; then return freed memory.
+fn after_command(saved: Arc<SavedState>, engine: Engine) -> impl Fn(bool) + Send + Sync + 'static {
+    move |idle| {
+        let saved = saved.clone();
+        let engine = idle.then(|| engine.clone());
         tokio::task::spawn_blocking(move || {
             saved.save();
             if let Some(engine) = engine {
@@ -234,13 +300,5 @@ impl BazelServer {
             }
             memory::release_free_memory();
         });
-        code
-    }
-
-    /// Save the engine now, as when the server stops. Blocks on the
-    /// filesystem.
-    pub fn save(&self) {
-        self.saved.save();
-        checkpoint(self.workspaces.engine());
     }
 }

@@ -3,7 +3,10 @@
 use crate::output::Output;
 use crate::{BazelServer, Invocation};
 use bazel_ui::Terminal;
-use bazel_rust_connect::buildbox::bazel::v1::{Bazel, RunRequest, RunResponse, run_response};
+use bazel_rust_connect::buildbox::bazel::v1::{
+    Bazel, CancelRequest, CancelResponse, EngineMetrics, GetServerRequest, GetServerResponse, KindMetrics, MemoryMetrics, Restart, RunRequest,
+    RunResponse, RunningCommand, ShutdownRequest, ShutdownResponse, WorkspaceInfo, run_response,
+};
 use connectrpc::{RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
 use futures::Stream;
 use std::path::PathBuf;
@@ -33,6 +36,9 @@ impl BazelService {
 impl Bazel for BazelService {
     async fn run(&self, _ctx: RequestContext, request: ServiceRequest<'_, RunRequest>) -> ServiceResult<ServiceStream<RunResponse>> {
         let request = request.to_owned_message();
+        if let Some(reason) = self.refusal(&request.build_id) {
+            return Response::ok(restart(reason));
+        }
         let invocation = Invocation {
             args: request.args,
             working_directory: PathBuf::from(request.working_directory),
@@ -58,6 +64,141 @@ impl Bazel for BazelService {
         });
         let stream: ServiceStream<RunResponse> = Box::pin(CommandStream { receiver, task });
         Response::ok(stream)
+    }
+
+    async fn cancel(&self, _ctx: RequestContext, request: ServiceRequest<'_, CancelRequest>) -> ServiceResult<CancelResponse> {
+        let request = request.to_owned_message();
+        let cancelled = self.server.commands().cancel(&request.invocation_id);
+        Response::ok(CancelResponse {
+            cancelled,
+            ..Default::default()
+        })
+    }
+
+    async fn get_server(&self, _ctx: RequestContext, _request: ServiceRequest<'_, GetServerRequest>) -> ServiceResult<GetServerResponse> {
+        Response::ok(describe(&self.server))
+    }
+
+    async fn shutdown(&self, _ctx: RequestContext, request: ServiceRequest<'_, ShutdownRequest>) -> ServiceResult<ShutdownResponse> {
+        let request = request.to_owned_message();
+        tracing::info!(cancel_commands = request.cancel_commands, "asked to shut down");
+        self.server.request_shutdown(request.cancel_commands);
+        Response::ok(ShutdownResponse::default())
+    }
+}
+
+impl BazelService {
+    /// Why the server won't run a client's command, if it won't.
+    fn refusal(&self, client_build: &str) -> Option<String> {
+        if self.server.is_shutting_down() {
+            return Some("the server is shutting down".to_string());
+        }
+        let server_build = crate::build_id().unwrap_or_default();
+        if !client_build.is_empty() && !server_build.is_empty() && client_build != server_build {
+            return Some(format!("the server is build {server_build}, the client {client_build}"));
+        }
+        None
+    }
+}
+
+/// A stream telling the client to restart the server, for `reason`.
+fn restart(reason: String) -> ServiceStream<RunResponse> {
+    let restart = Restart {
+        reason,
+        ..Default::default()
+    };
+    let response = RunResponse {
+        output: Some(run_response::Output::Restart(Box::new(restart))),
+        ..Default::default()
+    };
+    Box::pin(futures::stream::iter([Ok(response)]))
+}
+
+/// The server, as `GetServer` describes it.
+fn describe(server: &BazelServer) -> GetServerResponse {
+    let commands = server
+        .commands()
+        .list()
+        .iter()
+        .map(|command| RunningCommand {
+            invocation_id: command.id.clone(),
+            args: command.args.clone(),
+            working_directory: command.working_directory.display().to_string(),
+            running_millis: command.started.elapsed().as_millis() as u64,
+            ..Default::default()
+        })
+        .collect();
+    let workspaces = server
+        .workspaces()
+        .roots()
+        .into_iter()
+        .map(|root| {
+            let stats = server.workspaces().get(&root).graph.stats();
+            WorkspaceInfo {
+                root: root.display().to_string(),
+                nodes: stats.nodes,
+                node_bytes: stats.node_bytes,
+                revision: stats.revision,
+                ..Default::default()
+            }
+        })
+        .collect();
+    GetServerResponse {
+        version: crate::VERSION.to_string(),
+        build_id: crate::build_id().unwrap_or_default().to_string(),
+        pid: std::process::id(),
+        uptime_seconds: server.uptime().as_secs(),
+        shutting_down: server.is_shutting_down(),
+        commands,
+        workspaces,
+        engine: engine_metrics(&server.workspaces().engine().stats()).into(),
+        memory: memory_metrics().into(),
+        ..Default::default()
+    }
+}
+
+fn engine_metrics(stats: &skyframe::EngineStats) -> EngineMetrics {
+    let kinds = stats
+        .kinds
+        .iter()
+        .map(|kind| KindMetrics {
+            name: kind.name.clone(),
+            computed: kind.computed,
+            verified: kind.verified,
+            reused: kind.reused,
+            values: kind.values.values,
+            raw_bytes: kind.values.raw_bytes,
+            stored_bytes: kind.values.stored_bytes,
+            compute_millis: kind.compute_time.as_millis() as u64,
+            ..Default::default()
+        })
+        .collect();
+    EngineMetrics {
+        keys: stats.keys,
+        key_bytes: stats.key_bytes,
+        memo_keys: stats.memo_keys,
+        memo_traces: stats.memo_traces,
+        values: stats.store.values,
+        live_values: stats.store.live_values,
+        raw_bytes: stats.store.raw_bytes,
+        stored_bytes: stats.store.stored_bytes,
+        cache_entries: stats.cache.entries,
+        cache_bytes: stats.cache.bytes,
+        kinds,
+        ..Default::default()
+    }
+}
+
+fn memory_metrics() -> MemoryMetrics {
+    let Some(stats) = crate::memory::allocator_stats() else {
+        return MemoryMetrics::default();
+    };
+    MemoryMetrics {
+        allocated_bytes: stats.allocated,
+        active_bytes: stats.active,
+        resident_bytes: stats.resident,
+        mapped_bytes: stats.mapped,
+        ..Default::default()
     }
 }
 

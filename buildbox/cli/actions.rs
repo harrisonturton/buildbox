@@ -1,4 +1,4 @@
-//! `buildbox actions`: list the actions a running server is handling.
+//! `bb server actions`: list the actions a running server is handling.
 
 use crate::client::ClientArgs;
 use crate::format;

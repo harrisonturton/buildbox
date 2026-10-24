@@ -153,6 +153,11 @@ impl Output {
         ui.send_stderr(written).await;
     }
 
+    /// Tell the client the command has started, with id `id`.
+    pub async fn started(&self, id: &str) {
+        self.ui.lock().await.send(run_response::Output::InvocationId(id.to_string())).await;
+    }
+
     /// Tell the client to run a program, as `bazel run` does.
     pub async fn exec(&self, argv: Vec<String>, working_directory: &std::path::Path, env: Vec<(String, String)>) {
         self.finish().await;

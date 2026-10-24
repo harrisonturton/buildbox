@@ -68,9 +68,11 @@ pub enum ServerError {
     },
 }
 
-/// Run the server until it receives SIGINT or SIGTERM.
+/// Run the server until it receives SIGINT or SIGTERM, or is asked to stop.
 ///
-/// On a signal the server stops accepting requests and gives running ones
+/// On a signal the server cancels the Bazel commands it's running; when
+/// asked to stop, it waits for them, unless asked to cancel them. Then it
+/// stops accepting requests and gives running ones
 /// [`SHUTDOWN_GRACE_PERIOD`] to finish. Requests still running after that,
 /// and the actions they started, are stopped when the async runtime shuts
 /// down.
@@ -147,7 +149,11 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
             invocations.close_all();
             return serve_result(config, result);
         }
-        () = shutdown_signal() => {}
+        () = shutdown_signal() => bazel_server.commands().cancel_all(),
+        () = bazel_server.shutdown_requested() => {
+            tracing::info!("waiting for running commands to finish");
+            bazel_server.commands().wait_idle().await;
+        }
     }
 
     // The receiver is held by the server, so this can't fail.

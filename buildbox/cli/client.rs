@@ -5,6 +5,7 @@ use admin_rust_connect::buildbox::admin::v1::{
     AdminClient, Artifact, DeleteArtifactRequest, GetStatusRequest, GetStatusResponse, ImportContainerImageRequest,
     ListActionsRequest, ListActionsResponse, ListArtifactsRequest,
 };
+use bazel_rust_connect::buildbox::bazel::v1::{BazelClient, CancelRequest, GetServerRequest, GetServerResponse};
 use clap::Args;
 use config::{Environment, Settings};
 use connectrpc::client::{ClientConfig, HttpClient};
@@ -30,6 +31,13 @@ impl ClientArgs {
         let (uri, url) = self.server_uri()?;
         let client = AdminClient::new(HttpClient::plaintext(), ClientConfig::new(uri));
         Ok(Admin { client, url })
+    }
+
+    /// Connect to the server's Bazel service, to inspect and control it.
+    pub fn connect_server(&self) -> Result<Control, Box<dyn Error>> {
+        let (uri, url) = self.server_uri()?;
+        let client = BazelClient::new(HttpClient::plaintext(), ClientConfig::new(uri));
+        Ok(Control { client, url })
     }
 
     /// Connect to the server's CAS, to upload blobs.
@@ -110,6 +118,36 @@ impl Admin {
 
     fn call_error(&self, error: ConnectError) -> Box<dyn Error> {
         format!("request to {} failed: {error}", self.url).into()
+    }
+}
+
+/// A client for a server's Bazel service, as far as inspecting and
+/// controlling the server goes.
+pub struct Control {
+    client: BazelClient<HttpClient>,
+    url: String,
+}
+
+impl Control {
+    pub async fn get_server(&self) -> Result<GetServerResponse, Box<dyn Error>> {
+        let response = self.client.get_server(GetServerRequest::default()).await;
+        match response {
+            Ok(response) => Ok(response.into_owned()),
+            Err(error) => Err(format!("request to {} failed: {error}", self.url).into()),
+        }
+    }
+
+    /// Cancel a command, returning whether it was running.
+    pub async fn cancel(&self, invocation_id: &str) -> Result<bool, Box<dyn Error>> {
+        let request = CancelRequest {
+            invocation_id: invocation_id.to_string(),
+            ..Default::default()
+        };
+        let response = self.client.cancel(request).await;
+        match response {
+            Ok(response) => Ok(response.into_owned().cancelled),
+            Err(error) => Err(format!("request to {} failed: {error}", self.url).into()),
+        }
     }
 }
 
