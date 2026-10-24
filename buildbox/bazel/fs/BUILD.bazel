@@ -1,0 +1,29 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "fs",
+    srcs = [
+        "fs.rs",
+        "glob.rs",
+        "tests.rs",
+    ],
+    crate_name = "bazel_fs",
+    crate_root = "fs.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/intern",
+        "//buildbox/skycodec",
+        "//buildbox/skyframe",
+        "@crates//:rustc-hash",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "fs_test",
+    crate = ":fs",
+    deps = ["@crates//:tempfile"],
+)
