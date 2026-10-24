@@ -101,18 +101,21 @@ impl Key for RegisteredToolchainsKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<RegisteredToolchains, SkyError> {
         let registrations = ctx.compute(&RegistrationsKey).await?;
-        let mut toolchains = Vec::new();
-        let mut execution_platforms = Vec::new();
+        let mut toolchain_patterns = Vec::new();
+        let mut platform_patterns = Vec::new();
         for registration in &registrations.0 {
-            for pattern in &registration.toolchains {
-                for label in expand(ctx, registration.repo, pattern, "toolchain").await? {
-                    toolchains.push(declared_toolchain(ctx, label).await?);
-                }
-            }
-            for pattern in &registration.execution_platforms {
-                execution_platforms.extend(expand(ctx, registration.repo, pattern, "platform").await?);
-            }
+            toolchain_patterns.extend(registration.toolchains.iter().map(|pattern| (registration.repo, pattern.as_str())));
+            platform_patterns.extend(registration.execution_platforms.iter().map(|pattern| (registration.repo, pattern.as_str())));
         }
+        let (labels, execution_platforms) = futures::try_join!(
+            expand(ctx, &toolchain_patterns, "toolchain"),
+            expand(ctx, &platform_patterns, "platform")
+        )?;
+        let mut declared = Vec::with_capacity(labels.len());
+        for label in labels {
+            declared.push(declared_toolchain(ctx, label));
+        }
+        let toolchains = futures::future::try_join_all(declared).await?;
         Ok(RegisteredToolchains {
             toolchains,
             execution_platforms,
@@ -120,26 +123,53 @@ impl Key for RegisteredToolchainsKey {
     }
 }
 
-/// The rules of `kind` a registration's pattern names, in order.
-async fn expand(ctx: &Ctx, repo: RepoName, pattern: &str, kind: &str) -> Result<Vec<Label>, SkyError> {
-    let mapping = ctx.compute(&RepoMappingKey(repo)).await?;
-    let context = LabelContext::new(PackageId::new(repo, PathId::ROOT), &mapping.0);
-    let parsed = TargetPattern::parse(pattern, &context).map_err(|error| SkyError::new(format!("registering '{pattern}': {error}")))?;
-    let packages = match parsed {
-        TargetPattern::Target(label) => return Ok(vec![label]),
-        TargetPattern::Package { package, .. } => vec![package],
-        TargetPattern::Recursive { repo, prefix, .. } => bazel_loading::packages_beneath(ctx, repo, prefix).await?,
-    };
+/// The rules of `kind` that registration patterns name, in order. Every
+/// package the patterns cover is loaded at once.
+async fn expand(ctx: &Ctx, patterns: &[(RepoName, &str)], kind: &str) -> Result<Vec<Label>, SkyError> {
+    let mut parsing = Vec::with_capacity(patterns.len());
+    for (repo, pattern) in patterns {
+        parsing.push(pattern_packages(ctx, *repo, pattern));
+    }
+    let parsed = futures::future::try_join_all(parsing).await?;
+    let keys: Vec<PackageKey> = parsed.iter().flat_map(|named| named.packages.iter().map(|package| PackageKey(*package))).collect();
+    let mut loaded = ctx.compute_many(&keys).await.into_iter();
     let mut labels = Vec::new();
-    for package in packages {
-        let loaded = ctx.compute(&PackageKey(package)).await?;
-        for rule in loaded.0.rules() {
-            if loaded.0.rule_class(rule).kind.as_str() == kind {
-                labels.push(loaded.0.label(rule.name));
+    for named in parsed {
+        labels.extend(named.target);
+        for _ in &named.packages {
+            let package = loaded.next().ok_or_else(|| SkyError::new("a registered package wasn't loaded"))??;
+            for rule in package.0.rules() {
+                if package.0.rule_class(rule).kind.as_str() == kind {
+                    labels.push(package.0.label(rule.name));
+                }
             }
         }
     }
     Ok(labels)
+}
+
+/// What a registration pattern names: one target, or the packages whose
+/// rules it covers.
+struct Named {
+    target: Option<Label>,
+    packages: Vec<PackageId>,
+}
+
+async fn pattern_packages(ctx: &Ctx, repo: RepoName, pattern: &str) -> Result<Named, SkyError> {
+    let mapping = ctx.compute(&RepoMappingKey(repo)).await?;
+    let context = LabelContext::new(PackageId::new(repo, PathId::ROOT), &mapping.0);
+    let parsed = TargetPattern::parse(pattern, &context).map_err(|error| SkyError::new(format!("registering '{pattern}': {error}")))?;
+    let packages = match parsed {
+        TargetPattern::Target(label) => {
+            return Ok(Named {
+                target: Some(label),
+                packages: Vec::new(),
+            });
+        }
+        TargetPattern::Package { package, .. } => vec![package],
+        TargetPattern::Recursive { repo, prefix, .. } => bazel_loading::packages_beneath(ctx, repo, prefix).await?,
+    };
+    Ok(Named { target: None, packages })
 }
 
 async fn declared_toolchain(ctx: &Ctx, label: Label) -> Result<DeclaredToolchain, SkyError> {
