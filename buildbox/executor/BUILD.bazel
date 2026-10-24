@@ -14,28 +14,29 @@ rust_library(
     ],
 )
 
+# Runs actions in sandbox directories on this machine. How each command is run
+# is up to a Runner, such as :local's.
 rust_library(
-    name = "local",
+    name = "sandboxed",
     srcs = [
         "inputs.rs",
-        "local.rs",
         "outputs.rs",
         "paths.rs",
-        "process.rs",
         "sandbox.rs",
+        "sandboxed.rs",
     ],
-    crate_name = "executor_local",
-    crate_root = "local.rs",
+    crate_name = "executor_sandboxed",
+    crate_root = "sandboxed.rs",
     proc_macro_deps = ["@crates//:async-trait"],
-    visibility = ["//buildbox/server:__pkg__"],
+    visibility = ["//buildbox:__subpackages__"],
     deps = [
         ":executor",
         "//buildbox/cas",
         "//buildbox/fsutil",
+        "//buildbox/process",
         "//third_party/remoteapis:remote_execution_rust_connect",
         "@crates//:buffa",
         "@crates//:buffa-types",
-        "@crates//:libc",
         "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:tracing",
@@ -43,7 +44,31 @@ rust_library(
 )
 
 rust_test(
+    name = "sandboxed_test",
+    crate = ":sandboxed",
+    deps = ["//buildbox/cas:mem"],
+)
+
+rust_library(
+    name = "local",
+    srcs = ["local.rs"],
+    crate_name = "executor_local",
+    crate_root = "local.rs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox/server:__pkg__"],
+    deps = [
+        ":executor",
+        ":sandboxed",
+        "//buildbox/process",
+    ],
+)
+
+rust_test(
     name = "local_test",
     crate = ":local",
-    deps = ["//buildbox/cas:mem"],
+    deps = [
+        "//third_party/remoteapis:remote_execution_rust_connect",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+    ],
 )

@@ -13,6 +13,7 @@ rust_library(
         "//buildbox/config",
         "//buildbox/executor",
         "//buildbox/executor:local",
+        "//buildbox/executor:sandboxed",
         "//buildbox/reapi",
         "//buildbox/scheduler",
         "@crates//:connectrpc",

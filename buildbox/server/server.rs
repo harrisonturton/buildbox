@@ -8,7 +8,8 @@ use cas_fs::FsCas;
 use config::Config;
 use connectrpc::{ConnectRpcService, Limits, Router, Server};
 use executor::Executor;
-use executor_local::LocalExecutor;
+use executor_local::HostRunner;
+use executor_sandboxed::SandboxedExecutor;
 use reapi::{Invocations, RequestTracing, INVOCATION_IDLE_TIMEOUT, MAX_MESSAGE_SIZE_BYTES};
 use scheduler::Scheduler;
 use std::error::Error;
@@ -147,14 +148,18 @@ async fn open_action_cache(config: &Config) -> Result<FsActionCache, ServerError
         .map_err(|error| ServerError::ActionCache { error })
 }
 
-async fn open_executor(config: &Config, cas: Arc<dyn Cas>) -> Result<LocalExecutor, ServerError> {
+async fn open_executor(config: &Config, cas: Arc<dyn Cas>) -> Result<SandboxedExecutor, ServerError> {
     tracing::info!("using sandbox directory {}", config.sandbox_dir.display());
-    LocalExecutor::open(cas, config.sandbox_dir.clone(), config.keep_sandboxes)
+    executor_sandboxed::prepare_sandbox_root(&config.sandbox_dir, config.keep_sandboxes)
         .await
         .map_err(|error| ServerError::Sandbox {
             path: config.sandbox_dir.clone(),
             error,
-        })
+        })?;
+
+    let runner = Arc::new(HostRunner);
+    let worker_name = "buildbox-local".to_string();
+    Ok(SandboxedExecutor::new(cas, config.sandbox_dir.clone(), config.keep_sandboxes, runner, worker_name))
 }
 
 /// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM. Running

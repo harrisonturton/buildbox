@@ -1,9 +1,8 @@
-//! Running an action's command.
+//! Running a process to completion, capturing its output, and making sure
+//! nothing it started outlives it.
 
-use executor::ExecuteError;
-use remote_execution_rust_connect::build::bazel::remote::execution::v2::Command;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -16,7 +15,20 @@ use tracing::Span;
 const SPAWN_ATTEMPTS: u32 = 5;
 const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(10);
 
-/// What a finished command produced.
+/// A process to run.
+#[derive(Clone, Debug)]
+pub struct Invocation {
+    /// The program to run. A bare name is looked up in `PATH`.
+    pub program: PathBuf,
+    pub args: Vec<String>,
+
+    /// The process's entire environment.
+    pub env: Vec<(String, String)>,
+
+    pub working_dir: PathBuf,
+}
+
+/// What a finished process produced.
 #[derive(Debug)]
 pub struct ProcessOutput {
     pub exit_code: i32,
@@ -24,44 +36,51 @@ pub struct ProcessOutput {
     pub stderr: Vec<u8>,
 }
 
-/// Run `command` in `working_dir` and wait for it to finish.
-///
-/// The command gets exactly the environment variables it specifies. It runs
-/// in its own process group, and when it finishes, times out or is abandoned,
-/// every process still in the group is killed.
-#[tracing::instrument(name = "run_command", skip_all, fields(program = Empty, exit_code = Empty))]
-pub async fn run(command: &Command, working_dir: &Path, timeout: Option<Duration>) -> Result<ProcessOutput, ExecuteError> {
-    let Some((program, args)) = command.arguments.split_first() else {
-        return Err(ExecuteError::InvalidAction("command has no arguments".to_string()));
-    };
-    let program = resolve_program(program, working_dir);
-    let span = Span::current();
-    span.record("program", program.display().to_string());
+#[derive(Debug, thiserror::Error)]
+pub enum ProcessError {
+    #[error("failed to start {}: {error}", program.display())]
+    Start { program: PathBuf, error: std::io::Error },
 
-    let mut process = tokio::process::Command::new(&program);
+    /// The process ran for longer than its timeout and was killed.
+    #[error("timed out after {0:?}")]
+    Timeout(Duration),
+
+    #[error("failed to {action}: {error}")]
+    Io { action: &'static str, error: std::io::Error },
+}
+
+/// Run `invocation` and wait for it to finish.
+///
+/// The process runs in its own process group, and when it finishes, times out
+/// or is abandoned, every process still in the group is killed.
+#[tracing::instrument(name = "run_command", skip_all, fields(program = Empty, exit_code = Empty))]
+pub async fn run(invocation: &Invocation, timeout: Option<Duration>) -> Result<ProcessOutput, ProcessError> {
+    let span = Span::current();
+    span.record("program", invocation.program.display().to_string());
+
+    let mut process = tokio::process::Command::new(&invocation.program);
     process
-        .args(args)
-        .current_dir(working_dir)
+        .args(&invocation.args)
+        .current_dir(&invocation.working_dir)
         .env_clear()
+        .envs(invocation.env.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
-        // Stop the process if the action is abandoned, e.g. on timeout.
+        // Stop the process if it is abandoned, e.g. on timeout.
         .kill_on_drop(true);
-    for variable in &command.environment_variables {
-        process.env(&variable.name, &variable.value);
-    }
 
-    let child = spawn(&mut process).await.map_err(|error| {
-        ExecuteError::InvalidAction(format!("failed to start {}: {error}", program.display()))
+    let child = spawn(&mut process).await.map_err(|error| ProcessError::Start {
+        program: invocation.program.clone(),
+        error,
     })?;
 
     let finished = wait_for_output(child);
     let output = match timeout {
         Some(timeout) => tokio::time::timeout(timeout, finished)
             .await
-            .unwrap_or(Err(ExecuteError::Timeout(timeout))),
+            .unwrap_or(Err(ProcessError::Timeout(timeout))),
         None => finished.await,
     };
     if let Ok(output) = &output {
@@ -91,13 +110,13 @@ async fn spawn(process: &mut tokio::process::Command) -> std::io::Result<Child> 
     }
 }
 
-/// Wait for a command to exit, then kill anything it left running, and
+/// Wait for a process to exit, then kill anything it left running, and
 /// collect its output.
 ///
-/// Processes left running may hold copies of the command's stdout and
+/// Processes left running may hold copies of the process's stdout and
 /// stderr, so killing them is also what lets reading the output finish.
-/// Dropping the returned future kills the command and everything it started.
-async fn wait_for_output(mut child: Child) -> Result<ProcessOutput, ExecuteError> {
+/// Dropping the returned future kills the process and everything it started.
+async fn wait_for_output(mut child: Child) -> Result<ProcessOutput, ProcessError> {
     let group = ProcessGroup::of(&child);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -109,9 +128,9 @@ async fn wait_for_output(mut child: Child) -> Result<ProcessOutput, ExecuteError
     };
     let (status, stdout, stderr) = tokio::join!(wait, read_pipe(stdout), read_pipe(stderr));
 
-    let status = status.map_err(|error| ExecuteError::Internal(format!("failed to wait for command: {error}")))?;
-    let stdout = stdout.map_err(|error| ExecuteError::Internal(format!("failed to read stdout: {error}")))?;
-    let stderr = stderr.map_err(|error| ExecuteError::Internal(format!("failed to read stderr: {error}")))?;
+    let status = status.map_err(|error| io_error("wait for the process", error))?;
+    let stdout = stdout.map_err(|error| io_error("read stdout", error))?;
+    let stderr = stderr.map_err(|error| io_error("read stderr", error))?;
     Ok(ProcessOutput {
         exit_code: exit_code(status),
         stdout,
@@ -127,8 +146,8 @@ async fn read_pipe(pipe: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<
     Ok(data)
 }
 
-/// The process group a command runs in. Dropping it kills every process
-/// still in the group, so nothing a command started outlives it.
+/// The process group a process runs in. Dropping it kills every process
+/// still in the group, so nothing the process started outlives it.
 struct ProcessGroup {
     id: libc::pid_t,
 }
@@ -156,14 +175,8 @@ impl Drop for ProcessGroup {
     }
 }
 
-/// A program given as a relative path (containing a slash) is relative to the
-/// working directory. One given as a bare name is looked up in `PATH`.
-fn resolve_program(program: &str, working_dir: &Path) -> PathBuf {
-    let path = Path::new(program);
-    if program.contains('/') && path.is_relative() {
-        return working_dir.join(path);
-    }
-    path.to_path_buf()
+fn io_error(action: &'static str, error: std::io::Error) -> ProcessError {
+    ProcessError::Io { action, error }
 }
 
 /// The exit code, or for a process killed by a signal, 128 plus the signal
@@ -181,21 +194,23 @@ fn exit_code(status: ExitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use remote_execution_rust_connect::build::bazel::remote::execution::v2::command::EnvironmentVariable;
+    use std::path::Path;
 
-    fn shell_command(script: &str) -> Command {
-        Command {
-            arguments: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
-            ..Default::default()
+    fn shell(script: &str, working_dir: &Path) -> Invocation {
+        Invocation {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), script.to_string()],
+            env: vec![],
+            working_dir: working_dir.to_path_buf(),
         }
     }
 
     #[tokio::test]
     async fn captures_exit_code_and_output() {
         let dir = tempfile::tempdir().unwrap();
-        let command = shell_command("echo out; echo err >&2; exit 3");
+        let invocation = shell("echo out; echo err >&2; exit 3", dir.path());
 
-        let output = run(&command, dir.path(), None).await.unwrap();
+        let output = run(&invocation, None).await.unwrap();
 
         assert_eq!(output.exit_code, 3);
         assert_eq!(output.stdout, b"out\n");
@@ -205,14 +220,10 @@ mod tests {
     #[tokio::test]
     async fn sets_only_the_given_environment() {
         let dir = tempfile::tempdir().unwrap();
-        let mut command = shell_command("echo \"$GREETING\"; echo \"${HOME:-unset}\"");
-        command.environment_variables = vec![EnvironmentVariable {
-            name: "GREETING".to_string(),
-            value: "hello".to_string(),
-            ..Default::default()
-        }];
+        let mut invocation = shell("echo \"$GREETING\"; echo \"${HOME:-unset}\"", dir.path());
+        invocation.env = vec![("GREETING".to_string(), "hello".to_string())];
 
-        let output = run(&command, dir.path(), None).await.unwrap();
+        let output = run(&invocation, None).await.unwrap();
 
         assert_eq!(output.stdout, b"hello\nunset\n");
     }
@@ -221,46 +232,38 @@ mod tests {
     async fn runs_in_the_working_directory() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("marker"), b"").unwrap();
-        let command = shell_command("ls");
 
-        let output = run(&command, dir.path(), None).await.unwrap();
+        let output = run(&shell("ls", dir.path()), None).await.unwrap();
 
         assert_eq!(output.stdout, b"marker\n");
     }
 
     #[tokio::test]
-    async fn resolves_relative_programs_against_the_working_directory() {
+    async fn reports_programs_that_fail_to_start() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("script.sh");
-        std::fs::write(&script, b"#!/bin/sh\necho ran\n").unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let command = Command {
-            arguments: vec!["./script.sh".to_string()],
-            ..Default::default()
-        };
+        let mut invocation = shell("true", dir.path());
+        invocation.program = dir.path().join("missing");
 
-        let output = run(&command, dir.path(), None).await.unwrap();
+        let err = run(&invocation, None).await.unwrap_err();
 
-        assert_eq!(output.stdout, b"ran\n");
+        assert!(matches!(err, ProcessError::Start { .. }), "{err}");
     }
 
     #[tokio::test]
-    async fn kills_commands_that_time_out() {
+    async fn kills_processes_that_time_out() {
         let dir = tempfile::tempdir().unwrap();
-        let command = shell_command("sleep 10");
         let timeout = Duration::from_millis(100);
 
-        let err = run(&command, dir.path(), Some(timeout)).await.unwrap_err();
+        let err = run(&shell("sleep 10", dir.path()), Some(timeout)).await.unwrap_err();
 
-        assert!(matches!(err, ExecuteError::Timeout(t) if t == timeout), "{err}");
+        assert!(matches!(err, ProcessError::Timeout(t) if t == timeout), "{err}");
     }
 
     #[tokio::test]
     async fn reports_signals_as_128_plus_signal() {
         let dir = tempfile::tempdir().unwrap();
-        let command = shell_command("kill -TERM $$");
 
-        let output = run(&command, dir.path(), None).await.unwrap();
+        let output = run(&shell("kill -TERM $$", dir.path()), None).await.unwrap();
 
         assert_eq!(output.exit_code, 128 + 15);
     }
@@ -280,11 +283,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kills_background_processes_when_the_command_exits() {
+    async fn kills_background_processes_when_the_process_exits() {
         let dir = tempfile::tempdir().unwrap();
-        let command = shell_command("sleep 300 & echo $!");
 
-        let output = run(&command, dir.path(), None).await.unwrap();
+        let output = run(&shell("sleep 300 & echo $!", dir.path()), None).await.unwrap();
 
         let background: libc::pid_t = String::from_utf8(output.stdout).unwrap().trim().parse().unwrap();
         wait_for_exit(background).await;
@@ -294,21 +296,12 @@ mod tests {
     async fn kills_child_processes_on_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
-        let command = shell_command(&format!("sleep 300 & echo $! > {}; wait", pid_file.display()));
+        let script = format!("sleep 300 & echo $! > {}; wait", pid_file.display());
 
-        let err = run(&command, dir.path(), Some(Duration::from_millis(200))).await.unwrap_err();
+        let err = run(&shell(&script, dir.path()), Some(Duration::from_millis(200))).await.unwrap_err();
 
-        assert!(matches!(err, ExecuteError::Timeout(_)), "{err}");
+        assert!(matches!(err, ProcessError::Timeout(_)), "{err}");
         let child: libc::pid_t = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
         wait_for_exit(child).await;
-    }
-
-    #[tokio::test]
-    async fn rejects_empty_commands() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let err = run(&Command::default(), dir.path(), None).await.unwrap_err();
-
-        assert!(matches!(err, ExecuteError::InvalidAction(_)), "{err}");
     }
 }

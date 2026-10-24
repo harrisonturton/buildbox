@@ -1,0 +1,19 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "process",
+    srcs = ["process.rs"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "@crates//:libc",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "process_test",
+    crate = ":process",
+    deps = ["@crates//:tempfile"],
+)

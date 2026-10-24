@@ -1,228 +1,146 @@
-//! An [`Executor`] that runs actions directly on this machine.
-
-mod inputs;
-mod outputs;
-mod paths;
-mod process;
-mod sandbox;
+//! A [`Runner`] that runs commands directly on this machine.
 
 use async_trait::async_trait;
-use buffa_types::google::protobuf::Timestamp;
-use cas::{Cas, Digest};
-use executor::{Action, ExecuteError, Executor};
-use remote_execution_rust_connect::build::bazel::remote::execution::v2::{ActionResult, ExecutedActionMetadata};
-use sandbox::Sandbox;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::SystemTime;
+use executor::ExecuteError;
+use executor_sandboxed::{ProcessOutput, RunRequest, Runner};
+use process::{Invocation, ProcessError};
+use std::path::{Path, PathBuf};
 
-const WORKER_NAME: &str = "buildbox-local";
-
-/// Runs each action in its own directory, populated with the action's inputs.
+/// Runs each command directly on the host, in its sandbox directory.
 ///
-/// There is no isolation: actions can see and modify the whole host, and see
-/// whatever tools are installed on it.
-pub struct LocalExecutor {
-    cas: Arc<dyn Cas>,
-    sandbox_root: PathBuf,
-    keep_sandboxes: bool,
-}
-
-impl LocalExecutor {
-    /// Create an executor that makes sandboxes inside `sandbox_root`. If
-    /// `keep_sandboxes` is set they aren't deleted after use, for debugging.
-    pub fn new(cas: Arc<dyn Cas>, sandbox_root: PathBuf, keep_sandboxes: bool) -> LocalExecutor {
-        LocalExecutor {
-            cas,
-            sandbox_root,
-            keep_sandboxes,
-        }
-    }
-
-    /// Like [`LocalExecutor::new`], but first creates `sandbox_root` if
-    /// needed and, unless sandboxes are being kept, deletes any left over
-    /// from a previous run.
-    pub async fn open(cas: Arc<dyn Cas>, sandbox_root: PathBuf, keep_sandboxes: bool) -> std::io::Result<LocalExecutor> {
-        let root = sandbox_root.clone();
-        fsutil::run_blocking(move || {
-            if keep_sandboxes {
-                std::fs::create_dir_all(&root)
-            } else {
-                sandbox::prepare_root(&root)
-            }
-        })
-        .await?;
-        Ok(LocalExecutor::new(cas, sandbox_root, keep_sandboxes))
-    }
-
-    /// Store the command's stdout and stderr in the CAS, returning their
-    /// digests.
-    #[tracing::instrument(skip_all)]
-    async fn store_output_streams(&self, output: &process::ProcessOutput) -> Result<(Digest, Digest), ExecuteError> {
-        let stdout = self.cas.put_bytes(&output.stdout).await?;
-        let stderr = self.cas.put_bytes(&output.stderr).await?;
-        Ok((stdout, stderr))
-    }
-}
+/// There is no isolation: commands can see and modify the whole host, and
+/// see whatever tools are installed on it. A command gets exactly the
+/// environment variables it specifies.
+pub struct HostRunner;
 
 #[async_trait]
-impl Executor for LocalExecutor {
-    #[tracing::instrument(name = "run_action", skip_all, fields(action = %action.digest))]
-    async fn execute(&self, action: &Action) -> Result<ActionResult, ExecuteError> {
-        let command = &action.command;
-        let working_dir = paths::parse_relative_path(&command.working_directory).map_err(ExecuteError::InvalidAction)?;
-
-        let sandbox = Sandbox::create(&self.sandbox_root, self.keep_sandboxes).await?;
-        tracing::info!("running action {} in {}", action.digest, sandbox.path().display());
-
-        inputs::stage_inputs(&*self.cas, &action.input_root, sandbox.path()).await?;
-        let working_dir = sandbox.path().join(working_dir);
-        tokio::fs::create_dir_all(&working_dir).await.map_err(|error| {
-            ExecuteError::Internal(format!("failed to create {}: {error}", working_dir.display()))
-        })?;
-        outputs::create_output_parents(command, &working_dir).await?;
-
-        let start = SystemTime::now();
-        let process_output = process::run(command, &working_dir, action.timeout).await?;
-        let completed = SystemTime::now();
-
-        let outputs = outputs::collect_outputs(&*self.cas, command, &working_dir).await?;
-        let (stdout, stderr) = self.store_output_streams(&process_output).await?;
-
-        let metadata = ExecutedActionMetadata {
-            worker: WORKER_NAME.to_string(),
-            execution_start_timestamp: Timestamp::from(start).into(),
-            execution_completed_timestamp: Timestamp::from(completed).into(),
-            ..Default::default()
+impl Runner for HostRunner {
+    async fn run(&self, request: &RunRequest<'_>) -> Result<ProcessOutput, ExecuteError> {
+        let Some((program, args)) = request.command.arguments.split_first() else {
+            return Err(ExecuteError::InvalidAction("command has no arguments".to_string()));
         };
-        Ok(ActionResult {
-            output_files: outputs.files,
-            output_directories: outputs.directories,
-            exit_code: process_output.exit_code,
-            stdout_digest: stdout.to_proto().into(),
-            stderr_digest: stderr.to_proto().into(),
-            execution_metadata: metadata.into(),
-            ..Default::default()
-        })
+        let working_dir = request.sandbox.join(request.working_dir);
+        let env = request
+            .command
+            .environment_variables
+            .iter()
+            .map(|variable| (variable.name.clone(), variable.value.clone()))
+            .collect();
+
+        let invocation = Invocation {
+            program: resolve_program(program, &working_dir),
+            args: args.to_vec(),
+            env,
+            working_dir,
+        };
+        process::run(&invocation, request.timeout).await.map_err(execute_error)
+    }
+}
+
+/// A program given as a relative path (containing a slash) is relative to the
+/// working directory. One given as a bare name is looked up in `PATH`.
+fn resolve_program(program: &str, working_dir: &Path) -> PathBuf {
+    let path = Path::new(program);
+    if program.contains('/') && path.is_relative() {
+        return working_dir.join(path);
+    }
+    path.to_path_buf()
+}
+
+fn execute_error(error: ProcessError) -> ExecuteError {
+    match error {
+        ProcessError::Timeout(timeout) => ExecuteError::Timeout(timeout),
+        // The program is part of the action, so failing to start it is the
+        // action's fault.
+        error @ ProcessError::Start { .. } => ExecuteError::InvalidAction(error.to_string()),
+        error @ ProcessError::Io { .. } => ExecuteError::Internal(error.to_string()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buffa::Message;
-    use cas_mem::MemCas;
-    use remote_execution_rust_connect::build::bazel::remote::execution::v2::{Command, Directory, FileNode};
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::command::EnvironmentVariable;
+    use remote_execution_rust_connect::build::bazel::remote::execution::v2::Command;
+    use std::time::Duration;
 
-    async fn action_with_input(cas: &MemCas, script: &str, output_files: &[&str]) -> Action {
-        let input = cas.put_bytes(b"input data").await.unwrap();
-        let root = Directory {
-            files: vec![FileNode {
-                name: "input.txt".to_string(),
-                digest: input.to_proto().into(),
+    async fn run(command: &Command, sandbox: &Path, timeout: Option<Duration>) -> Result<ProcessOutput, ExecuteError> {
+        let request = RunRequest {
+            command,
+            sandbox,
+            working_dir: Path::new(""),
+            timeout,
+        };
+        HostRunner.run(&request).await
+    }
+
+    #[tokio::test]
+    async fn runs_with_the_commands_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = Command {
+            arguments: vec!["/bin/sh".to_string(), "-c".to_string(), "echo \"$GREETING\"".to_string()],
+            environment_variables: vec![EnvironmentVariable {
+                name: "GREETING".to_string(),
+                value: "hello".to_string(),
                 ..Default::default()
             }],
             ..Default::default()
         };
-        let input_root = cas.put_bytes(&root.encode_to_vec()).await.unwrap();
+
+        let output = run(&command, dir.path(), None).await.unwrap();
+
+        assert_eq!(output.stdout, b"hello\n");
+    }
+
+    #[tokio::test]
+    async fn resolves_relative_programs_against_the_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("script.sh");
+        std::fs::write(&script, b"#!/bin/sh\necho ran\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let command = Command {
-            arguments: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
-            output_files: output_files.iter().map(|path| path.to_string()).collect(),
+            arguments: vec!["./script.sh".to_string()],
             ..Default::default()
         };
 
-        Action {
-            digest: Digest::of_bytes(b"action"),
-            command,
-            input_root,
-            timeout: None,
-        }
+        let output = run(&command, dir.path(), None).await.unwrap();
+
+        assert_eq!(output.stdout, b"ran\n");
     }
 
     #[tokio::test]
-    async fn runs_action_and_collects_outputs() {
-        let cas = Arc::new(MemCas::new());
-        let sandboxes = tempfile::tempdir().unwrap();
-        let executor = LocalExecutor::new(cas.clone(), sandboxes.path().to_path_buf(), false);
-        let action = action_with_input(&cas, "mkdir -p out && cp input.txt out/copy.txt && echo done", &["out/copy.txt"]).await;
+    async fn reports_timeouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = Command {
+            arguments: vec!["/bin/sleep".to_string(), "10".to_string()],
+            ..Default::default()
+        };
+        let timeout = Duration::from_millis(100);
 
-        let result = executor.execute(&action).await.unwrap();
+        let err = run(&command, dir.path(), Some(timeout)).await.unwrap_err();
 
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(result.output_files[0].path, "out/copy.txt");
-        assert_eq!(result.output_files[0].digest.as_option(), Some(&Digest::of_bytes(b"input data").to_proto()));
-        let stdout = Digest::from_required_proto(result.stdout_digest.as_option()).unwrap();
-        assert_eq!(cas.read_bytes(&stdout).await.unwrap(), b"done\n");
+        assert!(matches!(err, ExecuteError::Timeout(t) if t == timeout), "{err}");
     }
 
     #[tokio::test]
-    async fn creates_output_parent_directories() {
-        let cas = Arc::new(MemCas::new());
-        let sandboxes = tempfile::tempdir().unwrap();
-        let executor = LocalExecutor::new(cas.clone(), sandboxes.path().to_path_buf(), false);
-        let action = action_with_input(&cas, "echo hi > a/b/out.txt", &["a/b/out.txt"]).await;
+    async fn rejects_programs_that_cant_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = Command {
+            arguments: vec!["./missing".to_string()],
+            ..Default::default()
+        };
 
-        let result = executor.execute(&action).await.unwrap();
+        let err = run(&command, dir.path(), None).await.unwrap_err();
 
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(result.output_files.len(), 1);
+        assert!(matches!(err, ExecuteError::InvalidAction(_)), "{err}");
     }
 
     #[tokio::test]
-    async fn reports_failing_actions_in_the_result() {
-        let cas = Arc::new(MemCas::new());
-        let sandboxes = tempfile::tempdir().unwrap();
-        let executor = LocalExecutor::new(cas.clone(), sandboxes.path().to_path_buf(), false);
-        let action = action_with_input(&cas, "echo broken >&2; exit 1", &[]).await;
+    async fn rejects_empty_commands() {
+        let dir = tempfile::tempdir().unwrap();
 
-        let result = executor.execute(&action).await.unwrap();
+        let err = run(&Command::default(), dir.path(), None).await.unwrap_err();
 
-        assert_eq!(result.exit_code, 1);
-        let stderr = Digest::from_required_proto(result.stderr_digest.as_option()).unwrap();
-        assert_eq!(cas.read_bytes(&stderr).await.unwrap(), b"broken\n");
-    }
-
-    #[tokio::test]
-    async fn removes_sandboxes_unless_kept() {
-        let cas = Arc::new(MemCas::new());
-        let sandboxes = tempfile::tempdir().unwrap();
-        let executor = LocalExecutor::new(cas.clone(), sandboxes.path().to_path_buf(), false);
-        let action = action_with_input(&cas, "true", &[]).await;
-
-        executor.execute(&action).await.unwrap();
-
-        // Removal happens in the background, so wait for it.
-        for _ in 0..100 {
-            if std::fs::read_dir(sandboxes.path()).unwrap().count() == 0 {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("sandbox wasn't removed");
-    }
-
-    #[tokio::test]
-    async fn open_removes_leftover_sandboxes_only() {
-        let cas = Arc::new(MemCas::new());
-        let sandboxes = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(sandboxes.path().join("action-old/nested")).unwrap();
-        std::fs::write(sandboxes.path().join("unrelated"), b"keep me").unwrap();
-
-        LocalExecutor::open(cas, sandboxes.path().to_path_buf(), false).await.unwrap();
-
-        assert!(!sandboxes.path().join("action-old").exists());
-        assert!(sandboxes.path().join("unrelated").exists());
-    }
-
-    #[tokio::test]
-    async fn keeps_sandboxes_when_asked() {
-        let cas = Arc::new(MemCas::new());
-        let sandboxes = tempfile::tempdir().unwrap();
-        let executor = LocalExecutor::new(cas.clone(), sandboxes.path().to_path_buf(), true);
-        let action = action_with_input(&cas, "true", &[]).await;
-
-        executor.execute(&action).await.unwrap();
-
-        assert_eq!(std::fs::read_dir(sandboxes.path()).unwrap().count(), 1);
+        assert!(matches!(err, ExecuteError::InvalidAction(_)), "{err}");
     }
 }
