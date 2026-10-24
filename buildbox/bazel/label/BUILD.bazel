@@ -1,0 +1,26 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "label",
+    srcs = [
+        "label.rs",
+        "pattern.rs",
+        "repo.rs",
+        "tests.rs",
+    ],
+    crate_name = "bazel_label",
+    crate_root = "label.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/intern",
+        "//buildbox/skycodec",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "label_test",
+    crate = ":label",
+)

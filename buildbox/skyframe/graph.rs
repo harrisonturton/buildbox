@@ -380,7 +380,7 @@ impl GraphInner {
         let current = self.lock().nodes.get(&key.0).copied();
 
         if let Some(node) = current {
-            if node.flags & (DIRTY | TRANSIENT) == 0 && (info.external || self.clone().verify(key, node.trace, revision).await) {
+            if node.flags & (DIRTY | TRANSIENT) == 0 && self.clone().verify(key, node.trace, revision).await {
                 engine.0.record(kind, Event::Verified);
                 return Ok(Resolution::Kept);
             }

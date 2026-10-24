@@ -21,8 +21,9 @@ pub trait Key: Encode + Decode + Clone + Eq + Hash + Debug + Send + Sync + 'stat
     const KIND: &'static str;
 
     /// Whether values depend on something outside the graph, such as a file.
-    /// They are never shared between workspaces, and are computed again
-    /// only when [invalidated](crate::Graph::invalidate).
+    /// They are never shared between workspaces, and are computed again when
+    /// [invalidated](crate::Graph::invalidate) as well as when their
+    /// dependencies change.
     const EXTERNAL: bool = false;
 
     fn compute(&self, ctx: &Ctx) -> impl Future<Output = Result<Self::Value, SkyError>> + Send;
