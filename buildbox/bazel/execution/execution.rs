@@ -19,6 +19,6 @@ pub use action_key::{ActionKey, ActionOutputs, OutputFile, input};
 pub use backend::Backend;
 pub use digest::BlobDigest;
 pub use materialize::{RunfilesLayout, materialize, write_runfiles};
-pub use source::{SourceDigest, SourceDigestKey};
-pub use spawn::output_text;
+pub use source::{SourceDigest, SourceDigestKey, SourceDigests};
+pub use spawn::{LocalActionCache, output_text};
 pub use test::{TestKey, TestResult, TestStatus, next_epoch, repo_mapping};

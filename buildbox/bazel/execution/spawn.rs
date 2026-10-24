@@ -10,6 +10,8 @@ use intern::PathId;
 use remote_execution_rust_connect::build::bazel::remote::execution::v2 as reapi;
 use skyframe::{Ctx, SkyError};
 use futures::StreamExt;
+use persist::PersistedMap;
+use skycodec::{Fingerprint, Fingerprinter};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use tracing::Instrument;
@@ -121,11 +123,76 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, 
         timeout: None,
         description: progress(action, owner),
     };
+    let local = ctx.global::<LocalActionCache>().ok().filter(|_| request.cacheable);
+    let key = local.as_ref().map(|_| local_key(&request));
+    if let (Some(local), Some(key)) = (&local, &key) {
+        let span = tracing::info_span!("local_cache_lookup");
+        if let Some(result) = local.lookup(backend, key).instrument(span).await? {
+            return outputs(action, &result);
+        }
+    }
     let spawned = execute(backend, request).await?;
     if spawned.result.exit_code != 0 {
         return Err(failed(backend, action, owner, &spawned.result).await);
     }
+    if let (Some(local), Some(key)) = (&local, key) {
+        local.0.insert(key, &spawned.result.encode_to_vec());
+    }
     outputs(action, &spawned.result)
+}
+
+/// Results of actions run before, kept across restarts by [`local_key`]:
+/// cheaper to compute than an action's REAPI digest, which needs its input
+/// tree, so a cached action is found without building one.
+pub struct LocalActionCache(pub PersistedMap);
+
+impl LocalActionCache {
+    /// The cached result for `key`, if there is one and its outputs are
+    /// still in the CAS.
+    async fn lookup(&self, backend: &Backend, key: &Fingerprint) -> Result<Option<reapi::ActionResult>, SkyError> {
+        let Some(bytes) = self.0.get(key) else {
+            return Ok(None);
+        };
+        let Ok(result) = reapi::ActionResult::decode_from_slice(&bytes) else {
+            return Ok(None);
+        };
+        let missing = backend.cas.find_missing(&output_digests(&result)).await.map_err(cas_error)?;
+        Ok(missing.is_empty().then_some(result))
+    }
+}
+
+/// Identifies what running a request produces: its command and every
+/// input's path and digest.
+fn local_key(request: &SpawnRequest) -> Fingerprint {
+    let mut fingerprinter = Fingerprinter::new();
+    fingerprinter.bytes(b"bb local action v1");
+    let mut strings = |strings: &[String]| {
+        fingerprinter.u64(strings.len() as u64);
+        for string in strings {
+            fingerprinter.u64(string.len() as u64).bytes(string.as_bytes());
+        }
+    };
+    strings(&request.arguments);
+    strings(&request.output_files);
+    strings(&request.output_directories);
+    for (name, value) in &request.env {
+        fingerprinter.u64(name.len() as u64).bytes(name.as_bytes()).u64(value.len() as u64).bytes(value.as_bytes());
+    }
+    fingerprinter.u64(request.timeout.map_or(0, |timeout| timeout.as_millis() as u64));
+    fingerprinter.u64(request.inputs.len() as u64);
+    for (path, input) in &request.inputs {
+        fingerprinter.u64(path.len() as u64).bytes(path.as_bytes());
+        fingerprinter.bytes(input.digest.to_cas().hash().as_bytes()).u64(input.digest.to_cas().size_bytes() as u64);
+        fingerprinter.u64(input.executable as u64 | (input.is_directory as u64) << 1);
+    }
+    fingerprinter.finish()
+}
+
+/// The digests of a result's output files and directory trees.
+fn output_digests(result: &reapi::ActionResult) -> Vec<cas::Digest> {
+    let file_digests = result.output_files.iter().filter_map(|file| file.digest.as_option());
+    let tree_digests = result.output_directories.iter().filter_map(|dir| dir.tree_digest.as_option());
+    file_digests.chain(tree_digests).filter_map(|digest| cas::Digest::from_proto(digest).ok()).collect()
 }
 
 fn progress(action: &Action, owner: ConfiguredTargetKey) -> String {
@@ -278,10 +345,7 @@ async fn cached(backend: &Backend, digest: &cas::Digest) -> Result<Option<reapi:
     let Some(result) = result.filter(|result| result.exit_code == 0) else {
         return Ok(None);
     };
-    let file_digests = result.output_files.iter().filter_map(|file| file.digest.as_option());
-    let tree_digests = result.output_directories.iter().filter_map(|dir| dir.tree_digest.as_option());
-    let digests: Vec<cas::Digest> = file_digests.chain(tree_digests).filter_map(|digest| cas::Digest::from_proto(digest).ok()).collect();
-    let missing = backend.cas.find_missing(&digests).await.map_err(cas_error)?;
+    let missing = backend.cas.find_missing(&output_digests(&result)).await.map_err(cas_error)?;
     Ok(missing.is_empty().then_some(result))
 }
 

@@ -29,6 +29,7 @@ rust_library(
         "//buildbox/cas",
         "//buildbox/executor",
         "//buildbox/intern",
+        "//buildbox/persist",
         "//buildbox/skycodec",
         "//buildbox/skyframe",
         "//third_party/remoteapis:remote_execution_rust_connect",

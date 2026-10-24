@@ -58,6 +58,7 @@ rust_library(
         "//buildbox/bazel/starlark",
         "//buildbox/intern",
         "//buildbox/jemalloc",
+        "//buildbox/persist",
         "//buildbox/skycodec",
         "//buildbox/skyframe",
         "@crates//:connectrpc",

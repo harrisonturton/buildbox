@@ -27,7 +27,9 @@ pub use service::BazelService;
 pub use workspace::{Workspace, Workspaces, find_root};
 
 use bazel_bzlmod::{BzlmodConfig, BzlmodRepositories};
-use bazel_execution::Backend;
+use bazel_execution::{Backend, LocalActionCache, SourceDigests};
+use persist::PersistedMap;
+use std::path::Path;
 use bazel_loading::{BuiltinsDir, Repositories};
 use skyframe::{Engine, EngineConfig, Globals};
 use std::path::PathBuf;
@@ -46,6 +48,40 @@ pub struct ServerConfig {
 pub struct BazelServer {
     config: ServerConfig,
     workspaces: Workspaces,
+    saved: Arc<SavedState>,
+}
+
+/// What the server keeps across restarts, besides the CAS and action
+/// cache: small maps that save work, bounded since all of it can be
+/// recomputed.
+struct SavedState {
+    source_digests: Arc<SourceDigests>,
+    local_actions: Arc<LocalActionCache>,
+}
+
+/// The most source files whose digests are kept: about 100 bytes each.
+const MAX_SOURCE_DIGESTS: usize = 500_000;
+
+/// The most action results kept by their cheap key: a few hundred bytes
+/// each.
+const MAX_LOCAL_ACTIONS: usize = 200_000;
+
+impl SavedState {
+    fn open(dir: &Path) -> SavedState {
+        SavedState {
+            source_digests: Arc::new(SourceDigests(PersistedMap::open(dir.join("source-digests"), MAX_SOURCE_DIGESTS))),
+            local_actions: Arc::new(LocalActionCache(PersistedMap::open(dir.join("local-actions"), MAX_LOCAL_ACTIONS))),
+        }
+    }
+
+    /// Save what changed. Blocks on the filesystem.
+    fn save(&self) {
+        for (name, map) in [("source digests", &self.source_digests.0), ("local action results", &self.local_actions.0)] {
+            if let Err(error) = map.save() {
+                tracing::warn!("couldn't save {name}: {error}");
+            }
+        }
+    }
 }
 
 /// The engine's configuration. `BB_CACHE_MB` sets how many megabytes of
@@ -73,10 +109,13 @@ impl BazelServer {
             Some(dir) => tracing::info!("using @_builtins from {}", dir.display()),
             None => tracing::warn!("no @_builtins found; native rules such as cc_library are unavailable"),
         }
+        let saved = Arc::new(SavedState::open(&config.bazel_dir.join("state")));
         let mut services = Globals::new()
             .with(Arc::new(Repositories(Arc::new(BzlmodRepositories))))
             .with(Arc::new(BzlmodConfig::new(config.bazel_dir.clone(), bazel_tools)))
-            .with(Arc::new(BuiltinsDir(builtins)));
+            .with(Arc::new(BuiltinsDir(builtins)))
+            .with(saved.source_digests.clone())
+            .with(saved.local_actions.clone());
         if let Some(backend) = &config.backend {
             services = services.with(backend.clone());
         }
@@ -84,6 +123,7 @@ impl BazelServer {
         BazelServer {
             config,
             workspaces: Workspaces::new(engine, services),
+            saved,
         }
     }
 
@@ -104,7 +144,11 @@ impl BazelServer {
     /// code.
     pub async fn run(&self, invocation: Invocation, out: &Output) -> i32 {
         let code = command::run(self, invocation, out).await;
-        tokio::task::spawn_blocking(memory::release_free_memory);
+        let saved = self.saved.clone();
+        tokio::task::spawn_blocking(move || {
+            saved.save();
+            memory::release_free_memory();
+        });
         code
     }
 }
