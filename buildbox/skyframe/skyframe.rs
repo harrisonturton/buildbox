@@ -22,6 +22,7 @@ mod key;
 mod keys;
 mod kinds;
 mod part;
+mod persist;
 mod trace;
 
 pub use cache::CacheStats;
@@ -33,5 +34,6 @@ pub use graph::{Globals, Graph, GraphStats, Session};
 pub use key::{Key, Storage, Value};
 pub use keys::KeyId;
 pub use part::{Part, Stored};
+pub use persist::{CheckpointStats, Persistence};
 
 pub use skycodec;

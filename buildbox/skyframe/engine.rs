@@ -4,6 +4,7 @@ use crate::cache::{CacheStats, ValueCache};
 use crate::graph::{Globals, Graph};
 use crate::key::{Key, Storage};
 use crate::keys::KeyTable;
+use crate::persist::{self, Persistence};
 use crate::kinds::{self, Computed, KindId, ERROR_STORE_KIND, MAX_KINDS};
 use crate::trace::Trace;
 use crate::SkyError;
@@ -53,6 +54,12 @@ pub(crate) struct EngineInner {
     memo: Box<[Mutex<FxHashMap<u32, Vec<ValueRef>>>]>,
     counters: Box<[KindCounters]>,
     config: EngineConfig,
+    pub persistence: Option<Persistence>,
+    /// Held while checkpointing, so checkpoints run one at a time, with
+    /// how many changes the memo had at the last one.
+    pub checkpointing: Mutex<u64>,
+    /// How many times the memo has changed.
+    pub memo_changes: AtomicU64,
 }
 
 #[derive(Default)]
@@ -78,7 +85,7 @@ pub struct EngineStats {
 /// Statistics for one kind of key.
 #[derive(Clone, Debug, Default)]
 pub struct KindRow {
-    pub name: &'static str,
+    pub name: String,
     /// Values computed by running the key's function.
     pub computed: u64,
     /// Values found still valid after their dependencies were checked.
@@ -101,13 +108,44 @@ pub(crate) enum Event {
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Engine {
+        Engine::with_parts(config, None, KeyTable::default(), ValueStore::new(), Vec::new())
+    }
+
+    /// The engine saved under `persistence`, or a new one if there's none
+    /// this build can use; it's saved there by [`Engine::checkpoint`]. Call
+    /// before anything is interned or any key type registered, so that the
+    /// saved ids are free to restore.
+    pub fn open(config: EngineConfig, persistence: Persistence) -> Engine {
+        match persist::restore(&persistence) {
+            Ok(Some(restored)) => {
+                tracing::info!("restored {} keys and {} remembered keys from {}", restored.keys.len(), restored.memo.len(), persistence.dir.display());
+                return Engine::with_parts(config, Some(persistence), restored.keys, restored.store, restored.memo);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!("not restoring the saved engine: {error}"),
+        }
+        if let Err(error) = persist::clear(&persistence) {
+            tracing::warn!("couldn't remove the old saved engine: {error}");
+        }
+        Engine::with_parts(config, Some(persistence), KeyTable::default(), ValueStore::new(), Vec::new())
+    }
+
+    fn with_parts(config: EngineConfig, persistence: Option<Persistence>, keys: KeyTable, store: ValueStore, memo: Vec<(u32, Vec<ValueRef>)>) -> Engine {
+        let shards: Box<[Mutex<FxHashMap<u32, Vec<ValueRef>>>]> = (0..MEMO_SHARDS).map(|_| Mutex::new(FxHashMap::default())).collect();
+        for (key, traces) in memo {
+            let mut shard = shards[key as usize % MEMO_SHARDS].lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            shard.insert(key, traces);
+        }
         Engine(Arc::new(EngineInner {
-            store: ValueStore::new(),
-            keys: KeyTable::default(),
+            store,
+            keys,
             cache: ValueCache::new(config.cache_bytes),
-            memo: (0..MEMO_SHARDS).map(|_| Mutex::new(FxHashMap::default())).collect(),
+            memo: shards,
             counters: (0..MAX_KINDS).map(|_| KindCounters::default()).collect(),
             config,
+            persistence,
+            checkpointing: Mutex::new(0),
+            memo_changes: AtomicU64::new(0),
         }))
     }
 
@@ -222,10 +260,27 @@ impl EngineInner {
         }
     }
 
+    /// Whether a trace's value is a live object a restored engine doesn't
+    /// have, which must be computed again.
+    pub(crate) fn has_absent_value(&self, trace: ValueRef) -> bool {
+        self.trace(trace).is_ok_and(|trace| self.store.is_absent(trace.value))
+    }
+
     pub(crate) fn release_value(&self, value: ValueRef) {
         if self.store.release(value) {
             self.cache.remove(value.id());
         }
+    }
+
+    /// Every key's remembered traces, newest first.
+    pub(crate) fn memo_snapshot(&self) -> Vec<(u32, Vec<ValueRef>)> {
+        let mut snapshot = Vec::new();
+        for shard in self.memo.iter() {
+            let shard = shard.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            snapshot.extend(shard.iter().map(|(key, traces)| (*key, traces.clone())));
+        }
+        snapshot.sort_unstable_by_key(|(key, _)| *key);
+        snapshot
     }
 
     /// The traces remembered for `key`, newest first, each with a reference
@@ -252,6 +307,7 @@ impl EngineInner {
             }
             self.store.retain(trace);
             traces.insert(0, trace);
+            self.memo_changes.fetch_add(1, Ordering::Relaxed);
             if traces.len() > self.config.traces_per_key {
                 traces.pop()
             } else {
@@ -298,6 +354,10 @@ impl EngineInner {
             stats.memo_traces += shard.values().map(|traces| traces.len() as u64).sum::<u64>();
         }
         for (index, name) in kinds::names().into_iter().enumerate() {
+            let Some(name) = name else {
+                continue;
+            };
+            let name = name.to_string();
             let kind = KindId(index as u16);
             let counters = &self.counters[index];
             let store_kind = |kind: skystore::Kind| store.kinds.get(kind.0 as usize).copied().unwrap_or_default();
@@ -325,7 +385,8 @@ impl EngineInner {
 
 fn value_fingerprint(kind: KindId, storage: &[u8], bytes: &[u8]) -> Fingerprint {
     let mut fingerprinter = Fingerprinter::new();
-    fingerprinter.u64(kind.0 as u64).bytes(kinds::info(kind).name.as_bytes()).bytes(storage).bytes(bytes);
+    let name = kinds::info(kind).map_or("", |info| info.name);
+    fingerprinter.u64(kind.0 as u64).bytes(name.as_bytes()).bytes(storage).bytes(bytes);
     fingerprinter.finish()
 }
 

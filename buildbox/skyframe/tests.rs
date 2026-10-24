@@ -1,5 +1,5 @@
 use skycodec::{Decode, DecodeError, Decoder, Encode, Encoder};
-use skyframe::{encoded_value, Ctx, Engine, ErrorKind, Globals, Graph, Key, SkyError};
+use skyframe::{encoded_value, Ctx, Engine, EngineConfig, ErrorKind, Globals, Graph, Key, Persistence, SkyError};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -390,4 +390,51 @@ async fn dropping_a_graph_frees_its_values() {
     assert_eq!(file.values.values, 3, "file values are held by the traces that read them");
     let lines = stats.kinds.iter().find(|kind| kind.name == "LINES").unwrap();
     assert_eq!(lines.traces.values, 2, "traces are remembered for other workspaces");
+}
+
+fn persistence(dir: &std::path::Path) -> Persistence {
+    Persistence {
+        dir: dir.to_path_buf(),
+        version: skycodec::Fingerprint::of(b"test build"),
+        max_disk_bytes: 1 << 30,
+    }
+}
+
+#[tokio::test]
+async fn a_restored_engine_reuses_saved_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let counts = Arc::new(Counts::default());
+    {
+        let engine = Engine::open(EngineConfig::default(), persistence(dir.path()));
+        let (graph, _) = workspace(&engine, &counts);
+        assert_eq!(total(&graph).await, 5);
+        assert!(engine.checkpoint().unwrap().is_some());
+    }
+    let engine = Engine::open(EngineConfig::default(), persistence(dir.path()));
+    let (graph, disk) = workspace(&engine, &counts);
+    assert_eq!(total(&graph).await, 5);
+    assert_eq!(counts.get(), (6, 2, 1), "files are read again; lines and the total are reused");
+
+    disk.write("b", "1\n2\n3\n4");
+    graph.invalidate(&[File("b".into())]).await;
+    assert_eq!(total(&graph).await, 7);
+    assert_eq!(counts.get(), (7, 3, 2));
+}
+
+#[tokio::test]
+async fn another_build_starts_afresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let counts = Arc::new(Counts::default());
+    {
+        let engine = Engine::open(EngineConfig::default(), persistence(dir.path()));
+        let (graph, _) = workspace(&engine, &counts);
+        total(&graph).await;
+        engine.checkpoint().unwrap();
+    }
+    let mut other = persistence(dir.path());
+    other.version = skycodec::Fingerprint::of(b"another build");
+    let engine = Engine::open(EngineConfig::default(), other);
+    let (graph, _) = workspace(&engine, &counts);
+    assert_eq!(total(&graph).await, 5);
+    assert_eq!(counts.get(), (6, 4, 2), "nothing is reused");
 }

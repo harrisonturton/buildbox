@@ -373,7 +373,9 @@ impl GraphInner {
     async fn resolve(self: Arc<Self>, key: KeyId, revision: u32) -> Result<Resolution, SkyError> {
         let engine = self.engine.clone();
         let kind = engine.0.keys.kind(key);
-        let info = kinds::info(kind);
+        let Some(info) = kinds::info(kind) else {
+            return Err(SkyError::transient(format!("{} is of a kind not registered yet", engine.0.keys.describe(key))));
+        };
         let current = self.lock().nodes.get(&key.0).copied();
 
         if let Some(node) = current {
@@ -390,7 +392,7 @@ impl GraphInner {
             }
         }
 
-        self.compute(key, kind, revision).await.map(Resolution::New)
+        self.compute(key, kind, info, revision).await.map(Resolution::New)
     }
 
     /// Find a remembered trace for `key`, other than `current`, whose
@@ -401,7 +403,7 @@ impl GraphInner {
         let candidates = engine.0.memo_candidates(key.0);
         let mut found = None;
         for candidate in candidates {
-            if found.is_none() && Some(candidate) != current && self.clone().verify(key, candidate, revision).await {
+            if found.is_none() && Some(candidate) != current && !engine.0.has_absent_value(candidate) && self.clone().verify(key, candidate, revision).await {
                 found = Some(candidate);
                 continue;
             }
@@ -431,9 +433,8 @@ impl GraphInner {
 
     /// Run `key`'s function, and store its result and trace. Returns the
     /// trace with a reference the caller owns.
-    async fn compute(self: Arc<Self>, key: KeyId, kind: KindId, revision: u32) -> Result<ValueRef, SkyError> {
+    async fn compute(self: Arc<Self>, key: KeyId, kind: KindId, info: &'static kinds::KindInfo, revision: u32) -> Result<ValueRef, SkyError> {
         let engine = self.engine.clone();
-        let info = kinds::info(kind);
         let span = tracing::debug_span!("skyframe.compute", span.name = info.name, span.nested = true);
         let ctx = Ctx::new(self.clone(), key, revision);
         let started = Instant::now();

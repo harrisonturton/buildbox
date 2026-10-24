@@ -15,6 +15,7 @@ rust_library(
         "keys.rs",
         "kinds.rs",
         "part.rs",
+        "persist.rs",
         "skyframe.rs",
         "trace.rs",
     ],
@@ -22,6 +23,7 @@ rust_library(
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         "//buildbox/intern",
+        "//buildbox/persist",
         "//buildbox/skycodec",
         "//buildbox/skystore",
         "@crates//:futures",
@@ -43,6 +45,7 @@ rust_test(
         ":skyframe",
         "//buildbox/skycodec",
         "@crates//:futures",
+        "@crates//:tempfile",
         "@crates//:tokio",
     ],
 )

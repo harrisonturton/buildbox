@@ -49,10 +49,13 @@ pub(crate) struct KindInfo {
     pub describe: DescribeFn,
 }
 
+/// Key types by id. Ids can be assigned to names before their types are
+/// registered, so that a restored engine's keys keep their kinds.
 #[derive(Default)]
 struct Registry {
     by_type: HashMap<TypeId, KindId>,
-    infos: Vec<&'static KindInfo>,
+    by_name: HashMap<String, KindId>,
+    infos: Vec<Option<&'static KindInfo>>,
 }
 
 static REGISTRY: LazyLock<RwLock<Registry>> = LazyLock::new(Default::default);
@@ -60,44 +63,93 @@ static REGISTRY: LazyLock<RwLock<Registry>> = LazyLock::new(Default::default);
 /// The id of key type `K`, registering it if needed.
 pub(crate) fn kind_of<K: Key>() -> KindId {
     let type_id = TypeId::of::<K>();
-    {
-        let registry = REGISTRY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(&kind) = registry.by_type.get(&type_id) {
-            return kind;
-        }
+    if let Some(&kind) = read_registry().by_type.get(&type_id) {
+        return kind;
     }
-
     let mut registry = REGISTRY.write().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(&kind) = registry.by_type.get(&type_id) {
         return kind;
     }
-    assert!(registry.infos.len() < MAX_KINDS, "more than {MAX_KINDS} key types");
-    let kind = KindId(registry.infos.len() as u16);
+    let kind = match registry.by_name.get(K::KIND) {
+        Some(&kind) => kind,
+        None => {
+            assert!(registry.infos.len() < MAX_KINDS, "more than {MAX_KINDS} key types");
+            registry.infos.push(None);
+            KindId((registry.infos.len() - 1) as u16)
+        }
+    };
     let info: &'static KindInfo = Box::leak(Box::new(KindInfo {
         name: K::KIND,
         external: K::EXTERNAL,
         compute: compute_erased::<K>,
         describe: describe::<K>,
     }));
-    registry.infos.push(info);
+    registry.infos[kind.0 as usize] = Some(info);
     registry.by_type.insert(type_id, kind);
+    registry.by_name.insert(K::KIND.to_string(), kind);
     kind
 }
 
-pub(crate) fn info(kind: KindId) -> &'static KindInfo {
-    let registry = REGISTRY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
-    registry.infos[kind.0 as usize]
+/// What's known of a kind, if its key type has been registered.
+pub(crate) fn info(kind: KindId) -> Option<&'static KindInfo> {
+    read_registry().infos.get(kind.0 as usize).copied().flatten()
+}
+
+/// Every kind's name, indexed by kind, or `None` for ids assigned to names
+/// whose types aren't registered yet.
+pub(crate) fn names() -> Vec<Option<&'static str>> {
+    read_registry().infos.iter().map(|info| info.map(|info| info.name)).collect()
+}
+
+/// Every kind id's name, registered or assigned, indexed by kind.
+pub(crate) fn assigned_names() -> Vec<String> {
+    let registry = read_registry();
+    let mut names = vec![String::new(); registry.infos.len()];
+    for (name, kind) in &registry.by_name {
+        names[kind.0 as usize] = name.clone();
+    }
+    names
+}
+
+/// A name already has a different id than a saved engine gave it.
+#[derive(Debug)]
+pub(crate) struct KindConflict(pub String);
+
+/// Give each name the id it had when an engine was saved: the name at
+/// index `i` gets id `i`.
+pub(crate) fn assign(names: &[String]) -> Result<(), KindConflict> {
+    let mut registry = REGISTRY.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (id, name) in names.iter().enumerate().filter(|(_, name)| !name.is_empty()) {
+        let kind = KindId(id as u16);
+        match registry.by_name.get(name) {
+            Some(&existing) if existing == kind => continue,
+            Some(_) => return Err(KindConflict(name.clone())),
+            None => {}
+        }
+        if registry.infos.get(id).is_some_and(Option::is_some) {
+            return Err(KindConflict(name.clone()));
+        }
+        if registry.infos.len() <= id {
+            registry.infos.resize(id + 1, None);
+        }
+        registry.by_name.insert(name.clone(), kind);
+    }
+    Ok(())
+}
+
+fn read_registry() -> std::sync::RwLockReadGuard<'static, Registry> {
+    REGISTRY.read().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The first store kind of parts, above every key kind's.
 const FIRST_PART_STORE_KIND: u16 = 2 + 2 * MAX_KINDS as u16;
 
-static PARTS: LazyLock<RwLock<Vec<(TypeId, &'static str)>>> = LazyLock::new(Default::default);
+/// Part types' names, by index; a part type's store kind follows from it.
+static PARTS: LazyLock<RwLock<Vec<String>>> = LazyLock::new(Default::default);
 
-/// The store kind of part type `T`, registering it if needed.
+/// The store kind of part type `T`, registering its name if needed.
 pub(crate) fn part_store_kind<T: crate::Part>() -> Kind {
-    let type_id = TypeId::of::<T>();
-    let index = |parts: &[(TypeId, &'static str)]| parts.iter().position(|(id, _)| *id == type_id);
+    let index = |parts: &[String]| parts.iter().position(|name| name == T::KIND);
     if let Some(index) = index(&PARTS.read().unwrap_or_else(|poisoned| poisoned.into_inner())) {
         return Kind(FIRST_PART_STORE_KIND + index as u16);
     }
@@ -105,23 +157,36 @@ pub(crate) fn part_store_kind<T: crate::Part>() -> Kind {
     let index = match index(&parts) {
         Some(index) => index,
         None => {
-            parts.push((type_id, T::KIND));
+            parts.push(T::KIND.to_string());
             parts.len() - 1
         }
     };
     Kind(FIRST_PART_STORE_KIND + index as u16)
 }
 
-/// Every registered part type's name and store kind.
-pub(crate) fn part_kinds() -> Vec<(&'static str, Kind)> {
+/// Every part type's name and store kind.
+pub(crate) fn part_kinds() -> Vec<(String, Kind)> {
     let parts = PARTS.read().unwrap_or_else(|poisoned| poisoned.into_inner());
-    parts.iter().enumerate().map(|(index, (_, name))| (*name, Kind(FIRST_PART_STORE_KIND + index as u16))).collect()
+    parts.iter().enumerate().map(|(index, name)| (name.clone(), Kind(FIRST_PART_STORE_KIND + index as u16))).collect()
 }
 
-/// Every registered kind's name, indexed by kind.
-pub(crate) fn names() -> Vec<&'static str> {
-    let registry = REGISTRY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
-    registry.infos.iter().map(|info| info.name).collect()
+/// Every part type's name, by index.
+pub(crate) fn part_names() -> Vec<String> {
+    PARTS.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+}
+
+/// Give part type names the indexes they had when an engine was saved.
+pub(crate) fn assign_parts(names: &[String]) -> Result<(), KindConflict> {
+    let mut parts = PARTS.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (index, name) in names.iter().enumerate() {
+        match parts.get(index) {
+            Some(existing) if existing == name => {}
+            Some(_) => return Err(KindConflict(name.clone())),
+            None if parts.iter().any(|existing| existing == name) => return Err(KindConflict(name.clone())),
+            None => parts.push(name.clone()),
+        }
+    }
+    Ok(())
 }
 
 fn compute_erased<K: Key>(ctx: Ctx, bytes: &[u8]) -> BoxFuture<'static, Result<Computed, SkyError>> {

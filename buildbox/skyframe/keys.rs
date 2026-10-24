@@ -45,8 +45,27 @@ impl KeyTable {
 
     /// A description of the key for messages, such as `PACKAGE://foo`.
     pub(crate) fn describe(&self, key: KeyId) -> String {
-        let info = kinds::info(self.kind(key));
-        (info.describe)(self.encoding(key))
+        let kind = self.kind(key);
+        match kinds::info(kind) {
+            Some(info) => (info.describe)(self.encoding(key)),
+            None => format!("<unregistered kind {}>", kind.0),
+        }
+    }
+
+    /// Every key's kind and encoding, in id order.
+    pub(crate) fn blobs(&self) -> Vec<&[u8]> {
+        (0..self.blobs.len()).map(|id| self.blobs.bytes(id)).collect()
+    }
+
+    /// The table of keys [`KeyTable::blobs`] gave, each keeping its id.
+    pub(crate) fn restore<'a>(blobs: impl IntoIterator<Item = &'a [u8]>) -> Option<KeyTable> {
+        let table = KeyTable::default();
+        for (id, blob) in (0u32..).zip(blobs) {
+            if blob.len() < 2 || table.blobs.intern(blob) != id {
+                return None;
+            }
+        }
+        Some(table)
     }
 
     pub(crate) fn len(&self) -> u32 {
