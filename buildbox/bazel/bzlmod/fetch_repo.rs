@@ -86,37 +86,53 @@ fn complete_marker(dest: &Path) -> PathBuf {
     PathBuf::from(format!("{}.fetched", dest.display()))
 }
 
-/// Run `fetch` to fill a temporary directory, then move it into place,
-/// unless the repository was fetched before. Blocks.
+/// Run `fetch` to fill a repository's directory, unless the repository
+/// was fetched before. Repositories are fetched in place, as in Bazel,
+/// since repository rules may record the paths of the files they create; the
+/// marker beside the directory says the fetch finished. Blocks.
 pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), SkyError> {
     let marker = complete_marker(dest);
     if marker.exists() {
+        link_external(dest);
         return Ok(());
     }
     if dest.exists() {
         let _ = std::fs::remove_dir_all(dest);
     }
-    let parent = dest.parent().ok_or_else(|| SkyError::new("repository directory has no parent"))?;
-    std::fs::create_dir_all(parent).map_err(|error| SkyError::transient(format!("failed to create {}: {error}", parent.display())))?;
-    let temporary = parent.join(format!(".tmp-{}-{}", std::process::id(), Fingerprint::of(dest.as_os_str().as_encoded_bytes())));
-    let _ = std::fs::remove_dir_all(&temporary);
-    std::fs::create_dir_all(&temporary).map_err(|error| SkyError::transient(format!("failed to create {}: {error}", temporary.display())))?;
-    if let Err(message) = fetch(&temporary) {
-        let _ = std::fs::remove_dir_all(&temporary);
+    std::fs::create_dir_all(dest).map_err(|error| SkyError::transient(format!("failed to create {}: {error}", dest.display())))?;
+    if let Err(message) = fetch(dest) {
+        let _ = std::fs::remove_dir_all(dest);
         return Err(SkyError::new(message));
     }
-    if !BOUNDARY_FILES.iter().any(|name| temporary.join(name).exists()) {
-        let _ = std::fs::write(temporary.join("REPO.bazel"), b"");
-    }
-    if std::fs::rename(&temporary, dest).is_err() {
-        let _ = std::fs::remove_dir_all(&temporary);
-        if !marker.exists() {
-            return Err(SkyError::transient(format!("failed to move fetched repository to {}", dest.display())));
-        }
-        return Ok(());
+    if !BOUNDARY_FILES.iter().any(|name| dest.join(name).exists()) {
+        let _ = std::fs::write(dest.join("REPO.bazel"), b"");
     }
     std::fs::write(&marker, b"").map_err(|error| SkyError::transient(format!("failed to write {}: {error}", marker.display())))?;
+    link_external(dest);
     Ok(())
+}
+
+/// Link a fetched repository as `external/<canonical name>` beside the
+/// repositories' directory, where Bazel would put it, for repository rules
+/// that find other repositories by such paths.
+fn link_external(dest: &Path) {
+    let (Some(repos), Some(name)) = (dest.parent(), dest.file_name().and_then(|name| name.to_str())) else {
+        return;
+    };
+    let Some((canonical, _)) = name.rsplit_once('-') else {
+        return;
+    };
+    let Some(base) = repos.parent() else {
+        return;
+    };
+    let external = base.join("external");
+    let link = external.join(canonical);
+    if std::fs::read_link(&link).is_ok_and(|target| target == dest) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&external);
+    let _ = std::fs::remove_file(&link);
+    let _ = std::os::unix::fs::symlink(dest, &link);
 }
 
 async fn fetch_archive(ctx: &Ctx, config: &BzlmodConfig, repo: RepoName, archive: &ArchiveSpec) -> Result<FetchedRepo, SkyError> {

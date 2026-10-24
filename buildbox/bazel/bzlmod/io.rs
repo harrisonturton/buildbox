@@ -59,7 +59,8 @@ impl IoState {
             anyhow::bail!("expected a path, string or Label, got {}", value.get_type());
         };
         let path = Path::new(text);
-        Ok(if path.is_absolute() { path.to_path_buf() } else { self.base_dir.join(path) })
+        let joined = if path.is_absolute() { path.to_path_buf() } else { self.base_dir.join(path) };
+        Ok(normalize(&joined))
     }
 
     fn which(&self, program: &str) -> Option<PathBuf> {
@@ -70,6 +71,23 @@ impl IoState {
         let search = self.env.get("PATH")?;
         std::env::split_paths(search).map(|dir| dir.join(program)).find(|candidate| is_executable(candidate))
     }
+}
+
+/// A path with `.` and `..` resolved lexically, as Bazel resolves the
+/// paths repository rules give.
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn is_executable(path: &Path) -> bool {
