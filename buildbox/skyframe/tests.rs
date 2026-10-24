@@ -88,6 +88,7 @@ string_key!(Lines);
 string_key!(Total);
 string_key!(Fails);
 string_key!(Panics);
+string_key!(Flaky);
 
 impl Key for File {
     type Value = Text;
@@ -139,6 +140,16 @@ impl Key for Fails {
     async fn compute(&self, ctx: &Ctx) -> Result<Number, SkyError> {
         ctx.global::<Counts>()?.totals.fetch_add(1, Ordering::SeqCst);
         Err(SkyError::new(format!("{} always fails", self.0)))
+    }
+}
+
+impl Key for Flaky {
+    type Value = Number;
+    const KIND: &'static str = "FLAKY";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<Number, SkyError> {
+        ctx.global::<Counts>()?.totals.fetch_add(1, Ordering::SeqCst);
+        Err(SkyError::transient(format!("{} failed this time", self.0)))
     }
 }
 
@@ -372,6 +383,29 @@ async fn errors_are_results() {
 
     let missing = session.evaluate(&Lines("missing".into())).await.unwrap_err();
     assert_eq!(missing.message(), "no such file: missing");
+}
+
+#[tokio::test]
+async fn transient_results_are_kept_until_invalidated() {
+    let engine = Engine::default();
+    let counts = Arc::new(Counts::default());
+    let (graph, _) = workspace(&engine, &counts);
+    {
+        let session = graph.session().await;
+        session.evaluate(&Flaky("x".into())).await.unwrap_err();
+        session.evaluate(&Fails("y".into())).await.unwrap_err();
+    }
+    graph.session().await.evaluate(&Flaky("x".into())).await.unwrap_err();
+    assert_eq!(counts.get().2, 2, "kept within a revision");
+
+    assert_eq!(graph.invalidate_transient().await, 1, "only the transient error is marked");
+    {
+        let session = graph.session().await;
+        session.evaluate(&Flaky("x".into())).await.unwrap_err();
+        session.evaluate(&Fails("y".into())).await.unwrap_err();
+    }
+    assert_eq!(counts.get().2, 3, "the transient error is computed again, the other kept");
+    assert_eq!(graph.invalidate_transient().await, 1);
 }
 
 #[tokio::test]

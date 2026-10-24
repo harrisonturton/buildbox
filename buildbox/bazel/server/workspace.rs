@@ -40,9 +40,14 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Invalidate the files that changed since the graph read them, and the
-    /// environment, if a command gives another.
+    /// Invalidate the files that changed since the graph read them, the
+    /// environment, if a command gives another, and results that may not
+    /// recur, such as failed actions, which Bazel runs again each build.
     pub async fn refresh(&self, environment: RepoEnvironment) -> usize {
+        let retried = self.graph.invalidate_transient().await;
+        if retried > 0 {
+            tracing::info!(keys = retried, "computing transient results again");
+        }
         let env_changes = self.client_env.set(environment);
         let mut env_keys: Vec<RepoEnvVarKey> = env_changes.names.into_iter().map(RepoEnvVarKey).collect();
         env_keys.sort_by(|a, b| a.0.cmp(&b.0));
