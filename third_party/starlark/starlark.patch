@@ -1,5 +1,188 @@
+diff --git a/src/eval.rs b/src/eval.rs
+index c756ce5..828a1a3 100644
+--- a/src/eval.rs
++++ b/src/eval.rs
+@@ -143,6 +143,7 @@ impl<'v, 'a, 'e> Evaluator<'v, 'a, 'e> {
+             eval: self,
+             check_types: dialect.enable_types == DialectTypes::Enable,
+             top_level_stmt_count,
++            loop_depth: 0,
+             typecheck,
+         };
+ 
+diff --git a/src/eval/compiler.rs b/src/eval/compiler.rs
+index ec989fe..c08cbf5 100644
+--- a/src/eval/compiler.rs
++++ b/src/eval/compiler.rs
+@@ -90,6 +90,8 @@ pub(crate) struct Compiler<'v, 'a, 'e, 'x> {
+     pub(crate) codemap: FrozenAnyValue<CodeMap>,
+     pub(crate) check_types: bool,
+     pub(crate) top_level_stmt_count: usize,
++    /// How many `for` loops enclose the statement being compiled.
++    pub(crate) loop_depth: usize,
+     /// Set with `@starlark-rust: typecheck`.
+     pub(crate) typecheck: bool,
+ }
+diff --git a/src/eval/compiler/def.rs b/src/eval/compiler/def.rs
+index 144d35c..7d940e1 100644
+--- a/src/eval/compiler/def.rs
++++ b/src/eval/compiler/def.rs
+@@ -149,6 +149,56 @@ impl StmtCompiledCell {
+     fn get(&self) -> &Bc {
+         unsafe { &*self.cell.get() }
+     }
++
++    fn with(value: Bc) -> StmtCompiledCell {
++        StmtCompiledCell {
++            cell: UnsafeCell::new(value),
++        }
++    }
++}
++
++/// The body of a def, which a def that [runs once](DefInfo::runs_once)
++/// releases after it's frozen.
++struct StmtsCompiledCell {
++    cell: UnsafeCell<StmtsCompiled>,
++}
++
++unsafe impl Sync for StmtsCompiledCell {}
++unsafe impl Send for StmtsCompiledCell {}
++
++impl StmtsCompiledCell {
++    fn new(value: StmtsCompiled) -> StmtsCompiledCell {
++        StmtsCompiledCell {
++            cell: UnsafeCell::new(value),
++        }
++    }
++
++    /// This function is unsafe if another thread is reading the body.
++    unsafe fn set(&self, value: StmtsCompiled) {
++        unsafe {
++            ptr::drop_in_place(self.cell.get());
++            ptr::write(self.cell.get(), value);
++        }
++    }
++
++    fn get(&self) -> &StmtsCompiled {
++        unsafe { &*self.cell.get() }
++    }
++}
++
++fn serialize_body_stmts(
++    cell: &StmtsCompiledCell,
++    ctx: &mut dyn crate::pagable::StarlarkSerializeContext,
++) -> crate::Result<()> {
++    <StmtsCompiled as crate::pagable::StarlarkSerialize>::starlark_serialize(cell.get(), ctx)
++}
++
++fn deserialize_body_stmts(
++    ctx: &mut dyn crate::pagable::StarlarkDeserializeContext<'_>,
++) -> crate::Result<StmtsCompiledCell> {
++    Ok(StmtsCompiledCell::new(
++        <StmtsCompiled as crate::pagable::StarlarkDeserialize>::starlark_deserialize(ctx)?,
++    ))
+ }
+ 
+ #[derive(Clone, Debug, VisitSpanMut, StarlarkPagable)]
+@@ -361,11 +411,23 @@ pub(crate) struct DefInfo {
+     pub(crate) parent: FrozenAnyArray<CopySlotFromParent>,
+     /// Statement compiled for non-frozen def.
+     #[derivative(Debug = "ignore")]
+-    stmt_compiled: Bc,
++    #[starlark_pagable(
++        serialize_with = "serialize_optimized_on_freeze_stmt",
++        deserialize_with = "deserialize_optimized_on_freeze_stmt"
++    )]
++    stmt_compiled: StmtCompiledCell,
+     // The compiled expression for the body of this definition, to be run
+     // after the parameters are evaluated.
+     #[derivative(Debug = "ignore")]
+-    body_stmts: StmtsCompiled,
++    #[starlark_pagable(
++        serialize_with = "serialize_body_stmts",
++        deserialize_with = "deserialize_body_stmts"
++    )]
++    body_stmts: StmtsCompiledCell,
++    /// Whether only one def is made from this info: a def at the top level
++    /// of a module, outside loops. Such a def needs neither `stmt_compiled`
++    /// nor `body_stmts` once frozen, and releases them.
++    runs_once: bool,
+     /// How to compile the statement on freeze.
+     stmt_compile_context: StmtCompileContext,
+     /// Function can be inlined.
+@@ -391,8 +453,9 @@ impl DefInfo {
+             docstring: None,
+             used: local_names,
+             parent,
+-            stmt_compiled: Bc::default(),
+-            body_stmts: StmtsCompiled::empty(),
++            stmt_compiled: StmtCompiledCell::new(),
++            body_stmts: StmtsCompiledCell::new(StmtsCompiled::empty()),
++            runs_once: false,
+             stmt_compile_context: StmtCompileContext::default(),
+             inline_def_body: None,
+             globals,
+@@ -476,6 +539,7 @@ impl Compiler<'_, '_, '_, '_> {
+             return_type.map_or(Ty::any(), |t| t.as_ty().clone()),
+         );
+ 
++        let runs_once = self.locals.len() == 1 && self.loop_depth == 0;
+         self.enter_scope(scope_id);
+ 
+         let docstring = DocString::extract_raw_starlark_docstring(suite);
+@@ -513,13 +577,14 @@ impl Compiler<'_, '_, '_, '_> {
+                 .eval
+                 .frozen_heap()
+                 .alloc_any_array_value(&scope_names.parent),
+-            stmt_compiled: body.as_bc(
++            stmt_compiled: StmtCompiledCell::with(body.as_bc(
+                 &self.compile_context(return_type.is_some()),
+                 used,
+                 param_count,
+                 self.eval.module_env.frozen_heap(),
+-            ),
+-            body_stmts: body,
++            )),
++            body_stmts: StmtsCompiledCell::new(body),
++            runs_once,
+             inline_def_body,
+             stmt_compile_context: self.compile_context(return_type.is_some()),
+             globals: self.globals,
+@@ -727,7 +792,7 @@ where
+         if Self::FROZEN {
+             self.optimized_on_freeze_stmt.get()
+         } else {
+-            &self.def_info.stmt_compiled
++            self.def_info.stmt_compiled.get()
+         }
+     }
+ 
+@@ -893,6 +958,7 @@ impl FrozenDef {
+         let body_optimized = self
+             .def_info
+             .body_stmts
++            .get()
+             .optimize(&mut OptCtx::new(
+                 &mut OptimizeOnFreezeContext {
+                     module: &def_module,
+@@ -914,6 +980,15 @@ impl FrozenDef {
+         unsafe {
+             self.optimized_on_freeze_stmt.set(body_optimized);
+         }
++
++        // No other def shares this info, so nothing will run the unfrozen
++        // body again, or optimize it: release them.
++        if self.def_info.runs_once {
++            unsafe {
++                self.def_info.stmt_compiled.set(Bc::default());
++                self.def_info.body_stmts.set(StmtsCompiled::empty());
++            }
++        }
+     }
+ }
+ 
 diff --git a/src/eval/compiler/stmt.rs b/src/eval/compiler/stmt.rs
-index c6c7b65..18211d7 100644
+index c6c7b65..b7fce37 100644
 --- a/src/eval/compiler/stmt.rs
 +++ b/src/eval/compiler/stmt.rs
 @@ -576,6 +576,11 @@ pub(crate) fn bit_or_assign<'v>(
@@ -23,6 +206,19 @@ index c6c7b65..18211d7 100644
      }
  }
  
+@@ -767,8 +772,10 @@ impl Compiler<'_, '_, '_, '_> {
+                 let over = list_to_tuple(over);
+                 let var = self.assign_target(var)?;
+                 let over = self.expr(&over)?;
+-                let st = self.stmt(body, false)?;
+-                Ok(StmtsCompiled::for_stmt(span, var, over, st))
++                self.loop_depth += 1;
++                let st = self.stmt(body, false);
++                self.loop_depth -= 1;
++                Ok(StmtsCompiled::for_stmt(span, var, over, st?))
+             }
+             StmtP::Return(None) => Ok(StmtsCompiled::one(IrSpanned {
+                 node: StmtCompiled::Return(IrSpanned {
 diff --git a/src/values/layout/value.rs b/src/values/layout/value.rs
 index 7554138..0d71174 100644
 --- a/src/values/layout/value.rs
