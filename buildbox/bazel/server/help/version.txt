@@ -1,1 +1,1 @@
-Prints the version information that was embedded when bazel was built.
+Prints the version information that was embedded when bb was built.

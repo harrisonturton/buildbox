@@ -1,1 +1,1 @@
-This command shuts down the memory resident bazel server process.
+This command shuts down the memory resident bb server process.

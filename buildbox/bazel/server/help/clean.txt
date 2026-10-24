@@ -1,6 +1,6 @@
-Usage: bazel clean [<option> ...]
+Usage: bb clean [<option> ...]
 
-Removes bazel-created output, including all object files, and bazel
+Removes bb-created output, including all object files, and bb
 metadata.
 
 If '--expunge' is specified, the entire working tree will be removed

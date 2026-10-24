@@ -2,7 +2,7 @@
 //! or as `bazel ...` when bb is installed under that name.
 
 use bazel_rust_connect::buildbox::bazel::v1::{BazelClient, EnvironmentVariable, Exec, RunRequest, RunResponse, run_response};
-use bazel_server::BAZEL_VERSION;
+use bazel_server::{PRODUCT, VERSION};
 use config::{Environment, Settings};
 use connectrpc::client::{ClientConfig, HttpClient};
 use std::error::Error;
@@ -41,7 +41,7 @@ pub async fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
         .map(|arg| arg.into_string().map_err(|arg| format!("argument {arg:?} isn't valid UTF-8")))
         .collect::<Result<_, _>>()?;
     if args == ["--version"] {
-        println!("bazel {BAZEL_VERSION}");
+        println!("{PRODUCT} {VERSION}");
         return Ok(ExitCode::SUCCESS);
     }
     let config = config::load(None, Settings::default(), &Environment::from_process())?;
@@ -75,7 +75,7 @@ pub async fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
     tokio::select! {
         result = forward => result,
         _ = tokio::signal::ctrl_c() => {
-            eprintln!("\nBazel caught interrupt signal; cancelling pending invocation.\n");
+            eprintln!("\n{PRODUCT} caught interrupt signal; cancelling pending invocation.\n");
             Ok(ExitCode::from(INTERRUPTED))
         }
     }
@@ -161,7 +161,7 @@ fn start_server() -> Result<(), Box<dyn Error>> {
     let log_path = config.bazel_dir.join("server.log");
     let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
     let program = std::env::current_exe()?;
-    eprintln!("Starting local Bazel server ({BAZEL_VERSION}) and connecting to it...");
+    eprintln!("Starting local {PRODUCT} server ({VERSION}) and connecting to it...");
     let mut command = std::process::Command::new(program);
     command
         .arg("up")

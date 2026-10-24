@@ -1,6 +1,6 @@
 //! `help`: Bazel's help pages, for the commands and options bb supports.
 
-use crate::command::{BAZEL_VERSION, exit};
+use crate::command::{PRODUCT, VERSION, exit};
 use crate::output::Output;
 use bazel_options::{OptionKind, OptionSpec};
 
@@ -26,7 +26,7 @@ const COMMANDS: &[CommandHelp] = &[
     },
     CommandHelp {
         name: "dump",
-        summary: "Dumps the internal state of the bazel server process.",
+        summary: "Dumps the internal state of the bb server process.",
         page: include_str!("help/dump.txt"),
     },
     CommandHelp {
@@ -36,7 +36,7 @@ const COMMANDS: &[CommandHelp] = &[
     },
     CommandHelp {
         name: "info",
-        summary: "Displays runtime info about the bazel server.",
+        summary: "Displays runtime info about the bb server.",
         page: include_str!("help/info.txt"),
     },
     CommandHelp {
@@ -56,7 +56,7 @@ const COMMANDS: &[CommandHelp] = &[
     },
     CommandHelp {
         name: "shutdown",
-        summary: "Stops the bazel server.",
+        summary: "Stops the bb server.",
         page: include_str!("help/shutdown.txt"),
     },
     CommandHelp {
@@ -66,7 +66,7 @@ const COMMANDS: &[CommandHelp] = &[
     },
     CommandHelp {
         name: "version",
-        summary: "Prints version information for bazel.",
+        summary: "Prints version information for bb.",
         page: include_str!("help/version.txt"),
     },
 ];
@@ -89,14 +89,13 @@ const STARTUP_OPTIONS_PAGE: &str = "\
 Startup options
 ===============
 
-These options affect how bazel starts up, or more specifically, how
-the virtual machine hosting bazel starts up, and how the bazel server
-starts up. These options must be specified to the left of the bazel
-command (e.g. 'build'), and they must not contain any space between
-option name and value.
+These options affect how bb starts up, and how it reads the options
+of the command that follows. These options must be specified to the
+left of the bb command (e.g. 'build'), and they must not contain any
+space between option name and value.
 
 Example:
-  % bazel --host_jvm_args=-Xmx1400m --output_base=/tmp/foo build //base
+  % bb --bazelrc=/path/to/rc build //base
 ";
 
 /// Whether a command is a Bazel command bb supports.
@@ -131,13 +130,13 @@ pub async fn help(args: &[String], out: &Output) -> i32 {
 
 /// The line every help page starts with.
 fn header() -> String {
-    format!("{:>80}\n", format!("[bazel release {BAZEL_VERSION}]"))
+    format!("{:>80}\n", format!("[{PRODUCT} release {VERSION}]"))
 }
 
 /// The list of commands, which `help` prints with no topic.
 pub fn index() -> String {
     let mut text = header();
-    text.push_str("Usage: bazel <command> <options> ...\n\nAvailable commands:\n");
+    text.push_str("Usage: bb <command> <options> ...\n\nAvailable commands:\n");
     for command in COMMANDS {
         text.push_str(&format!("  {:<18}  {}\n", command.name, command.summary));
     }
@@ -147,10 +146,10 @@ pub fn index() -> String {
     }
     text.push_str(
         "\nGetting more help:\n  \
-         bazel help <command>\n                   Prints help and options for <command>.\n  \
-         bazel help startup_options\n                   Options for the JVM hosting bazel.\n  \
-         bazel help target-syntax\n                   Explains the syntax for specifying targets.\n  \
-         bazel help info-keys\n                   Displays a list of keys used by the info command.\n",
+         bb help <command>\n                   Prints help and options for <command>.\n  \
+         bb help startup_options\n                   Options that affect how bb starts.\n  \
+         bb help target-syntax\n                   Explains the syntax for specifying targets.\n  \
+         bb help info-keys\n                   Displays a list of keys used by the info command.\n",
     );
     text
 }

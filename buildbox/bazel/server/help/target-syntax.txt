@@ -66,11 +66,11 @@ Subtractive patterns:
   subtracted from the set of targets accumulated by preceding
   patterns. (Note that this means order matters.) For example:
 
-    % bazel build -- foo/... -foo/contrib/...
+    % bb build -- foo/... -foo/contrib/...
 
   builds everything in 'foo', except 'contrib'.  In case a target not
   under 'contrib' depends on something under 'contrib' though, in order to
-  build the former bazel has to build the latter too. As usual, the '--' is
+  build the former bb has to build the latter too. As usual, the '--' is
   required to prevent '-f' from being interpreted as an option.
 
   When running the test command, test suite expansion is applied to each target

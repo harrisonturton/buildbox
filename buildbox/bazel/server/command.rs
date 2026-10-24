@@ -9,7 +9,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::Instrument;
 
-pub use bazel_starlark::BAZEL_VERSION;
+/// What messages call this program, where Bazel's say `bazel`.
+pub const PRODUCT: &str = "bb";
+
+/// This build's version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A command line to run, and where it was run from.
 pub struct Invocation {
@@ -82,7 +86,7 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
 
     let Some(workspace_root) = workspace::find_root(&invocation.working_directory) else {
         out.error(&format!(
-            "The '{command}' command is only supported from within a workspace (below a directory having a MODULE.bazel file).\nSee documentation at https://bazel.build/concepts/build-ref#workspace"
+            "The '{command}' command is only supported from within a workspace (below a directory having a MODULE.bazel file)."
         ))
         .await;
         return exit::COMMAND_LINE_ERROR;
@@ -139,7 +143,7 @@ async fn unsupported(command: &str, out: &Output) -> i32 {
     if UNSUPPORTED_COMMANDS.contains(&command) {
         out.error(&format!("'{command}' isn't supported by bb yet")).await;
     } else {
-        out.stderr(&format!("Command '{command}' not found. Try 'bazel help'.\n")).await;
+        out.stderr(&format!("Command '{command}' not found. Try '{PRODUCT} help'.\n")).await;
     }
     exit::COMMAND_LINE_ERROR
 }

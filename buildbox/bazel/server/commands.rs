@@ -1,6 +1,6 @@
 //! The commands bb implements.
 
-use crate::command::{BAZEL_VERSION, CommandContext, exit, working_package};
+use crate::command::{CommandContext, PRODUCT, VERSION, exit, working_package};
 use crate::output::Output;
 use bazel_label::RepoName;
 use bazel_loading::RepoMappingKey;
@@ -12,12 +12,11 @@ use std::sync::Arc;
 
 pub async fn version(args: &[String], out: &Output) -> i32 {
     if args.iter().any(|arg| arg == "--gnu_format") {
-        out.stdout(&format!("bazel {BAZEL_VERSION}\n")).await;
+        out.stdout(&format!("{PRODUCT} {VERSION}\n")).await;
         return exit::SUCCESS;
     }
     out.stdout(&format!(
-        "Build label: {BAZEL_VERSION}\nBuild target: bb {}\nBuild time: unknown\nBuild timestamp: 0\nBuild timestamp as int: 0\n",
-        env!("CARGO_PKG_VERSION")
+        "Build label: {VERSION}\nBuild target: //buildbox/cli:buildbox\nBuild time: Thu Jan 01 00:00:00 1970 (0)\nBuild timestamp: Thu Jan 01 00:00:00 1970 (0)\nBuild timestamp as int: 0\n"
     ))
     .await;
     exit::SUCCESS
@@ -142,7 +141,7 @@ fn query_expression(options: &bazel_options::ParsedOptions) -> Result<String, St
         return std::fs::read_to_string(file).map_err(|error| format!("failed to read --query_file {file}: {error}"));
     }
     if options.residue.is_empty() {
-        return Err("missing query expression. Type 'bazel help query' for syntax and help.".into());
+        return Err("missing query expression. Type 'bb help query' for syntax and help.".into());
     }
     Ok(options.residue.join(" "))
 }
@@ -166,12 +165,12 @@ pub const INFO_KEYS: &[(&str, &str)] = &[
     ("bazel-testlogs", "Configuration dependent directory for logs from a test run."),
     ("execution_root", "A directory that makes all input and output files visible to the build."),
     ("install_base", "The installation base directory."),
-    ("output_base", "A directory for shared bazel state as well as tool and strategy specific subdirectories."),
+    ("output_base", "A directory for shared bb state as well as tool and strategy specific subdirectories."),
     ("output_path", "Output directory"),
     ("package_path", "The search path for resolving package labels."),
-    ("release", "bazel release identifier"),
+    ("release", "bb release identifier"),
     ("repository_cache", "The location of the repository download cache used"),
-    ("server_pid", "bazel process id"),
+    ("server_pid", "bb process id"),
     (
         "used-heap-size",
         "The amount of used memory in bytes. Note that this is not a good indicator of the actual memory use, as it includes any remaining inaccessible memory.",
@@ -219,7 +218,7 @@ fn info_values(context: &CommandContext<'_>) -> Vec<(&'static str, String)> {
         "output_base" => output_base.display().to_string(),
         "output_path" => output_path.display().to_string(),
         "package_path" => "%workspace%".to_string(),
-        "release" => format!("release {BAZEL_VERSION}"),
+        "release" => format!("release {VERSION}"),
         "repository_cache" => bazel_dir.join("repository_cache").display().to_string(),
         "server_pid" => std::process::id().to_string(),
         "used-heap-size" => format!("{}MB", (engine.store.stored_bytes + engine.store.entry_bytes) >> 20),

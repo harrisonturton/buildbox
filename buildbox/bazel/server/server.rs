@@ -21,7 +21,7 @@ mod top_level;
 mod workspace;
 mod written;
 
-pub use command::{BAZEL_VERSION, Invocation, exit};
+pub use command::{Invocation, PRODUCT, VERSION, exit};
 pub use memory::configure_allocator;
 pub use output::Output;
 pub use service::BazelService;
@@ -175,7 +175,7 @@ impl BazelServer {
             tracing::warn!("analysis won't be paged out of memory: {error}");
         }
         bazel_analysis::cc::register();
-        let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), Some(BAZEL_VERSION));
+        let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), Some(bazel_starlark::BAZEL_VERSION));
         match &bazel_tools {
             Some(dir) => tracing::info!("using @bazel_tools from {}", dir.display()),
             None => tracing::warn!("no @bazel_tools found; set BB_BAZEL_TOOLS"),

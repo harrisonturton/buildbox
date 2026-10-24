@@ -1,20 +1,16 @@
-Usage: bazel info <options> [keys]
+Usage: bb info <options> [keys]
 
-Displays information about the state of the bazel process in the
+Displays information about the state of the bb process in the
 form of several "key: value" pairs.  This includes the locations of
 several output directories.  Because some of the
-values are affected by the options passed to 'bazel build', the
+values are affected by the options passed to 'bb build', the
 info command accepts the same set of options.
 
 If arguments are specified, each should be one of the keys (e.g. "bazel-bin").
 In this case only the value(s) for those keys will be printed.
 
-If --show_make_env is specified, the output includes the set of key/value
-pairs in the "Make" environment, accessible within BUILD files.
+The full list of keys and the meaning of their values can be obtained
+with 'bb help info-keys'.
 
-The full list of keys and the meaning of their values is documented in
-the bazel User Manual, and can be programmatically obtained with
-'bazel help info-keys'.
-
-See also 'bazel version' for more detailed bazel version
+See also 'bb version' for more detailed bb version
 information.
