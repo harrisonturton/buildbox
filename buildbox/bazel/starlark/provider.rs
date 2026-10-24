@@ -1,10 +1,10 @@
 //! `provider()`, and the provider instances rules return.
 
 use crate::context::EvalContext;
+use crate::fields::{Fields, FieldsGen};
 use allocative::Allocative;
 use bazel_label::Label;
 use starlark::coerce::Coerce;
-use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::{Arguments, Evaluator};
 use starlark::starlark_complex_value;
@@ -102,12 +102,12 @@ where
             let Some(fields) = DictRef::from_value(result) else {
                 return Err(starlark::Error::new_other(anyhow::anyhow!("{}: init must return a dict", self.name())));
             };
-            let fields: SmallMap<String, Value<'v>> = fields.iter().filter_map(|(k, v)| Some((k.unpack_str()?.to_string(), v))).collect();
+            let fields = Fields::new(fields.iter().filter_map(|(k, v)| Some((k.unpack_str()?, v))));
             return Ok(eval.heap().alloc(ProviderInstance { provider: me, fields }));
         }
         let positional: Vec<Value<'v>> = args.positions(eval.heap())?.collect();
         let names = args.names_map()?;
-        let mut fields = SmallMap::with_capacity(names.len() + positional.len());
+        let mut fields: Vec<(&str, Value<'v>)> = Vec::with_capacity(names.len() + positional.len());
         if !positional.is_empty() {
             // Builtin providers, such as `TemplateVariableInfo(variables)`,
             // take their fields by position too.
@@ -119,7 +119,7 @@ where
                 return Err(starlark::Error::new_other(anyhow::anyhow!("{}: too many positional arguments", self.name())));
             }
             for (name, value) in declared.iter().zip(positional) {
-                fields.insert(name.clone(), value);
+                fields.push((name.as_str(), value));
             }
         }
         for (name, value) in names.iter() {
@@ -132,8 +132,9 @@ where
                     )));
                 }
             }
-            fields.insert(name.as_str().to_string(), *value);
+            fields.push((name.as_str(), *value));
         }
+        let fields = Fields::new(fields);
         Ok(eval.heap().alloc(ProviderInstance { provider: me, fields }))
     }
 }
@@ -148,7 +149,7 @@ fn named<'v>(args: &Arguments<'v, '_>) -> starlark::Result<Vec<(&'v str, Value<'
 #[repr(C)]
 pub struct ProviderInstanceGen<V: ValueLifetimeless> {
     pub provider: V,
-    pub fields: SmallMap<String, V>,
+    pub fields: FieldsGen<V>,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<ProviderInstanceGen<To>> for ProviderInstanceGen<From> {}
@@ -179,7 +180,7 @@ where
     }
 
     fn dir_attr(&self) -> Vec<String> {
-        self.fields.keys().cloned().collect()
+        self.fields.keys().map(str::to_string).collect()
     }
 
     fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {

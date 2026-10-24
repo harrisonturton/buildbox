@@ -10,6 +10,7 @@ pub mod convert;
 pub mod depset;
 pub mod dotted_version;
 pub mod eval;
+pub mod fields;
 pub mod instantiate;
 pub mod json_module;
 pub mod label_value;

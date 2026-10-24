@@ -7,6 +7,7 @@ use crate::target_value::{DEFAULT_INFO, TargetValue};
 use bazel_label::Label;
 use bazel_starlark::depset::{Depset, Order};
 use bazel_starlark::opaque::Opaque;
+use bazel_starlark::fields::Fields;
 use bazel_starlark::provider::ProviderInstance;
 use starlark::collections::SmallMap;
 use starlark::values::{Heap, Value, ValueLike};
@@ -21,8 +22,10 @@ pub fn builtin<'v>(name: &str) -> anyhow::Result<Value<'v>> {
 /// An instance of a builtin provider.
 pub fn instance<'v>(name: &str, fields: Vec<(&str, Value<'v>)>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
     let provider = builtin(name)?;
-    let fields = fields.into_iter().map(|(name, value)| (name.to_string(), value)).collect();
-    Ok(heap.alloc(ProviderInstance { provider, fields }))
+    Ok(heap.alloc(ProviderInstance {
+        provider,
+        fields: Fields::new(fields),
+    }))
 }
 
 /// A depset of files.
