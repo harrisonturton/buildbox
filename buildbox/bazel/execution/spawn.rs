@@ -9,7 +9,8 @@ use buffa::Message;
 use intern::PathId;
 use remote_execution_rust_connect::build::bazel::remote::execution::v2 as reapi;
 use skyframe::{Ctx, SkyError};
-use std::collections::BTreeMap;
+use futures::StreamExt;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -196,11 +197,16 @@ async fn tree_directories(backend: &Backend, tree: BlobDigest) -> Result<(BlobDi
 
 async fn upload_blobs(backend: &Backend, blobs: Vec<(cas::Digest, Vec<u8>)>) -> Result<(), SkyError> {
     let digests: Vec<cas::Digest> = blobs.iter().map(|(digest, _)| digest.clone()).collect();
-    let missing = backend.cas.find_missing(&digests).await.map_err(cas_error)?;
-    for (digest, bytes) in blobs {
-        if missing.contains(&digest) {
-            backend.cas.put_bytes(&bytes).await.map_err(cas_error)?;
+    let missing: HashSet<cas::Digest> = backend.cas.find_missing(&digests).await.map_err(cas_error)?.into_iter().collect();
+    let mut puts = Vec::with_capacity(missing.len());
+    for (digest, bytes) in &blobs {
+        if missing.contains(digest) {
+            puts.push(backend.cas.put_bytes(bytes));
         }
+    }
+    let results: Vec<_> = futures::stream::iter(puts).buffer_unordered(crate::action_key::UPLOADS).collect().await;
+    for result in results {
+        result.map_err(cas_error)?;
     }
     Ok(())
 }

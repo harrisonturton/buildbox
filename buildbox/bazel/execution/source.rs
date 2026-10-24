@@ -7,6 +7,7 @@ use bazel_fs::{FileChanges, RootedPath};
 use skycodec::{Decode, Encode};
 use skyframe::{Ctx, Key, SkyError, encoded_value};
 use std::io::Read;
+use tracing::Instrument;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -35,7 +36,9 @@ impl Key for SourceDigestKey {
         let changes = ctx.global::<FileChanges>().ok();
         let rooted = self.0;
         let hashed_path = path.clone();
+        let span = tracing::info_span!("hash_source");
         let result = tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
             if let Some(changes) = changes {
                 changes.record(rooted, &hashed_path);
             }
@@ -47,7 +50,7 @@ impl Key for SourceDigestKey {
             Err(error) => return Err(SkyError::transient(format!("hashing task failed: {error}"))),
         };
         if let (Some(blob), Ok(backend)) = (digest.digest, ctx.global::<Backend>()) {
-            store(&backend, blob, &path).await?;
+            store(&backend, blob, &path).instrument(tracing::info_span!("store_source")).await?;
         }
         Ok(digest)
     }

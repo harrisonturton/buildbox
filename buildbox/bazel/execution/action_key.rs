@@ -155,8 +155,8 @@ pub async fn upload(backend: &Backend, inputs: &[&Input]) -> Result<(), SkyError
     Ok(())
 }
 
-/// How many source files an action uploads at once.
-const UPLOADS: usize = 16;
+/// How many blobs an action uploads at once.
+pub const UPLOADS: usize = 16;
 
 pub fn cas_error(error: cas::CasError) -> SkyError {
     SkyError::transient(format!("CAS: {error}"))
