@@ -149,7 +149,7 @@ async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarg
             let artifact = Artifact::derived(owner.label, &key.config.get(), artifact::name_path(key.label), false);
             file(ctx, key, "generated file", artifact)
         }
-        Target::PackageGroup(_) => file_less(ctx, key, "package group"),
+        Target::PackageGroup(group) => package_group(ctx, key, group).await,
     }
 }
 
@@ -569,10 +569,41 @@ fn workspace_status(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTar
     Ok(target)
 }
 
-/// The configured target of something with no files, such as a package
-/// group.
-fn file_less(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str) -> Result<ConfiguredTarget, SkyError> {
-    empty_target(ctx, key, kind, false, Fingerprint::of(key.label.to_string().as_bytes()))
+/// A `package_group`, which provides the packages it contains, with those
+/// of the groups it includes, as `PackageSpecificationInfo`.
+async fn package_group(ctx: &Ctx, key: ConfiguredTargetKey, group: &bazel_packages::PackageGroup) -> Result<ConfiguredTarget, SkyError> {
+    let includes: Vec<ConfiguredTargetKey> = group.includes.iter().map(|label| ConfiguredTargetKey { label: *label, config: key.config }).collect();
+    let mut included = Vec::with_capacity(includes.len());
+    for target in ctx.compute_many(&includes).await {
+        let target = target?;
+        let providers = target.providers()?;
+        let specification = providers
+            .get()
+            .and_then(|value| value.provider(crate::package_spec::PROVIDER))
+            .and_then(|value| value.downcast_ref::<crate::package_spec::PackageSpecification>().cloned());
+        match specification {
+            Some(specification) => included.push(specification),
+            None => return Err(SkyError::new(format!("{}: includes {}, which isn't a package_group", key.label, target.label))),
+        }
+    }
+    let mapping = ctx.compute(&RepoMappingKey(key.label.repo())).await?;
+    let includes: Vec<&crate::package_spec::PackageSpecification> = included.iter().collect();
+    let specification = crate::package_spec::PackageSpecification::new(&group.packages, key.label.repo(), &mapping.0, &includes)
+        .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
+    let fingerprint = Fingerprint::of(format!("{}{:?}", key.label, group).as_bytes());
+    let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<Analyzed> {
+        let defaults = providers::Defaults {
+            files: Vec::new(),
+            executable: None,
+        };
+        let provided = module.heap().alloc(specification);
+        let target = providers::collect(key.label, provided, &defaults, module.heap())?;
+        module.set(TARGET, module.heap().alloc(target));
+        let module = module.freeze_named(bazel_starlark::heap_name("package group", key.label, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        Ok(Analyzed { module, actions: Vec::new() })
+    })
+    .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
+    Ok(configured(ctx, key, Symbol::intern("package group"), false, analyzed, fingerprint))
 }
 
 /// A configured target with only an empty `DefaultInfo`.

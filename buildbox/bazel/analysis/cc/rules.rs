@@ -2,7 +2,8 @@
 //! with them.
 
 use super::api::{self, CompilationFields, LibraryFiles, LinkVariables};
-use super::features::{FeatureConfiguration, Variables};
+use super::compile::action_env;
+use super::features::FeatureConfiguration;
 use super::values::{CcStruct, CcToolchain, ToolchainConfigValue};
 use crate::inputs::InputSet;
 use crate::action::{Action, ActionKind, Spawn};
@@ -414,15 +415,6 @@ fn shell_split(text: &str) -> Vec<String> {
         words.push(current);
     }
     words
-}
-
-/// The environment of C++ actions: the toolchain's, and the default shell
-/// environment.
-fn action_env(state: &RuleState, configuration: &FeatureConfiguration, action: &str, variables: &Variables) -> anyhow::Result<Vec<(String, String)>> {
-    let mut env: std::collections::BTreeMap<String, String> = state.config.options.action_env.iter().cloned().collect();
-    env.insert("PWD".to_string(), "/proc/self/cwd".to_string());
-    env.extend(configuration.environment(action, variables)?);
-    Ok(env.into_iter().collect())
 }
 
 /// Compile a rule's sources, returning the object files.

@@ -8,7 +8,7 @@ use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
+use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
 use std::fmt;
 use std::sync::Mutex;
 
@@ -41,6 +41,13 @@ impl fmt::Display for Args {
 impl Args {
     pub fn state(&self) -> ArgsState {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    /// Arguments built natively, such as a link's.
+    pub fn from_state(state: ArgsState) -> Args {
+        Args {
+            state: Mutex::new(state),
+        }
     }
 
     fn push(&self, values: impl IntoIterator<Item = String>) {
@@ -114,6 +121,53 @@ fn format(template: Option<&str>, value: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
+/// Whether a `map_each` function takes a directory expander as well as the
+/// item, as Bazel decides: by having two parameters or more.
+fn wants_directory_expander(function: Value<'_>) -> bool {
+    use starlark::docs::{DocItem, DocMember};
+    if function.get_type() != "function" {
+        return false;
+    }
+    let DocItem::Member(DocMember::Function(function)) = function.documentation() else {
+        return false;
+    };
+    let params = &function.params;
+    let count = params.pos_only.len() + params.pos_or_named.len() + params.named_only.len() + usize::from(params.args.is_some()) + usize::from(params.kwargs.is_some());
+    count >= 2
+}
+
+/// What `map_each` functions are given to expand directories with. bb
+/// expands command lines during analysis, before directories have
+/// contents, so a directory expands to itself, as with Bazel's expander
+/// where expansion isn't possible.
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+struct DirectoryExpander;
+
+starlark_simple_value!(DirectoryExpander);
+
+impl fmt::Display for DirectoryExpander {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<DirectoryExpander>")
+    }
+}
+
+#[starlark_value(type = "DirectoryExpander")]
+impl<'v> StarlarkValue<'v> for DirectoryExpander {
+    fn get_methods() -> Option<&'static Methods> {
+        static METHODS: MethodsStatic = MethodsStatic::new("DirectoryExpander", directory_expander_methods);
+        Some(METHODS.methods())
+    }
+}
+
+#[starlark_module]
+fn directory_expander_methods(builder: &mut MethodsBuilder) {
+    /// The files of `file`, if it's a directory: here, itself.
+    fn expand<'v>(this: Value<'v>, #[starlark(require = pos)] file: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+        let _ = this;
+        Ok(heap.alloc(starlark::values::list::AllocList([file])))
+    }
+}
+
 /// The settings `add_all` and `add_joined` share.
 struct Expansion<'v> {
     map_each: Option<Value<'v>>,
@@ -129,7 +183,14 @@ impl<'v> Expansion<'v> {
                 out.push(format(self.format_each, &stringify(item))?);
                 continue;
             };
-            let mapped = eval.eval_function(map_each, &[item], &[]).map_err(|error| anyhow::anyhow!("{error}"))?;
+            let mapped = match wants_directory_expander(map_each) {
+                true => {
+                    let expander = eval.heap().alloc(DirectoryExpander);
+                    eval.eval_function(map_each, &[item, expander], &[])
+                }
+                false => eval.eval_function(map_each, &[item], &[]),
+            };
+            let mapped = mapped.map_err(|error| anyhow::anyhow!("{error}"))?;
             if mapped.is_none() {
                 continue;
             }
@@ -289,11 +350,28 @@ fn args_methods(builder: &mut MethodsBuilder) {
 pub fn param_file_contents(state: &ArgsState) -> String {
     let lines: Vec<String> = match state.param_file_format.as_str() {
         "shell" => state.arguments.iter().map(|argument| shell_quote(argument)).collect(),
+        "gcc_quoted" => state.arguments.iter().map(|argument| gcc_quote(argument)).collect(),
         _ => state.arguments.clone(),
     };
     let mut contents = lines.join("\n");
     contents.push('\n');
     contents
+}
+
+/// An argument as GCC reads it from a params file: special characters
+/// escaped with backslashes.
+fn gcc_quote(argument: &str) -> String {
+    if argument.is_empty() {
+        return "''".to_string();
+    }
+    let mut quoted = String::with_capacity(argument.len());
+    for character in argument.chars() {
+        if "'\"\\ \t\r\n\u{c}\u{b}".contains(character) {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted
 }
 
 fn shell_quote(argument: &str) -> String {

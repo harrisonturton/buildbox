@@ -305,6 +305,29 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         Ok(FileValue(state.declare(&name, false)?))
     }
 
+    /// `declare_shareable_artifact(path, artifact_root = unbound)`: a file at
+    /// `path` in the output directory, which actions of several targets may
+    /// generate alike, such as a module map.
+    fn declare_shareable_artifact<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = pos)] path: &str,
+        #[starlark(require = pos)] artifact_root: Option<Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<FileValue> {
+        let _ = artifact_root;
+        Ok(FileValue(RuleState::get(eval)?.declare_at_root(path)?))
+    }
+
+    /// `declare_shareable_directory(path)`: a directory at `path` in the
+    /// output directory, as link actions declare them.
+    fn declare_shareable_directory<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = pos)] path: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<FileValue> {
+        Ok(FileValue(RuleState::get(eval)?.declare_at_root_as(path, true)?))
+    }
+
     /// `declare_directory(filename, *, sibling = None)`.
     fn declare_directory<'v>(
         #[starlark(this)] _this: Value<'v>,
@@ -411,9 +434,12 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named)] target_path: Option<&str>,
         #[starlark(require = named, default = false)] is_executable: bool,
         #[starlark(require = named)] progress_message: Option<&str>,
+        #[starlark(require = named)] use_exec_root_for_source: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let _ = progress_message;
+        // bb copies the target's contents, so where its path is taken from
+        // makes no difference.
+        let _ = (progress_message, use_exec_root_for_source);
         let state = RuleState::get(eval)?;
         let output = FileValue::artifact(output).ok_or_else(|| anyhow::anyhow!("symlink: output must be a File"))?;
         if target_path.is_some() {

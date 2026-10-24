@@ -85,7 +85,10 @@ impl<'v> StarlarkValue<'v> for Fragment {
             ("cpp", "cxxopts") => words("cxxopt"),
             ("cpp", "conlyopts") => words("conlyopt"),
             ("cpp", "linkopts") => words("linkopt"),
-            ("cpp", "compilation_mode") | ("cpp", "_compilation_mode") => heap.alloc(self.options.compilation_mode.as_str()),
+            ("cpp", "objccopts" | "lto_backend_options") => heap.alloc(AllocList::EMPTY),
+            ("cpp", "custom_malloc" | "_fdo_prefetch_hints_label") => Value::new_none(),
+            ("cpp", "apple_generate_dsym" | "objc_generate_linkmap" | "objc_should_strip_binary") => Value::new_bool(false),
+            ("cpp", "_dont_enable_host_nonhost") => Value::new_bool(true),
             ("proto", "experimental_protoc_opts") => words("protocopt"),
             ("proto", "cc_proto_library_header_suffixes") => heap.alloc(AllocList([".pb.h"])),
             ("proto", "cc_proto_library_source_suffixes") => heap.alloc(AllocList([".pb.cc"])),
@@ -105,6 +108,181 @@ impl<'v> StarlarkValue<'v> for Fragment {
 /// Fragment methods that answer as Bazel's do with default options.
 #[starlark_module]
 fn fragment_methods(builder: &mut MethodsBuilder) {
+    /// `cpp.compilation_mode()`: `fastbuild`, `dbg` or `opt`.
+    fn compilation_mode<'v>(this: Value<'v>) -> anyhow::Result<String> {
+        let fragment = this.downcast_ref::<Fragment>().ok_or_else(|| anyhow::anyhow!("expected a fragment"))?;
+        Ok(fragment.options.compilation_mode.clone())
+    }
+
+    /// `cpp.dynamic_mode()`: `--dynamic_mode`, as Bazel's enum names it.
+    fn dynamic_mode<'v>(this: Value<'v>) -> anyhow::Result<&'static str> {
+        let _ = this;
+        Ok("DEFAULT")
+    }
+
+    fn lto_index_options<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+        let _ = this;
+        Ok(heap.alloc(AllocList::EMPTY))
+    }
+
+    fn strip_opts<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+        let _ = this;
+        Ok(heap.alloc(AllocList::EMPTY))
+    }
+
+    fn extra_allowlisted_feature_layering_check_macros<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+        let _ = this;
+        Ok(heap.alloc(AllocList::EMPTY))
+    }
+
+    fn force_layering_check_features<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+        let _ = this;
+        Ok(heap.alloc(AllocList::EMPTY))
+    }
+
+    /// Options on by default: `--start_end_lib`, `--legacy_whole_archive`,
+    /// `--incompatible_remove_legacy_whole_archive`,
+    /// `--interface_shared_objects`, `--share_native_deps`,
+    /// `--experimental_link_static_libraries_once`, `--proto_profile` and
+    /// `--cc_dotd_files`.
+    fn start_end_lib<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    fn legacy_whole_archive<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    fn incompatible_remove_legacy_whole_archive<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    fn interface_shared_objects<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    fn share_native_deps<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    fn experimental_link_static_libraries_once<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    fn proto_profile<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    fn should_generate_dotd_files<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    fn objc_should_generate_dotd_files<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    /// Always true in Bazel 9.
+    fn incompatible_use_specific_tool_files<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    fn disable_nocopts<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(true)
+    }
+
+    /// Options off by default.
+    fn use_llvm_coverage_map_format<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    fn include_scanning<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    fn objc_enable_binary_stripping<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    fn experimental_cc_implementation_deps<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    fn experimental_cpp_modules<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    fn process_headers_in_dependencies<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    fn save_feature_state<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    fn save_temps<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    fn build_test_dwp<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    /// Unset paths and labels: FDO profiles, Propeller profiles and
+    /// `--grte_top`.
+    fn fdo_path<'v>(this: Value<'v>) -> anyhow::Result<starlark::values::none::NoneType> {
+        let _ = this;
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn cs_fdo_path<'v>(this: Value<'v>) -> anyhow::Result<starlark::values::none::NoneType> {
+        let _ = this;
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn fdo_instrument<'v>(this: Value<'v>) -> anyhow::Result<starlark::values::none::NoneType> {
+        let _ = this;
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn cs_fdo_instrument<'v>(this: Value<'v>) -> anyhow::Result<starlark::values::none::NoneType> {
+        let _ = this;
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn propeller_optimize_absolute_cc_profile<'v>(this: Value<'v>) -> anyhow::Result<starlark::values::none::NoneType> {
+        let _ = this;
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn propeller_optimize_absolute_ld_profile<'v>(this: Value<'v>) -> anyhow::Result<starlark::values::none::NoneType> {
+        let _ = this;
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn grte_top<'v>(this: Value<'v>) -> anyhow::Result<starlark::values::none::NoneType> {
+        let _ = this;
+        Ok(starlark::values::none::NoneType)
+    }
     fn fission_active_for_current_compilation_mode<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         let _ = this;
         Ok(false)
@@ -169,6 +347,21 @@ impl<'v> StarlarkValue<'v> for Configuration {
 
 #[starlark_module]
 fn configuration_methods(builder: &mut MethodsBuilder) {
+    /// Whether external repositories' outputs sit beside the main
+    /// repository's, as `--experimental_sibling_repository_layout` asks;
+    /// bb lays them out as Bazel does by default.
+    fn is_sibling_repository_layout<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
+    /// Whether generated files have a directory of their own, apart from
+    /// `bin`: not since Bazel merged them.
+    fn has_separate_genfiles_directory<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let _ = this;
+        Ok(false)
+    }
+
     fn stamp_binaries<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         let configuration = this.downcast_ref::<Configuration>().ok_or_else(|| anyhow::anyhow!("expected a configuration"))?;
         Ok(configuration.0.values.iter().any(|(name, value)| name == "stamp" && value == "true"))

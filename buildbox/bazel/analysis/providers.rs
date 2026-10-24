@@ -94,6 +94,9 @@ fn native_provider_key(value: Value<'_>) -> Option<&'static str> {
     if CcToolchain::from_value(value).is_some() {
         return Some("CcToolchainInfo");
     }
+    if value.downcast_ref::<crate::package_spec::PackageSpecification>().is_some() {
+        return Some(crate::package_spec::PROVIDER);
+    }
     value.downcast_ref::<ToolchainConfigValue>().map(|_| "CcToolchainConfigInfo")
 }
 

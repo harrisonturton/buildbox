@@ -142,6 +142,35 @@ pub fn register_bzl_extension(extension: fn(&mut GlobalsBuilder)) {
     }
 }
 
+/// Members a higher layer gives `_builtins.internal`, the native API
+/// `@_builtins` is written against, such as `cc_internal`. They must be
+/// registered before `@_builtins` is evaluated.
+static BUILTINS_INTERNALS: std::sync::Mutex<Vec<fn(&mut GlobalsBuilder)>> = std::sync::Mutex::new(Vec::new());
+
+/// Add members to `_builtins.internal`: each global `internal` sets becomes
+/// one. Call this before evaluating anything.
+pub fn register_builtins_internal(internal: fn(&mut GlobalsBuilder)) {
+    let mut internals = BUILTINS_INTERNALS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !internals.contains(&internal) {
+        internals.push(internal);
+    }
+}
+
+/// `_builtins`, as `@_builtins` sees it: `internal` with the registered
+/// members, and everything else opaque.
+fn builtins_object(builder: &mut GlobalsBuilder) -> FrozenValue {
+    let internals = BUILTINS_INTERNALS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let mut members = GlobalsBuilder::new();
+    for internal in internals {
+        internal(&mut members);
+    }
+    let members = members.build();
+    builder.frozen_heap().add_reference(members.heap());
+    let internal_members = members.iter().map(|(name, value)| (name.to_string(), value)).collect();
+    let internal = builder.alloc(opaque::Namespace::new("_builtins.internal", internal_members));
+    builder.alloc(opaque::Namespace::new("_builtins", vec![("internal".to_string(), internal)]))
+}
+
 fn bzl_globals_builder() -> GlobalsBuilder {
     let mut builder = standard()
         .with(select::select_function)
@@ -186,7 +215,7 @@ pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
             native_rules::register(native);
             native_values(native, legacy);
         });
-        let value = builder.alloc(opaque::Opaque::new("_builtins"));
+        let value = builtins_object(&mut builder);
         builder.set("_builtins", value);
         add_extensions(&mut builder);
         builder.build_named(GlobalFrozenHeapName { name: "bb bzl" })

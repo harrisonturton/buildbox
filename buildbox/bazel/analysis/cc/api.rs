@@ -859,8 +859,11 @@ pub fn native_constructor(name: &str) -> Option<super::values::Constructor> {
 
 /// Add `cc_common`, `CcInfo` and `CcToolchainConfigInfo` to `.bzl` files.
 pub fn register(builder: &mut GlobalsBuilder) {
-    let cc_common = builder.alloc(CcCommon);
-    builder.set("cc_common", cc_common);
+    let package_specification = builder.alloc(NativeProvider {
+        name: crate::package_spec::PROVIDER,
+        constructor: None,
+    });
+    builder.set(crate::package_spec::PROVIDER, package_specification);
     let cc_info = builder.alloc(NativeProvider {
         name: "CcInfo",
         constructor: native_constructor("CcInfo"),

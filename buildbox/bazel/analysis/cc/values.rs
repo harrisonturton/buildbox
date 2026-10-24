@@ -6,9 +6,11 @@ use super::features::{FeatureConfiguration, Variables};
 use allocative::Allocative;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
+use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::{Arguments, Evaluator};
 use starlark::pagable::{StarlarkDeserialize, StarlarkDeserializeContext, StarlarkSerialize, StarlarkSerializeContext};
 use starlark::starlark_complex_value;
+use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::{
     Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
@@ -217,7 +219,32 @@ impl fmt::Display for FeatureConfigurationValue {
 }
 
 #[starlark_value(type = "FeatureConfiguration")]
-impl<'v> StarlarkValue<'v> for FeatureConfigurationValue {}
+impl<'v> StarlarkValue<'v> for FeatureConfigurationValue {
+    fn get_methods() -> Option<&'static Methods> {
+        static METHODS: MethodsStatic = MethodsStatic::new("FeatureConfiguration", feature_configuration_methods);
+        Some(METHODS.methods())
+    }
+}
+
+#[starlark_module]
+fn feature_configuration_methods(builder: &mut MethodsBuilder) {
+    /// Whether a feature or action config is enabled.
+    fn is_enabled<'v>(this: Value<'v>, #[starlark(require = pos)] feature: &str) -> anyhow::Result<bool> {
+        Ok(feature_configuration(this)?.is_enabled(feature))
+    }
+
+    /// Whether a feature was asked for, enabled or not.
+    fn is_requested<'v>(this: Value<'v>, #[starlark(require = pos)] feature: &str) -> anyhow::Result<bool> {
+        Ok(feature_configuration(this)?.is_requested(feature))
+    }
+}
+
+fn feature_configuration<'v>(value: Value<'v>) -> anyhow::Result<&'v FeatureConfiguration> {
+    match value.downcast_ref::<FeatureConfigurationValue>() {
+        Some(configuration) => Ok(&configuration.0),
+        None => anyhow::bail!("expected a FeatureConfiguration, got {}", value.get_type()),
+    }
+}
 
 /// Build variables, as `cc_common.create_compile_variables` makes them.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]

@@ -109,6 +109,8 @@ pub struct FeatureError(pub String);
 pub struct FeatureConfiguration {
     pub toolchain: Arc<ToolchainFeatures>,
     pub enabled: BTreeSet<String>,
+    /// The features asked for, enabled or not.
+    pub requested: BTreeSet<String>,
 }
 
 /// The actions Bazel requests the action configs of, as features, so that
@@ -178,9 +180,29 @@ impl ToolchainFeatures {
         wanted.extend(ACTION_NAMES);
         wanted.extend(requested.iter().map(String::as_str));
 
+        self.select(&wanted, &unsupported)
+    }
+
+    /// The features and action configs enabled by default, in order.
+    pub fn defaults(&self) -> Vec<String> {
+        let features = self.features.iter().filter(|feature| feature.enabled).map(|feature| feature.name.clone());
+        let action_configs = self.action_configs.iter().filter(|config| config.enabled).map(|config| config.action_name.clone());
+        features.chain(action_configs).collect()
+    }
+
+    /// Choose the enabled features as Bazel 9 does, from those requested
+    /// alone: rules_cc requests the defaults itself.
+    pub fn configure_requested(self: &Arc<Self>, requested: &[String]) -> Result<FeatureConfiguration, FeatureError> {
+        let wanted: Vec<&str> = requested.iter().map(String::as_str).collect();
+        self.select(&wanted, &BTreeSet::new())
+    }
+
+    /// Enable `wanted` with what they imply, less `unsupported` and those
+    /// whose requirements aren't met.
+    fn select(self: &Arc<Self>, wanted: &[&str], unsupported: &BTreeSet<&str>) -> Result<FeatureConfiguration, FeatureError> {
         let mut enabled = BTreeSet::new();
         for name in wanted {
-            self.enable(name, &unsupported, &mut enabled);
+            self.enable(name, unsupported, &mut enabled);
         }
         while let Some(unsatisfied) = enabled.iter().find(|name| !self.is_satisfied(name, &enabled)).cloned() {
             enabled.remove(&unsatisfied);
@@ -189,6 +211,7 @@ impl ToolchainFeatures {
         Ok(FeatureConfiguration {
             toolchain: self.clone(),
             enabled,
+            requested: wanted.iter().map(|name| name.to_string()).collect(),
         })
     }
 
@@ -231,6 +254,10 @@ impl ToolchainFeatures {
 impl FeatureConfiguration {
     pub fn is_enabled(&self, name: &str) -> bool {
         self.enabled.contains(name)
+    }
+
+    pub fn is_requested(&self, name: &str) -> bool {
+        self.requested.contains(name)
     }
 
     fn with_features_satisfied(&self, sets: &[WithFeatureSet]) -> bool {
@@ -341,25 +368,38 @@ impl<'a> Scope<'a> {
     }
 
     /// A variable's value, following dots into structures, as in
-    /// `libraries_to_link.name`.
+    /// `libraries_to_link.name`. A name `iterate_over` bound, which may have
+    /// dots itself, is its value in the iteration.
     fn lookup(&self, name: &str) -> Option<&'a Variable> {
-        let mut parts = name.split('.');
-        let first = parts.next()?;
-        let mut value = self
-            .bound
-            .iter()
-            .rev()
-            .find(|(bound, _)| *bound == first)
-            .map(|(_, value)| *value)
-            .or_else(|| self.variables.values.get(first))?;
-        for part in parts {
-            let Variable::Structure(fields) = value else {
-                return None;
-            };
-            value = fields.get(part)?;
+        for (bound, value) in self.bound.iter().rev() {
+            if name == *bound {
+                return Some(value);
+            }
+            if let Some(rest) = name.strip_prefix(*bound).and_then(|rest| rest.strip_prefix('.')) {
+                return field(value, rest);
+            }
         }
-        Some(value)
+        let (first, rest) = match name.split_once('.') {
+            Some((first, rest)) => (first, Some(rest)),
+            None => (name, None),
+        };
+        let value = self.variables.values.get(first)?;
+        match rest {
+            Some(rest) => field(value, rest),
+            None => Some(value),
+        }
     }
+}
+
+/// The field at the dotted `path` in a structure.
+fn field<'a>(mut value: &'a Variable, path: &str) -> Option<&'a Variable> {
+    for part in path.split('.') {
+        let Variable::Structure(fields) = value else {
+            return None;
+        };
+        value = fields.get(part)?;
+    }
+    Some(value)
 }
 
 fn is_true(value: &Variable) -> bool {

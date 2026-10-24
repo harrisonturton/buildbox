@@ -176,14 +176,20 @@ impl PrintHandler for Printer {
 }
 
 /// Where the rule's `ctx` is kept in its module while its implementation
-/// runs, for subrules: a name Starlark can't refer to.
+/// runs, for native functions given only `ctx.actions` and for subrules: a
+/// name Starlark can't refer to.
 const RULE_CTX: &str = bazel_starlark::subrule::RULE_CTX;
+
+/// The `ctx` of the rule `eval` is analyzing.
+pub fn rule_ctx<'v>(eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+    eval.module().get(RULE_CTX).filter(|ctx| !ctx.is_none()).ok_or_else(|| anyhow::anyhow!("only rule implementations can do this"))
+}
 
 /// Run the rule's implementation, leaving its `Target` in `module` and
 /// returning its actions.
 pub fn run<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Vec<Action>> {
     let heap = module.heap();
-    let mut state = RuleState::new(input.label, input.config.clone(), input.mapping.clone());
+    let mut state = RuleState::new(input.label, input.class.kind, input.config.clone(), input.mapping.clone());
     state.target_constraints = input.target_constraints.clone();
     let prepared = Prepared {
         deps: dep_values(module, input)?,

@@ -45,6 +45,17 @@ impl Artifact {
         }
     }
 
+    /// A generated file at `path` in the output directory, rather than in
+    /// its owner's package, as `declare_shareable_artifact` declares them.
+    pub fn derived_at_root(owner: Label, config: &BuildConfiguration, path: PathId, is_directory: bool) -> Artifact {
+        Artifact {
+            exec_path: parse(&config.bin_dir()).join_path(path),
+            owner,
+            config: Some(config.id),
+            is_directory,
+        }
+    }
+
     pub fn is_source(&self) -> bool {
         self.config.is_none()
     }

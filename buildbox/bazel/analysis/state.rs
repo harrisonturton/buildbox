@@ -1,5 +1,6 @@
 //! What builtins know about the rule being analyzed.
 
+use intern::Symbol;
 use crate::action::{Action, ActionKind, RunfilesTree};
 use crate::artifact::{self, Artifact};
 use crate::expand::LocationStyle;
@@ -20,6 +21,8 @@ use std::sync::{Arc, LazyLock};
 /// [`EvalContext::extension`].
 pub struct RuleState {
     pub label: Label,
+    /// The kind of rule, such as `cc_library`.
+    pub kind: Symbol,
     pub config: Arc<BuildConfiguration>,
     /// How the rule's repository sees the others, for labels in
     /// `$(location)`.
@@ -43,10 +46,11 @@ pub struct RuleState {
 }
 
 impl RuleState {
-    pub fn new(label: Label, config: Arc<BuildConfiguration>, mapping: Arc<RepoMappingTable>) -> RuleState {
+    pub fn new(label: Label, kind: Symbol, config: Arc<BuildConfiguration>, mapping: Arc<RepoMappingTable>) -> RuleState {
         let make_variables = default_make_variables(&config);
         RuleState {
             label,
+            kind,
             config,
             mapping,
             actions: RefCell::new(Vec::new()),
@@ -74,6 +78,24 @@ impl RuleState {
         let mut declared = self.declared.borrow_mut();
         if !declared.iter().any(|(existing, _)| *existing == artifact) {
             declared.push((artifact, false));
+        }
+        Ok(artifact)
+    }
+
+    /// Declare a file the rule generates at `path` relative to the output
+    /// directory.
+    pub fn declare_at_root(&self, path: &str) -> anyhow::Result<Artifact> {
+        self.declare_at_root_as(path, false)
+    }
+
+    /// Declare a file, or a directory if `is_directory`, the rule generates
+    /// at `path` relative to the output directory.
+    pub fn declare_at_root_as(&self, path: &str, is_directory: bool) -> anyhow::Result<Artifact> {
+        let path = PathId::parse(path).map_err(|error| anyhow::anyhow!("invalid file path '{path}': {error}"))?;
+        let artifact = Artifact::derived_at_root(self.label, &self.config, path, is_directory);
+        let mut declared = self.declared.borrow_mut();
+        if !declared.iter().any(|(existing, _)| *existing == artifact) {
+            declared.push((artifact, is_directory));
         }
         Ok(artifact)
     }
