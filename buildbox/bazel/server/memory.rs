@@ -26,3 +26,35 @@ pub fn release_free_memory() {
         libc::malloc_trim(0);
     }
 }
+
+/// What the allocator holds, in bytes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AllocatorStats {
+    /// Allocated and not yet freed, in arenas or mapped on their own.
+    pub in_use: u64,
+    /// Freed but still held in arenas.
+    pub free: u64,
+    /// Taken from the system for arenas and large allocations.
+    pub held: u64,
+    pub arenas: u64,
+}
+
+/// What the allocator holds now, if it can say. The counters glibc gives
+/// are 32 bits, so they wrap beyond 4 GiB.
+pub fn allocator_stats() -> Option<AllocatorStats> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: mallinfo only reads the allocator's counters.
+        #[allow(deprecated)]
+        let info = unsafe { libc::mallinfo() };
+        let bytes = |count: libc::c_int| count as u32 as u64;
+        return Some(AllocatorStats {
+            in_use: bytes(info.uordblks) + bytes(info.hblkhd),
+            free: bytes(info.fordblks),
+            held: bytes(info.arena) + bytes(info.hblkhd),
+            arenas: bytes(info.arena),
+        });
+    }
+    #[allow(unreachable_code)]
+    None
+}

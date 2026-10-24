@@ -247,6 +247,12 @@ pub async fn dump(context: &CommandContext<'_>, out: &Output) -> i32 {
         stats.cache.entries,
         stats.cache.bytes,
     ));
+    if let Some(allocator) = crate::memory::allocator_stats() {
+        text.push_str(&format!(
+            "allocator: {} bytes in use, {} free in arenas, {} held ({} in arenas)\n",
+            allocator.in_use, allocator.free, allocator.held, allocator.arenas
+        ));
+    }
     text.push_str("\nkind                          computed  verified    reused     values  raw bytes  stored bytes  compute ms\n");
     for kind in &stats.kinds {
         text.push_str(&format!(
