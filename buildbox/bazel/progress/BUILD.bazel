@@ -1,0 +1,16 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "progress",
+    srcs = ["progress.rs"],
+    crate_name = "bazel_progress",
+    crate_root = "progress.rs",
+    visibility = ["//buildbox:__subpackages__"],
+)
+
+rust_test(
+    name = "progress_test",
+    crate = ":progress",
+)

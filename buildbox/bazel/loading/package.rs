@@ -6,6 +6,7 @@ use bazel_fs::{FileState, FileStateKey, Glob, GlobPattern, Root, RootedPath};
 use bazel_label::{Label, PackageId, RepoMapping, RepoName};
 use starlark::values::OwnedFrozenValue;
 use bazel_packages::Package;
+use bazel_progress::Progress;
 use bazel_starlark::{EvalContext, FileKind, Globber, Loads, PackageBuilder};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
@@ -75,54 +76,62 @@ impl Key for PackageKey {
     const KIND: &'static str = "PACKAGE";
 
     async fn compute(&self, ctx: &Ctx) -> Result<LoadedPackage, SkyError> {
-        let id = self.0;
-        let lookup = ctx.compute(&PackageLookupKey(id)).await?;
-        let (root, build_file) = match &*lookup {
-            PackageLookup::Found { root, build_file } => (*root, *build_file),
-            PackageLookup::NotFound { reason } => return Err(SkyError::new(format!("no such package '{}': {reason}", display(id)))),
-        };
-        let build_label = id.label(build_file);
-        let Some(bytes) = bazel_fs::read_file(ctx, RootedPath::new(root, id.path.join(build_file))).await? else {
-            return Err(SkyError::transient(format!("no such package '{}': BUILD file disappeared", display(id))));
-        };
-        let source = String::from_utf8(bytes).map_err(|_| SkyError::new(format!("{build_label}: not valid UTF-8")))?;
-
-        let mapping = ctx.compute(&RepoMappingKey(id.repo)).await?;
-        let ast = match bazel_starlark::parse(build_label, source.clone()) {
-            Ok(ast) => ast,
-            Err(error) => return Ok(LoadedPackage(failed_package(id, build_file, error.message))),
-        };
-        let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), &mapping.0).await?;
-        let predeclared = autoloads(ctx, &source, &bazel_starlark::loaded_names(&ast)).await?;
-        let repos = transitive_repos(id.repo, loaded.iter().map(|(_, module)| &**module));
-        let mappings = mappings(ctx, &repos).await?;
-        let load_labels = loaded.iter().map(|(_, module)| module.label).collect();
-        let builtins = ctx.compute(&crate::BuiltinsKey).await?;
-        let module = ctx.global::<crate::Repositories>()?.0.module(ctx, id.repo).await?;
-        let globber = GraphGlobber {
-            ctx: ctx.clone(),
-            package: RootedPath::new(root, id.path),
-            runtime: tokio::runtime::Handle::current(),
-        };
-
-        let (mut package, printed) = blocking(move || {
-            let loads = Loads {
-                modules: loaded.iter().map(|(load, module)| (load.clone(), &module.module)).collect(),
-            };
-            let mut context = EvalContext::new(FileKind::Build, build_label);
-            context.mappings = mappings;
-            context.globber = Some(Box::new(globber));
-            context.module = module;
-            let builder = PackageBuilder::new(id, build_file);
-            bazel_starlark::eval_build(ast, &builtins.build, &loads, &predeclared, context, builder)
-        })
-        .await?;
-        for line in printed {
-            tracing::info!("DEBUG: {build_label}: {line}");
+        let loaded = load_package(ctx, self.0).await;
+        if let Ok(progress) = ctx.global::<Progress>() {
+            progress.package_loaded();
         }
-        package.loads = load_labels;
-        Ok(LoadedPackage(package))
+        loaded
     }
+}
+
+/// Load the package `id`: evaluate its BUILD file.
+async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyError> {
+    let lookup = ctx.compute(&PackageLookupKey(id)).await?;
+    let (root, build_file) = match &*lookup {
+        PackageLookup::Found { root, build_file } => (*root, *build_file),
+        PackageLookup::NotFound { reason } => return Err(SkyError::new(format!("no such package '{}': {reason}", display(id)))),
+    };
+    let build_label = id.label(build_file);
+    let Some(bytes) = bazel_fs::read_file(ctx, RootedPath::new(root, id.path.join(build_file))).await? else {
+        return Err(SkyError::transient(format!("no such package '{}': BUILD file disappeared", display(id))));
+    };
+    let source = String::from_utf8(bytes).map_err(|_| SkyError::new(format!("{build_label}: not valid UTF-8")))?;
+
+    let mapping = ctx.compute(&RepoMappingKey(id.repo)).await?;
+    let ast = match bazel_starlark::parse(build_label, source.clone()) {
+        Ok(ast) => ast,
+        Err(error) => return Ok(LoadedPackage(failed_package(id, build_file, error.message))),
+    };
+    let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), &mapping.0).await?;
+    let predeclared = autoloads(ctx, &source, &bazel_starlark::loaded_names(&ast)).await?;
+    let repos = transitive_repos(id.repo, loaded.iter().map(|(_, module)| &**module));
+    let mappings = mappings(ctx, &repos).await?;
+    let load_labels = loaded.iter().map(|(_, module)| module.label).collect();
+    let builtins = ctx.compute(&crate::BuiltinsKey).await?;
+    let module = ctx.global::<crate::Repositories>()?.0.module(ctx, id.repo).await?;
+    let globber = GraphGlobber {
+        ctx: ctx.clone(),
+        package: RootedPath::new(root, id.path),
+        runtime: tokio::runtime::Handle::current(),
+    };
+
+    let (mut package, printed) = blocking(move || {
+        let loads = Loads {
+            modules: loaded.iter().map(|(load, module)| (load.clone(), &module.module)).collect(),
+        };
+        let mut context = EvalContext::new(FileKind::Build, build_label);
+        context.mappings = mappings;
+        context.globber = Some(Box::new(globber));
+        context.module = module;
+        let builder = PackageBuilder::new(id, build_file);
+        bazel_starlark::eval_build(ast, &builtins.build, &loads, &predeclared, context, builder)
+    })
+    .await?;
+    for line in printed {
+        tracing::info!("DEBUG: {build_label}: {line}");
+    }
+    package.loads = load_labels;
+    Ok(LoadedPackage(package))
 }
 
 /// The autoloaded rules a BUILD file uses without loading them, resolved

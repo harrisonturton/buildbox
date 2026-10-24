@@ -11,6 +11,7 @@ use crate::toolchains::{self, ResolvedToolchains};
 use bazel_config::ConfigId;
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule, PackageKey, RepoMappingKey};
+use bazel_progress::Progress;
 use bazel_packages::{AttrType, AttrValue, Cfg, Package, Rule, RuleClass, RuleClassRef, Target};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode, Fingerprint, Fingerprinter};
@@ -119,27 +120,36 @@ impl Key for ConfiguredTargetKey {
     const KIND: &'static str = "CONFIGURED_TARGET";
 
     async fn compute(&self, ctx: &Ctx) -> Result<ConfiguredTarget, SkyError> {
-        if self.label == *crate::workspace_status::OWNER {
-            return workspace_status(ctx, *self);
+        let configured = configure(ctx, *self).await;
+        if let Ok(progress) = ctx.global::<Progress>() {
+            progress.target_configured();
         }
-        let package = ctx.compute(&PackageKey(self.label.package)).await?;
-        let Some(target) = package.0.target(self.label.name) else {
-            return Err(no_such_target(self.label, &package.0));
-        };
-        match target {
-            Target::Rule(rule) => analyze_rule(ctx, *self, &package.0, rule).await,
-            Target::SourceFile(_) => file(ctx, *self, "source file", Artifact::source(self.label)),
-            Target::OutputFile { rule, .. } => {
-                let owner = ConfiguredTargetKey {
-                    label: self.label.sibling(*rule),
-                    config: self.config,
-                };
-                ctx.compute(&owner).await?;
-                let artifact = Artifact::derived(owner.label, &self.config.get(), artifact::name_path(self.label), false);
-                file(ctx, *self, "generated file", artifact)
-            }
-            Target::PackageGroup(_) => file_less(ctx, *self, "package group"),
+        configured
+    }
+}
+
+/// Analyze the target `key` names, in its configuration.
+async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarget, SkyError> {
+    if key.label == *crate::workspace_status::OWNER {
+        return workspace_status(ctx, key);
+    }
+    let package = ctx.compute(&PackageKey(key.label.package)).await?;
+    let Some(target) = package.0.target(key.label.name) else {
+        return Err(no_such_target(key.label, &package.0));
+    };
+    match target {
+        Target::Rule(rule) => analyze_rule(ctx, key, &package.0, rule).await,
+        Target::SourceFile(_) => file(ctx, key, "source file", Artifact::source(key.label)),
+        Target::OutputFile { rule, .. } => {
+            let owner = ConfiguredTargetKey {
+                label: key.label.sibling(*rule),
+                config: key.config,
+            };
+            ctx.compute(&owner).await?;
+            let artifact = Artifact::derived(owner.label, &key.config.get(), artifact::name_path(key.label), false);
+            file(ctx, key, "generated file", artifact)
         }
+        Target::PackageGroup(_) => file_less(ctx, key, "package group"),
     }
 }
 

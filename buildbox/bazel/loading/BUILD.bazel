@@ -19,6 +19,7 @@ rust_library(
         "//buildbox/bazel/fs",
         "//buildbox/bazel/label",
         "//buildbox/bazel/packages",
+        "//buildbox/bazel/progress",
         "//buildbox/bazel/starlark",
         "//buildbox/intern",
         "//buildbox/skycodec",

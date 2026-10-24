@@ -1,9 +1,9 @@
 //! Running tests.
 
-use crate::action_key::{Input, cas_error, input};
+use crate::action_key::{Input, cas_error, input, progress};
 use crate::backend::Backend;
 use crate::digest::BlobDigest;
-use crate::spawn::{SpawnRequest, execute};
+use crate::spawn::{SpawnRequest, execute, finish};
 use bazel_analysis::{Artifact, ConfiguredTargetKey, FileValue, Runfiles, runfiles_repo_name};
 use bazel_label::{Label, RepoName};
 use bazel_loading::{PackageKey, RepoMappingKey};
@@ -72,6 +72,10 @@ impl Key for TestKey {
         let backend = ctx.global::<Backend>()?;
         let test = TestSpec::of(ctx, self.0).await?;
         let request = test.request(ctx).await?;
+        let shown = progress(ctx).map(|progress| progress.action_started(format!("Testing {}", self.0.label)));
+        if let Some(shown) = &shown {
+            shown.running(backend.runners.run);
+        }
         let started = Instant::now();
         let spawned = execute(&backend, request).await;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -80,6 +84,7 @@ impl Key for TestKey {
             Err(error) if error.message().contains("timed out") => return Ok(timed_out(duration_ms)),
             Err(error) => return Err(error),
         };
+        finish(shown, backend.runners.name(spawned.cached));
         let result = spawned.result;
         let log = log_digest(&backend, &result).await?;
         let xml_path = test.xml_path();

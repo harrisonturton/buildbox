@@ -3,7 +3,7 @@
 use actioncache::{ActionCache, ActionCacheError};
 use actioncache_fs::FsActionCache;
 use admin::{AdminService, Components};
-use bazel_execution::Backend;
+use bazel_execution::{Backend, Runners};
 use bazel_server::{BazelServer, BazelService, ServerConfig};
 use artifacts::{ArtifactError, ArtifactStore};
 use artifacts_fs::FsArtifactStore;
@@ -186,6 +186,7 @@ fn build_backend(config: &Config, cas: Arc<dyn Cas>, action_cache: Arc<dyn Actio
             Arc::new(remote::RemoteCas::new(endpoint.clone())),
             Arc::new(remote::RemoteActionCache::new(endpoint.clone())),
             Arc::new(remote::RemoteExecutor::new(endpoint)),
+            Runners::REMOTE,
             max_staged,
         ));
     }
@@ -198,10 +199,11 @@ fn build_backend(config: &Config, cas: Arc<dyn Cas>, action_cache: Arc<dyn Actio
             Arc::new(remote::TieredCas::new(cas, remote_cas)),
             Arc::new(remote::TieredActionCache::new(action_cache, remote_cache)),
             scheduler,
+            Runners::LOCAL,
             max_staged,
         ));
     }
-    Ok(Backend::new(cas, action_cache, scheduler, max_staged))
+    Ok(Backend::new(cas, action_cache, scheduler, Runners::LOCAL, max_staged))
 }
 
 fn serve_result(config: &Config, result: Result<(), Box<dyn Error + Send + Sync>>) -> Result<(), ServerError> {

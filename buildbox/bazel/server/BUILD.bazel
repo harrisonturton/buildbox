@@ -69,6 +69,7 @@ rust_library(
         "//buildbox/bazel/loading",
         "//buildbox/bazel/options",
         "//buildbox/bazel/packages",
+        "//buildbox/bazel/progress",
         "//buildbox/bazel/query",
         "//buildbox/bazel/starlark",
         "//buildbox/intern",

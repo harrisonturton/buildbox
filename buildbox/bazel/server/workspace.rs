@@ -4,6 +4,7 @@ use crate::written::Written;
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
 use bazel_execution::SourceDigestKey;
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
+use bazel_progress::Progress;
 use skyframe::{Engine, Globals, Graph};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,8 @@ pub struct Workspace {
     pub client_env: Arc<ClientEnv>,
     /// What builds wrote to the output tree.
     pub written: Arc<Written>,
+    /// What the graph's evaluations are doing, for progress output.
+    pub progress: Arc<Progress>,
 }
 
 impl Workspace {
@@ -97,13 +100,21 @@ impl Workspaces {
         }
         let changes = FileChanges::new();
         let client_env = ClientEnv::new();
-        let globals = self.services.clone().with(bazel_fs::workspace(root)).with(changes.clone()).with(client_env.clone());
+        let progress = Progress::new();
+        let globals = self
+            .services
+            .clone()
+            .with(bazel_fs::workspace(root))
+            .with(changes.clone())
+            .with(client_env.clone())
+            .with(progress.clone());
         let workspace = Arc::new(Workspace {
             root: root.to_path_buf(),
             graph: self.engine.graph(globals),
             changes,
             client_env,
             written: Arc::default(),
+            progress,
         });
         workspaces.insert(root.to_path_buf(), workspace.clone());
         workspace

@@ -7,6 +7,7 @@ use bazel_analysis::{Action, ActionKind, Artifact, ConfiguredTargetKey};
 use bazel_fs::RootedPath;
 use futures::StreamExt;
 use bazel_loading::RepoRootKey;
+use bazel_progress::Progress;
 use intern::PathId;
 use skycodec::{Decode, Encode};
 use skyframe::{Ctx, Key, SkyError, encoded_value};
@@ -69,7 +70,17 @@ impl Key for ActionKey {
 }
 
 async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action) -> Result<ActionOutputs, SkyError> {
-    match &action.kind {
+    let ActionKind::Spawn(spawn) = &action.kind else {
+        return run_internal(ctx, backend, owner, action).await;
+    };
+    crate::spawn::run(ctx, backend, owner, action, spawn).await
+}
+
+/// Run an action that Bazel would run in its own process, without
+/// spawning one.
+async fn run_internal(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action) -> Result<ActionOutputs, SkyError> {
+    let shown = progress(ctx).map(|progress| progress.action_started(description(action, owner)));
+    let outputs = match &action.kind {
         ActionKind::Write { content, executable } => write(backend, action, content.as_bytes(), *executable).await,
         ActionKind::Template {
             template,
@@ -77,7 +88,25 @@ async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, acti
             executable,
         } => expand_template(ctx, backend, action, *template, substitutions, *executable).await,
         ActionKind::Symlink { target, executable } => copy(ctx, backend, action, *target, *executable).await,
-        ActionKind::Spawn(spawn) => crate::spawn::run(ctx, backend, owner, action, spawn).await,
+        ActionKind::Spawn(_) => Err(SkyError::new("a spawn action isn't an internal one")),
+    }?;
+    if let Some(shown) = shown {
+        shown.finish("internal");
+    }
+    Ok(outputs)
+}
+
+/// The graph's progress service, if it has one.
+pub fn progress(ctx: &Ctx) -> Option<Arc<Progress>> {
+    ctx.global::<Progress>().ok()
+}
+
+/// What progress output calls an action: its progress message, or its
+/// mnemonic and owner.
+pub fn description(action: &Action, owner: ConfiguredTargetKey) -> String {
+    match action.progress_message.is_empty() {
+        true => format!("{} {}", action.mnemonic, owner.label),
+        false => action.progress_message.clone(),
     }
 }
 

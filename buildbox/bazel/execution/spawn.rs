@@ -1,6 +1,7 @@
 //! Running commands through the backend, with the action cache.
 
-use crate::action_key::{ActionOutputs, Input, OutputFile, cas_error, input, upload};
+use crate::action_key::{ActionOutputs, Input, OutputFile, cas_error, description, input, progress, upload};
+use bazel_progress::ActionProgress;
 use crate::backend::Backend;
 use crate::digest::BlobDigest;
 use crate::inputs::InputTree;
@@ -111,7 +112,11 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, 
     let unique = action.all_inputs();
     let span = tracing::info_span!("action_inputs", inputs = unique.len(), runfiles = action.runfiles.len());
     ready(ctx, &unique).instrument(span).await?;
+    let shown = progress(ctx).map(|progress| progress.action_started(description(action, owner)));
     let _staged = backend.stage().await?;
+    if let Some(shown) = &shown {
+        shown.running(backend.runners.run);
+    }
     let (output_files, output_directories) = output_paths(action);
     let request = SpawnRequest {
         inputs: inputs(ctx, action, unique).await?,
@@ -121,13 +126,14 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, 
         output_directories,
         cacheable: !spawn.execution_info.iter().any(|(key, _)| key == "no-cache"),
         timeout: None,
-        description: progress(action, owner),
+        description: description(action, owner),
     };
     let local = ctx.global::<LocalActionCache>().ok().filter(|_| request.cacheable);
     let key = local.as_ref().map(|_| local_key(&request));
     if let (Some(local), Some(key)) = (&local, &key) {
         let span = tracing::info_span!("local_cache_lookup");
         if let Some(result) = local.lookup(backend, key).instrument(span).await? {
+            finish(shown, backend.runners.cache_hit);
             return outputs(action, &result);
         }
     }
@@ -138,7 +144,15 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, 
     if let (Some(local), Some(key)) = (&local, key) {
         local.0.insert(key, &spawned.result.encode_to_vec());
     }
+    finish(shown, backend.runners.name(spawned.cached));
     outputs(action, &spawned.result)
+}
+
+/// Report that an action finished `how`, if progress is being reported.
+pub fn finish(shown: Option<ActionProgress>, how: &str) {
+    if let Some(shown) = shown {
+        shown.finish(how);
+    }
 }
 
 /// Results of actions run before, kept across restarts by [`local_key`]:
@@ -193,13 +207,6 @@ fn output_digests(result: &reapi::ActionResult) -> Vec<cas::Digest> {
     let file_digests = result.output_files.iter().filter_map(|file| file.digest.as_option());
     let tree_digests = result.output_directories.iter().filter_map(|dir| dir.tree_digest.as_option());
     file_digests.chain(tree_digests).filter_map(|digest| cas::Digest::from_proto(digest).ok()).collect()
-}
-
-fn progress(action: &Action, owner: ConfiguredTargetKey) -> String {
-    match action.progress_message.is_empty() {
-        true => format!("{} {}", action.mnemonic, owner.label),
-        false => action.progress_message.clone(),
-    }
 }
 
 /// Wait until every input has been generated, keeping none of their
@@ -380,7 +387,7 @@ async fn failed(backend: &Backend, action: &Action, owner: ConfiguredTargetKey, 
     let mut message = format!(
         "{}: {} failed: (Exit {}): {}",
         owner.label,
-        progress(action, owner),
+        description(action, owner),
         result.exit_code,
         action.mnemonic
     );

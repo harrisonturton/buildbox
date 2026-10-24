@@ -16,7 +16,7 @@ mod spawn;
 mod test;
 
 pub use action_key::{ActionKey, ActionOutputs, OutputFile, input};
-pub use backend::Backend;
+pub use backend::{Backend, Runners};
 pub use digest::BlobDigest;
 pub use materialize::{RunfilesLayout, materialize, write_runfiles};
 pub use source::{SourceDigest, SourceDigestKey, SourceDigests};

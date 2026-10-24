@@ -14,17 +14,51 @@ pub struct Backend {
     pub cas: Arc<dyn Cas>,
     pub action_cache: Arc<dyn ActionCache>,
     pub executor: Arc<dyn Executor>,
+    pub runners: Runners,
     staging: Semaphore,
+}
+
+/// What Bazel would call the ways a backend gets an action's result, for
+/// progress output and build summaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Runners {
+    /// Running the action.
+    pub run: &'static str,
+    /// Finding its result in the action cache.
+    pub cache_hit: &'static str,
+}
+
+impl Runners {
+    /// Actions run in sandboxes on this machine.
+    pub const LOCAL: Runners = Runners {
+        run: "linux-sandbox",
+        cache_hit: "disk cache hit",
+    };
+
+    /// Actions run by a remote execution service.
+    pub const REMOTE: Runners = Runners {
+        run: "remote",
+        cache_hit: "remote cache hit",
+    };
+
+    /// How an action's result was got: from the cache, or by running it.
+    pub fn name(&self, cached: bool) -> &'static str {
+        match cached {
+            true => self.cache_hit,
+            false => self.run,
+        }
+    }
 }
 
 impl Backend {
     /// A backend that prepares at most `max_staged` actions at once: builds
     /// their input trees and uploads their inputs, and runs them.
-    pub fn new(cas: Arc<dyn Cas>, action_cache: Arc<dyn ActionCache>, executor: Arc<dyn Executor>, max_staged: usize) -> Backend {
+    pub fn new(cas: Arc<dyn Cas>, action_cache: Arc<dyn ActionCache>, executor: Arc<dyn Executor>, runners: Runners, max_staged: usize) -> Backend {
         Backend {
             cas,
             action_cache,
             executor,
+            runners,
             staging: Semaphore::new(max_staged.max(1)),
         }
     }
