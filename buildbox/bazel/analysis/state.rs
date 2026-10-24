@@ -4,6 +4,7 @@ use crate::action::{Action, ActionKind, RunfilesTree};
 use crate::artifact::{self, Artifact};
 use crate::expand::LocationStyle;
 use crate::runfiles::Runfiles;
+use crate::shared::Sharing;
 use bazel_config::BuildConfiguration;
 use bazel_label::{Label, LabelContext, RepoMappingTable};
 use bazel_starlark::EvalContext;
@@ -11,7 +12,7 @@ use intern::PathId;
 use starlark::eval::Evaluator;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// The state of analyzing one rule, which the builtins of rule
 /// implementations, such as `ctx.actions`, share through the evaluation's
@@ -28,7 +29,7 @@ pub struct RuleState {
     pub declared: RefCell<Vec<(Artifact, bool)>>,
     /// The runfiles trees of the executables of dependencies, which actions
     /// that run them need.
-    pub tool_runfiles: RefCell<HashMap<Artifact, RunfilesTree>>,
+    pub tool_runfiles: RefCell<HashMap<Artifact, Arc<RunfilesTree>>>,
     /// Make variables, such as `$(BINDIR)`, by name.
     pub make_variables: Vec<(String, String)>,
     /// The files `$(location)` expands each label to: those of the
@@ -175,8 +176,12 @@ fn same_action(a: &Action, b: &Action) -> bool {
     a == b
 }
 
-/// The runfiles tree of an executable, in the directory next to it.
-pub fn runfiles_tree(executable: Artifact, runfiles: &Runfiles<'_>) -> RunfilesTree {
+/// Runfiles trees alive in any target's actions.
+static RUNFILES_TREES: LazyLock<Sharing<RunfilesTree>> = LazyLock::new(Sharing::default);
+
+/// The runfiles tree of an executable, in the directory next to it, shared
+/// with every action that runs the same tool.
+pub fn runfiles_tree(executable: Artifact, runfiles: &Runfiles<'_>) -> Arc<RunfilesTree> {
     let dir = artifact::parse(&format!("{}.runfiles", executable.exec_path));
     let mut entries: Vec<(PathId, Artifact)> = runfiles
         .entries(artifact::runfiles_repo_name(bazel_label::RepoName::MAIN))
@@ -185,7 +190,7 @@ pub fn runfiles_tree(executable: Artifact, runfiles: &Runfiles<'_>) -> RunfilesT
         .collect();
     entries.sort();
     entries.dedup_by(|a, b| a.0 == b.0);
-    RunfilesTree { dir, entries }
+    RUNFILES_TREES.share(RunfilesTree { dir, entries })
 }
 
 /// The make variables every rule has, from its configuration.

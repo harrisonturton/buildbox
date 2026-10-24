@@ -22,6 +22,7 @@ mod native;
 mod platform;
 mod providers;
 mod rule_ctx;
+mod shared;
 mod runfiles;
 mod state;
 mod target_value;

@@ -3,6 +3,7 @@
 use crate::artifact::Artifact;
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
+use std::sync::Arc;
 
 /// An action a rule registers: its inputs and outputs, and how it turns one
 /// into the other.
@@ -13,7 +14,7 @@ pub struct Action {
     pub progress_message: String,
     pub inputs: Vec<Artifact>,
     /// The runfiles trees of tools the action runs, which are inputs too.
-    pub runfiles: Vec<RunfilesTree>,
+    pub runfiles: Vec<Arc<RunfilesTree>>,
     pub outputs: Vec<Artifact>,
     pub kind: ActionKind,
 }
@@ -47,7 +48,7 @@ pub struct Spawn {
 
 /// A runfiles tree: the files an executable needs at run time, laid out in
 /// the directory next to it.
-#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct RunfilesTree {
     /// The tree's directory, relative to the execution root, such as
     /// `bazel-out/k8-opt-exec-ST-1234/bin/pkg/tool.runfiles`.

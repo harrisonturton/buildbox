@@ -15,6 +15,7 @@ use intern::Symbol;
 use starlark::eval::Evaluator;
 use starlark::values::list::AllocList;
 use starlark::values::{Heap, Value};
+use std::sync::Arc;
 
 /// Native rules that only exist to be referred to, such as by `select()`
 /// or toolchain resolution, and provide nothing.
@@ -155,7 +156,7 @@ fn execution_info(input: &RuleInput) -> Vec<(String, String)> {
 }
 
 /// The tools of a genrule: their files, and their executables' runfiles.
-fn genrule_tools(input: &RuleInput, prepared: &Prepared<'_>) -> anyhow::Result<(Vec<Artifact>, Vec<RunfilesTree>)> {
+fn genrule_tools(input: &RuleInput, prepared: &Prepared<'_>) -> anyhow::Result<(Vec<Artifact>, Vec<Arc<RunfilesTree>>)> {
     let mut inputs = Vec::new();
     let mut trees = Vec::new();
     for attr in ["tools", "exec_tools", "toolchains"] {

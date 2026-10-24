@@ -18,6 +18,7 @@ use starlark::values::dict::DictRef;
 use starlark::values::none::NoneType;
 use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
 use std::fmt;
+use std::sync::Arc;
 
 /// `ctx.actions`.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
@@ -62,7 +63,7 @@ pub fn files(value: Option<Value<'_>>, what: &str) -> anyhow::Result<Vec<Artifac
 #[derive(Default)]
 struct Tools {
     inputs: Vec<Artifact>,
-    runfiles: Vec<RunfilesTree>,
+    runfiles: Vec<Arc<RunfilesTree>>,
 }
 
 impl Tools {
