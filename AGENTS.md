@@ -61,3 +61,6 @@ alike.
 
 - `bazel build //...` and `bazel test //...` must pass before committing.
 - Make small, focused commits that each leave the tree building.
+- Always benchmark and profile optimized builds: `bazel build -c opt`. The
+  default fastbuild mode has no optimizations and keeps debug assertions,
+  which distorts every CPU-bound measurement.
