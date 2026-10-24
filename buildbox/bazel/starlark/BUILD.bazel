@@ -16,6 +16,7 @@ rust_library(
         "eval.rs",
         "fields.rs",
         "instantiate.rs",
+        "hash.rs",
         "json_module.rs",
         "label_value.rs",
         "native_rules.rs",

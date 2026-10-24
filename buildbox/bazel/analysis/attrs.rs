@@ -21,7 +21,11 @@ pub async fn resolve_attrs(ctx: &Ctx, rule: &Rule, class: &RuleClass, config: Co
 }
 
 /// An attribute's value as the rule gives it, or as its default computes.
+/// `name` is the rule's name, which isn't kept among its attributes.
 fn given_or_default(rule: &Rule, schema: &AttrSchema) -> AttrValue {
+    if schema.name.as_str() == "name" {
+        return AttrValue::String(rule.name.as_str().to_string());
+    }
     if let Some(value) = rule.attr_or_computed(schema.name) {
         return value.clone();
     }

@@ -188,11 +188,12 @@ pub const BUILTIN_NAMESPACES: &[&str] = &[
 ];
 
 /// What `native.legacy_globals` holds in Bazel 8: the symbols Bazel moved
-/// to rule sets, for rule sets that still need the originals.
+/// to rule sets, for rule sets that still need the originals. Not
+/// `ProtoInfo`: protobuf constructs its own when the original is missing,
+/// as in Bazel 9, and a placeholder can't be constructed.
 pub const LEGACY_GLOBALS: &[&str] = &[
     "JavaInfo",
     "JavaPluginInfo",
-    "ProtoInfo",
     "PyInfo",
     "PyRuntimeInfo",
     "PyCcLinkParamsProvider",

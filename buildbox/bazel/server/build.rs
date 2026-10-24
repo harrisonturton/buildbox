@@ -712,8 +712,9 @@ fn action_env(context: &CommandContext<'_>, options: &ParsedOptions) -> Vec<(Str
 }
 
 /// Analyze the targets, sending each compatible one to `analyzed` as soon
-/// as it's done. Returns those analyzed, and those that failed to, as
-/// messages show them.
+/// as it's done, and reporting each error once, however many targets it
+/// fails. Returns those analyzed, and those that failed to, as messages
+/// show them.
 async fn analyze(
     session: &Session,
     labels: &[Label],
@@ -730,12 +731,15 @@ async fn analyze(
     let results = futures::future::join_all(analyses).await;
     let mut analyzed = Vec::new();
     let mut failed = Vec::new();
+    let mut reported = BTreeSet::new();
     for (label, result) in labels.iter().zip(results) {
         match result {
             Ok(target) => analyzed.push((*label, target)),
             Err(error) => {
                 failed.push(bazel_query::display_label(*label, mapping));
-                out.error(error.message()).await;
+                if reported.insert(error.message().to_string()) {
+                    out.error(error.message()).await;
+                }
             }
         }
     }

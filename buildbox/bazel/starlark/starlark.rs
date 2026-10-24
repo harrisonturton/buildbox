@@ -11,6 +11,7 @@ pub mod depset;
 pub mod dotted_version;
 pub mod eval;
 pub mod fields;
+mod hash;
 pub mod instantiate;
 pub mod json_module;
 pub mod label_value;
@@ -63,6 +64,7 @@ fn standard() -> GlobalsBuilder {
         LibraryExtension::SetType,
     ]);
     json_module::register(&mut builder);
+    hash::hash_function(&mut builder);
     builder
 }
 
