@@ -8,7 +8,7 @@ use crate::platform::{ConstraintValueKey, Platform, PlatformKey, labels};
 use crate::target_value::TargetValue;
 use allocative::Allocative;
 use bazel_config::{BuildConfiguration, ConfigId};
-use bazel_label::{Label, LabelContext, PackageId, RepoName, TargetPattern};
+use bazel_label::{Label, LabelContext, PackageId, RepoMappingTable, RepoName, TargetPattern};
 use bazel_loading::{PackageKey, RegistrationsKey, RepoMappingKey};
 use bazel_packages::{AttrValue, RuleClass};
 use bazel_starlark::label_value::LabelValue;
@@ -279,6 +279,11 @@ pub struct ToolchainContextGen<V: ValueLifetimeless> {
     pub types: Vec<Label>,
     /// `ToolchainInfo` or `None`, in the order of `types`.
     pub values: Vec<V>,
+    /// How the rule's `.bzl` file sees repositories, which string indexes
+    /// are labels in.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    pub mapping: Option<(RepoName, Arc<RepoMappingTable>)>,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<ToolchainContextGen<To>> for ToolchainContextGen<From> {}
@@ -286,7 +291,7 @@ unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<
 starlark_complex_value!(pub ToolchainContext);
 
 impl<'v> ToolchainContext<'v> {
-    pub fn new(resolved: &ResolvedToolchains, heap: Heap<'v>) -> ToolchainContext<'v> {
+    pub fn new(resolved: &ResolvedToolchains, mapping: Option<(RepoName, Arc<RepoMappingTable>)>, heap: Heap<'v>) -> ToolchainContext<'v> {
         let mut types = Vec::new();
         let mut values = Vec::new();
         for (toolchain_type, toolchain) in &resolved.resolved {
@@ -300,7 +305,7 @@ impl<'v> ToolchainContext<'v> {
             types.push(*toolchain_type);
             values.push(value);
         }
-        ToolchainContext { types, values }
+        ToolchainContext { types, values, mapping }
     }
 }
 
@@ -318,6 +323,13 @@ impl<'v, V: ValueLike<'v>> ToolchainContextGen<V> {
             return self.types.iter().position(|toolchain_type| *toolchain_type == label.0);
         }
         let text = index.unpack_str()?;
+        if let Some((repo, mapping)) = &self.mapping {
+            let context = LabelContext::new(PackageId::new(*repo, PathId::ROOT), mapping.as_ref());
+            let position = Label::parse(text, &context).ok().and_then(|label| self.types.iter().position(|toolchain_type| *toolchain_type == label));
+            if position.is_some() {
+                return position;
+            }
+        }
         if let Ok(label) = Label::parse_canonical(text) {
             if let Some(position) = self.types.iter().position(|toolchain_type| *toolchain_type == label) {
                 return Some(position);

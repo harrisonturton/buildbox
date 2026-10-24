@@ -21,7 +21,7 @@ pub async fn run(context: &CommandContext<'_>, args: &[String], out: &Output) ->
     };
     let program_args = options.residue.split_off(1);
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    workspace.refresh().await;
+    workspace.refresh(crate::command::repo_environment(context, &options)).await;
     let session = workspace.graph.session().await;
     let built = match build::run(context, &session, &options, out).await {
         Ok(built) => built,

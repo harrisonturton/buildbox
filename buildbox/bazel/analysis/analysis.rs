@@ -26,6 +26,7 @@ mod runfiles;
 mod state;
 mod target_value;
 mod toolchains;
+mod workspace_status;
 
 pub use action::{Action, ActionKind, RunfilesTree, Spawn};
 pub use artifact::{Artifact, name_path, package_dir, repo_dir, runfiles_repo_name};

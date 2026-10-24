@@ -1,5 +1,6 @@
 //! The workspaces the server knows, each with its own graph.
 
+use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvironment};
 use bazel_execution::SourceDigestKey;
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
 use skyframe::{Engine, Globals, Graph};
@@ -28,11 +29,17 @@ pub struct Workspace {
     pub root: PathBuf,
     pub graph: Graph,
     pub changes: Arc<FileChanges>,
+    /// The environment repository rules see.
+    pub client_env: Arc<ClientEnv>,
 }
 
 impl Workspace {
-    /// Invalidate the files that changed since the graph read them.
-    pub async fn refresh(&self) -> usize {
+    /// Invalidate the files that changed since the graph read them, and the
+    /// environment, if a command gives another.
+    pub async fn refresh(&self, environment: RepoEnvironment) -> usize {
+        if self.client_env.set(environment) {
+            self.graph.invalidate(&[RepoEnvKey]).await;
+        }
         let changed = self.changes.changed().await;
         if changed.is_empty() {
             return 0;
@@ -80,11 +87,13 @@ impl Workspaces {
             return workspace.clone();
         }
         let changes = FileChanges::new();
-        let globals = self.services.clone().with(bazel_fs::workspace(root)).with(changes.clone());
+        let client_env = ClientEnv::new();
+        let globals = self.services.clone().with(bazel_fs::workspace(root)).with(changes.clone()).with(client_env.clone());
         let workspace = Arc::new(Workspace {
             root: root.to_path_buf(),
             graph: self.engine.graph(globals),
             changes,
+            client_env,
         });
         workspaces.insert(root.to_path_buf(), workspace.clone());
         workspace

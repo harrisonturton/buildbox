@@ -155,9 +155,11 @@ pub fn target_files(target: Value<'_>) -> anyhow::Result<Vec<Artifact>> {
     actions::files(target.default_info("files"), "files")
 }
 
-/// The executable of a target, and its runfiles, if it has one.
+/// The executable of an executable target, and its runfiles. A file's
+/// target isn't one, though it runs as itself.
 pub fn target_executable<'v>(target: Value<'v>) -> Option<(Artifact, &'v Runfiles<'v>)> {
     let target = TargetValue::from_value(target)?;
+    target.default_info("executable").filter(|executable| !executable.is_none())?;
     let files_to_run = FilesToRun::from_value(target.default_info("files_to_run")?)?;
     let executable = FileValue::artifact(files_to_run.executable)?;
     Some((executable, Runfiles::from_value(files_to_run.runfiles)?))
@@ -357,7 +359,9 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     set("configuration", heap.alloc(crate::fragments::Configuration(options.clone())));
     set("features", heap.alloc(AllocList::EMPTY));
     set("disabled_features", heap.alloc(AllocList::EMPTY));
-    set("toolchains", heap.alloc(ToolchainContext::new(&input.toolchains, heap)));
+    set("info_file", heap.alloc(FileValue(crate::workspace_status::info_file(&input.config))));
+    set("version_file", heap.alloc(FileValue(crate::workspace_status::version_file(&input.config))));
+    set("toolchains", heap.alloc(ToolchainContext::new(&input.toolchains, definition_mapping(input), heap)));
     set("fragments", heap.alloc(crate::fragments::Fragments(options)));
     set("exec_groups", heap.alloc(Opaque::new("ctx.exec_groups")));
     set("split_attr", heap.alloc(AllocStruct(Vec::<(&str, Value<'v>)>::new())));
@@ -411,6 +415,8 @@ fn attr_value<'v>(input: &RuleInput, prepared: &Prepared<'v>, schema: &AttrSchem
     let target = |label: &Label| prepared.deps.get(&(*label, config)).copied().unwrap_or_else(Value::new_none);
     match (schema.ty, value) {
         (AttrType::Output | AttrType::OutputList, _) => output_value(schema, &prepared.outputs, heap),
+        // A Starlark transition can split, so its attribute is a list.
+        (_, AttrValue::Label(label)) if schema.is_dependency && schema.cfg == Cfg::Transition => heap.alloc(AllocList([target(label)])),
         (_, AttrValue::Label(label)) if schema.is_dependency => target(label),
         (_, AttrValue::LabelList(labels)) if schema.is_dependency => heap.alloc(AllocList(labels.iter().map(target))),
         (_, AttrValue::LabelKeyedStringDict(entries)) if schema.is_dependency => {
@@ -473,6 +479,15 @@ fn files_struct<'v>(input: &RuleInput, prepared: &Prepared<'v>, heap: Heap<'v>) 
         fields.push((schema.name.as_str(), heap.alloc(AllocList(files.into_iter().map(FileValue)))));
     }
     Ok(heap.alloc(AllocStruct(fields)))
+}
+
+/// The repository of the `.bzl` file defining the rule, and its mapping.
+fn definition_mapping(input: &RuleInput) -> Option<(RepoName, Arc<RepoMappingTable>)> {
+    let Implementation::Starlark { module, .. } = &input.implementation else {
+        return None;
+    };
+    let repo = module.label.repo();
+    Some((repo, input.mappings.get(&repo)?.clone()))
 }
 
 /// `ctx.executable`: the executables of executable attributes' targets,

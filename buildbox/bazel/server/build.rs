@@ -29,6 +29,7 @@ pub fn build_spec() -> OptionSpec {
         ("host_platform", Value),
         ("define", Multi),
         ("action_env", Multi),
+        ("repo_env", Multi),
         ("copt", Multi),
         ("cxxopt", Multi),
         ("conlyopt", Multi),
@@ -88,7 +89,7 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
         Err(code) => return code,
     };
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    workspace.refresh().await;
+    workspace.refresh(crate::command::repo_environment(context, &options)).await;
     let session = workspace.graph.session().await;
     let built = match run(context, &session, &options, out).await {
         Ok(built) => built,

@@ -266,15 +266,45 @@ pub fn inherited_commands(command: &str) -> Vec<&'static str> {
 }
 
 /// A command's full argument list: options from `.bazelrc` files for the
-/// commands it inherits from, then the command line's.
+/// commands it inherits from, the host platform's config if
+/// `--enable_platform_specific_config` asks for it, then the command
+/// line's.
 pub fn command_args(rc: &RcFile, command: &str, command_line: &[String]) -> Vec<String> {
     let mut args = rc.command_args("always");
     args.extend(rc.command_args("common"));
     for inherited in inherited_commands(command) {
         args.extend(rc.command_args(inherited));
     }
+    let platform = host_platform_config();
+    if platform_specific_config_enabled(args.iter().chain(command_line)) && rc.config_args(command, platform).is_some() {
+        args.push(format!("--config={platform}"));
+    }
     args.extend(command_line.iter().cloned());
     args
+}
+
+/// The name of the host platform's config, as Bazel names it.
+fn host_platform_config() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        "freebsd" => "freebsd",
+        "openbsd" => "openbsd",
+        _ => "linux",
+    }
+}
+
+/// Whether the last `--[no]enable_platform_specific_config` enables it.
+fn platform_specific_config_enabled<'a>(args: impl Iterator<Item = &'a String>) -> bool {
+    let mut enabled = false;
+    for arg in args {
+        match arg.as_str() {
+            "--enable_platform_specific_config" | "--enable_platform_specific_config=true" | "--enable_platform_specific_config=1" => enabled = true,
+            "--noenable_platform_specific_config" | "--enable_platform_specific_config=false" | "--enable_platform_specific_config=0" => enabled = false,
+            _ => {}
+        }
+    }
+    enabled
 }
 
 #[cfg(test)]

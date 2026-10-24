@@ -17,6 +17,7 @@ rust_library(
         "path_value.rs",
         "registry.rs",
         "repo_ctx.rs",
+        "repo_env.rs",
         "repo_spec.rs",
         "resolve.rs",
         "resolver.rs",

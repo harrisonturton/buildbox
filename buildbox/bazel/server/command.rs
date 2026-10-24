@@ -3,7 +3,8 @@
 use crate::output::Output;
 use crate::BazelServer;
 use crate::workspace;
-use bazel_options::RcFile;
+use bazel_bzlmod::repo_env::RepoEnvironment;
+use bazel_options::{ParsedOptions, RcFile};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::Instrument;
@@ -15,6 +16,13 @@ pub struct Invocation {
     pub args: Vec<String>,
     pub working_directory: PathBuf,
     pub env: HashMap<String, String>,
+}
+
+/// The environment repository rules see in a command: the client's, with
+/// `--repo_env` on top.
+pub fn repo_environment(context: &CommandContext<'_>, options: &ParsedOptions) -> RepoEnvironment {
+    let client = context.env.iter().map(|(name, value)| (name.clone(), value.clone()));
+    RepoEnvironment::new(client, &options.all("repo_env"))
 }
 
 /// Bazel's exit codes.

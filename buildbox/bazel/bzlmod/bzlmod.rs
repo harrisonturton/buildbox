@@ -18,6 +18,7 @@ pub mod module_file;
 pub mod path_value;
 pub mod registry;
 pub mod repo_ctx;
+pub mod repo_env;
 pub mod repo_spec;
 pub mod resolve;
 pub mod resolver;

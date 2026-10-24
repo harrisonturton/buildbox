@@ -6,6 +6,7 @@ use crate::fetch_repo::{FetchedRepo, RepoFetchKey, fetch_into, repo_dir};
 use crate::graph_access::GraphAccess;
 use crate::io::{HasIo, IoState};
 use crate::path_value::PathValue;
+use crate::repo_env::{RepoEnvKey, RepoEnvironment};
 use crate::repo_spec::RepoRuleSpec;
 use crate::star_value::StarValue;
 use allocative::Allocative;
@@ -109,8 +110,10 @@ pub async fn fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec) -> Result<Fet
     let mappings = mappings(ctx, &module, spec.base_repo).await?;
     let inputs = main_repo_inputs(ctx, spec).await?;
     let definer = defining_repo_dir(ctx, spec).await?;
+    let environment = ctx.compute(&RepoEnvKey).await?;
+    let env_inputs = env_inputs(&environment, &rule_environ(&module, spec));
     let stable_spec = format!("{spec:?}");
-    let dest = repo_dir(&config, repo, &[stable_spec.as_bytes(), definer.as_bytes(), &inputs].concat());
+    let dest = repo_dir(&config, repo, &[stable_spec.as_bytes(), definer.as_bytes(), &inputs, env_inputs.as_bytes()].concat());
     let access = GraphAccess::new(ctx.clone());
     let downloads = config.downloads.clone();
     let spec = spec.clone();
@@ -123,7 +126,7 @@ pub async fn fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec) -> Result<Fet
                 base_dir: dir.to_path_buf(),
                 graph: access,
                 downloads,
-                env: std::env::vars().collect(),
+                env: environment.env.iter().cloned().collect(),
             };
             run_rule(&module, &spec, repo, io, mappings).map_err(|error| format!("fetching @@{repo}: {error}"))
         })
@@ -151,9 +154,26 @@ async fn mappings(ctx: &Ctx, module: &BzlModule, base: RepoName) -> Result<HashM
     Ok(mappings)
 }
 
-/// The contents of the main repository's files that the rule's attributes
-/// name, such as a `build_file`. Repositories are shared between
-/// workspaces, so these must be part of what identifies the repository.
+/// The variables a repository is fetched with that identify it: the
+/// `--repo_env` ones, and those its rule declares it reads. The rest of the
+/// client's environment, such as `PATH`, varies between clients that should
+/// share repositories.
+fn env_inputs(environment: &RepoEnvironment, environ: &[String]) -> String {
+    let mut inputs = format!("{:?}", environment.overrides);
+    for name in environ {
+        inputs.push_str(&format!("\n{name}={:?}", environment.get(name)));
+    }
+    inputs
+}
+
+/// The variables a repository rule declares, with `environ`, that it reads.
+fn rule_environ(module: &BzlModule, spec: &RepoRuleSpec) -> Vec<String> {
+    let Ok((value, _)) = module.module.get_any_visibility(&spec.rule) else {
+        return Vec::new();
+    };
+    RepositoryRule::from_value(value.value()).map(|rule| rule.environ.clone()).unwrap_or_default()
+}
+
 /// The directory of the repository that defines the rule, which names the
 /// version of its module: a rule's label is the same in every version.
 async fn defining_repo_dir(ctx: &Ctx, spec: &RepoRuleSpec) -> Result<String, SkyError> {
@@ -165,6 +185,9 @@ async fn defining_repo_dir(ctx: &Ctx, spec: &RepoRuleSpec) -> Result<String, Sky
     Ok(fetched.dir.as_str().to_string())
 }
 
+/// The contents of the main repository's files that the rule's attributes
+/// name, such as a `build_file`. Repositories are shared between
+/// workspaces, so these must be part of what identifies the repository.
 async fn main_repo_inputs(ctx: &Ctx, spec: &RepoRuleSpec) -> Result<Vec<u8>, SkyError> {
     let mut labels = Vec::new();
     collect_main_labels(&spec.attrs.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(), spec.base_repo, &mut labels);

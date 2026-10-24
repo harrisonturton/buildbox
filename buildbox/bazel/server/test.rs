@@ -28,7 +28,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     };
     let epoch = bazel_execution::next_epoch();
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    workspace.refresh().await;
+    workspace.refresh(crate::command::repo_environment(context, &options)).await;
     let session = workspace.graph.session().await;
     let built = match build::run_command(context, &session, &options, true, out).await {
         Ok(built) => built,

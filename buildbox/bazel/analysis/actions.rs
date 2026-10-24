@@ -103,6 +103,10 @@ impl Tools {
             return Ok(());
         };
         self.inputs.push(executable);
+        // A source file runs as itself, without a runfiles tree.
+        if executable.is_source() {
+            return Ok(());
+        }
         if let Some(runfiles) = Runfiles::from_value(files_to_run.runfiles) {
             self.runfiles.push(runfiles_tree(executable, runfiles));
         }

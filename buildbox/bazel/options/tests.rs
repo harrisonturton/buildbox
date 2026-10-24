@@ -53,6 +53,16 @@ fn rc_files_add_options_by_command_and_config() {
     assert_eq!(query, args("--keep_going --output=label_kind"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn platform_specific_configs_apply_when_enabled() {
+    let rc = rc::parse_for_test("common --enable_platform_specific_config\nbuild:linux --copt=-DLINUX\n");
+    let build = command_args(&rc, "build", &args("//..."));
+    assert_eq!(build, args("--enable_platform_specific_config --config=linux //..."));
+    let off = command_args(&rc, "build", &args("--noenable_platform_specific_config //..."));
+    assert_eq!(off, args("--enable_platform_specific_config --noenable_platform_specific_config //..."));
+}
+
 #[test]
 fn undefined_configs_are_errors() {
     let rc = RcFile::default();

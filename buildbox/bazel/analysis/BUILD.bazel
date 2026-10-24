@@ -31,6 +31,7 @@ rust_library(
         "state.rs",
         "target_value.rs",
         "toolchains.rs",
+        "workspace_status.rs",
     ],
     crate_name = "bazel_analysis",
     crate_root = "analysis.rs",

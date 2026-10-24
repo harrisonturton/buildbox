@@ -41,6 +41,7 @@ fn query_spec() -> OptionSpec {
         ("strict_test_suite", Bool),
         ("loading_phase_threads", Value),
         ("experimental_graphless_query", Value),
+        ("repo_env", Multi),
     ])
 }
 
@@ -76,7 +77,7 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
         keep_going: options.flag("keep_going", false),
     };
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    workspace.refresh().await;
+    workspace.refresh(crate::command::repo_environment(context, &options)).await;
     let session = workspace.graph.session().await;
     let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
         Ok(mapping) => Arc::new(mapping.0.clone()),

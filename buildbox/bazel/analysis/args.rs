@@ -85,14 +85,33 @@ fn values(value: Value<'_>) -> anyhow::Result<Vec<Value<'_>>> {
     bazel_starlark::convert::items(value).ok_or_else(|| anyhow::anyhow!("expected a list or depset, not {}", value.get_type()))
 }
 
+/// Put `value` in place of a template's `%s`, which it must have once.
+/// `%%` stands for a percent sign.
 fn format(template: Option<&str>, value: &str) -> anyhow::Result<String> {
     let Some(template) = template else {
         return Ok(value.to_string());
     };
-    if template.matches("%s").count() != 1 {
+    let mut out = String::with_capacity(template.len() + value.len());
+    let mut substitutions = 0;
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('%') => out.push('%'),
+            Some('s') => {
+                substitutions += 1;
+                out.push_str(value);
+            }
+            _ => anyhow::bail!("format '{template}' has a '%' that isn't '%s' or '%%'"),
+        }
+    }
+    if substitutions != 1 {
         anyhow::bail!("format '{template}' must contain '%s' exactly once");
     }
-    Ok(template.replacen("%s", value, 1))
+    Ok(out)
 }
 
 /// The settings `add_all` and `add_joined` share.
@@ -355,5 +374,18 @@ fn template_dict_methods(builder: &mut MethodsBuilder) {
         let expanded = expansion.expand(values, eval)?;
         dict.insert(key, format(format_joined, &expanded.join(join_with))?);
         Ok(this)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format;
+
+    #[test]
+    fn formats_with_escaped_percents() {
+        assert_eq!(format(Some("--x=%s"), "a").unwrap(), "--x=a");
+        assert_eq!(format(Some("%%s is %s, 100%%"), "b").unwrap(), "%s is b, 100%");
+        assert!(format(Some("%s%s"), "c").is_err());
+        assert!(format(Some("%d"), "c").is_err());
     }
 }

@@ -155,12 +155,20 @@ fn with_executable<'v>(runfiles: Option<Value<'v>>, executable: Option<Artifact>
 pub fn file_target<'v>(label: Label, artifact: Artifact, heap: Heap<'v>) -> anyhow::Result<TargetValue<'v>> {
     let files = file_depset(&[artifact], heap);
     let runfiles = heap.alloc(Runfiles::new(files));
-    let given = instance(DEFAULT_INFO, vec![("files", files), ("runfiles", runfiles)], heap)?;
-    let defaults = Defaults {
-        files: Vec::new(),
-        executable: None,
-    };
+    // A file runs as itself, as an executable attribute's value, but isn't
+    // an executable target: it has no runfiles tree of its own.
+    let files_to_run = heap.alloc(FilesToRun {
+        executable: heap.alloc(FileValue(artifact)),
+        runfiles,
+    });
+    let fields = vec![
+        ("files", files),
+        ("default_runfiles", runfiles),
+        ("data_runfiles", runfiles),
+        ("files_to_run", files_to_run),
+        ("executable", Value::new_none()),
+    ];
     let mut providers = SmallMap::new();
-    providers.insert(DEFAULT_INFO.to_string(), default_info(label, Some(given), &defaults, heap)?);
+    providers.insert(DEFAULT_INFO.to_string(), instance(DEFAULT_INFO, fields, heap)?);
     Ok(TargetValue { label, providers })
 }

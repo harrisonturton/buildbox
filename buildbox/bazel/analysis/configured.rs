@@ -97,6 +97,9 @@ impl Key for ConfiguredTargetKey {
     const KIND: &'static str = "CONFIGURED_TARGET";
 
     async fn compute(&self, ctx: &Ctx) -> Result<ConfiguredTarget, SkyError> {
+        if self.label == *crate::workspace_status::OWNER {
+            return workspace_status(*self);
+        }
         let package = ctx.compute(&PackageKey(self.label.package)).await?;
         let Some(target) = package.0.target(self.label.name) else {
             return Err(no_such_target(self.label, &package.0));
@@ -453,6 +456,21 @@ fn file(key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> Result<Conf
     fingerprinter.bytes(kind.as_bytes()).bytes(artifact.exec_path.to_string().as_bytes());
     fingerprinter.bytes(format!("{:?}", artifact.config.map(|config| config.get().options.clone())).as_bytes());
     Ok(configured(key, Symbol::intern(kind), false, analyzed, fingerprinter.finish()))
+}
+
+/// The target that writes the status files.
+fn workspace_status(key: ConfiguredTargetKey) -> Result<ConfiguredTarget, SkyError> {
+    let fingerprint = Fingerprint::of(format!("workspace status {}", key.config.get().output_directory).as_bytes());
+    let mut target = empty_target(key, "workspace status", false, fingerprint)?;
+    target.actions = crate::workspace_status::actions(&key.config.get());
+    target.generating = target
+        .actions
+        .iter()
+        .enumerate()
+        .flat_map(|(index, action)| action.outputs.iter().map(move |output| (output.exec_path, index as u32)))
+        .collect();
+    target.generating.sort();
+    Ok(target)
 }
 
 /// The configured target of something with no files, such as a package

@@ -62,7 +62,7 @@ impl Key for ExtensionKey {
             base_dir: work_dir.clone(),
             graph: GraphAccess::new(ctx.clone()),
             downloads: config.downloads.clone(),
-            env: std::env::vars().collect(),
+            env: ctx.compute(&crate::repo_env::RepoEnvKey).await?.env.iter().cloned().collect(),
         };
         let span = tracing::info_span!("bzlmod.module_extension", extension = %info.prefix);
         let graph = graph.clone();
