@@ -196,8 +196,11 @@ impl<'v> Compilation<'v> {
             .iter()
             .flat_map(|attr| cc_infos(input, prepared, attr))
             .collect();
-        let mut headers = prepared.files(input, "hdrs")?;
-        headers.extend(prepared.files(input, "textual_hdrs")?);
+        let mut public = prepared.files(input, "hdrs")?;
+        public.extend(prepared.files(input, "textual_hdrs")?);
+        let virtual_includes = virtual_includes(input, state, &public)?;
+        let mut headers = public;
+        headers.extend(virtual_includes.iter().flat_map(|(_, headers)| headers.iter().copied()));
         headers.extend(srcs.iter().filter(|artifact| HEADER_EXTENSIONS.contains(&extension(artifact))).copied());
         let strings_of = |name: &str| -> Vec<String> {
             let mut out = Vec::new();
@@ -230,7 +233,7 @@ impl<'v> Compilation<'v> {
         Ok(Compilation {
             headers,
             dep_headers: deps.iter().filter_map(|info| field(*info, "compilation_context", "headers")).collect(),
-            includes: strings_of("includes"),
+            includes: dedup(virtual_includes.into_iter().map(|(dir, _)| dir).chain(strings_of("includes")).collect()),
             quote_includes: dedup(quote_includes),
             system_includes: dedup(system_includes),
             defines: dedup(defines),
@@ -285,6 +288,69 @@ impl<'v> Compilation<'v> {
         headers.dedup();
         headers
     }
+}
+
+/// The directory `strip_include_prefix` and `include_prefix` make headers
+/// includable from, and the symlinks to the headers in it, as Bazel lays
+/// them out: `_virtual_includes/<name>/<include_prefix>/<path less the
+/// stripped prefix>`.
+fn virtual_includes(input: &RuleInput, state: &RuleState, headers: &[Artifact]) -> anyhow::Result<Option<(String, Vec<Artifact>)>> {
+    let strip = input.string("strip_include_prefix");
+    let prefix = input.string("include_prefix").trim_matches('/');
+    if strip.is_empty() && prefix.is_empty() {
+        return Ok(None);
+    }
+    let package = input.label.package.path.to_string();
+    let strip = match strip.strip_prefix('/') {
+        Some(absolute) => absolute.trim_end_matches('/').to_string(),
+        None if strip.is_empty() => package.clone(),
+        None => join(&package, strip.trim_end_matches('/')),
+    };
+    let dir = format!("_virtual_includes/{}", input.label.name);
+    let mut links = Vec::new();
+    for header in headers {
+        let path = repo_relative(input, header);
+        let Some(rest) = strip_dir(&path, &strip) else {
+            anyhow::bail!("header '{path}' is not under the specified strip prefix '{strip}'");
+        };
+        let link = state.declare(&join(&join(&dir, prefix), rest), false)?;
+        state.register(Action {
+            mnemonic: Symbol::intern("Symlink"),
+            progress_message: String::new(),
+            inputs: Vec::new(),
+            runfiles: Vec::new(),
+            outputs: vec![link],
+            kind: ActionKind::Symlink {
+                target: *header,
+                executable: false,
+            },
+        })?;
+        links.push(link);
+    }
+    let include_dir = join(&join(&input.config.bin_dir(), &artifact::package_dir(input.label.package).to_string()), &dir);
+    Ok(Some((include_dir, links)))
+}
+
+/// A header's path within its repository.
+fn repo_relative(input: &RuleInput, header: &Artifact) -> String {
+    let path = header.exec_path.to_string();
+    let repo = artifact::repo_dir(header.owner.package.repo).to_string();
+    let root = match header.is_source() {
+        true => repo,
+        false => join(&input.config.bin_dir(), &repo),
+    };
+    match root.is_empty() {
+        true => path,
+        false => path.strip_prefix(&format!("{root}/")).unwrap_or(&path).to_string(),
+    }
+}
+
+/// `path` relative to `dir`, if it's beneath it.
+fn strip_dir<'a>(path: &'a str, dir: &str) -> Option<&'a str> {
+    if dir.is_empty() {
+        return Some(path);
+    }
+    path.strip_prefix(dir)?.strip_prefix('/')
 }
 
 fn join(base: &str, path: &str) -> String {

@@ -12,9 +12,9 @@ use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
 use bazel_packages::{AttrValue, Target};
 use bazel_query::{QueryOptions, TargetSet, Universe};
 use bazel_starlark::depset::Depset;
-use intern::Symbol;
+use intern::{PathId, Symbol};
 use skyframe::Session;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,6 +30,11 @@ pub fn build_spec() -> OptionSpec {
         ("define", Multi),
         ("action_env", Multi),
         ("repo_env", Multi),
+        ("protocopt", Multi),
+        ("strict_proto_deps", Value),
+        ("strict_public_imports", Value),
+        ("proto_compiler", Value),
+        ("experimental_proto_descriptor_sets_include_source_info", Bool),
         ("copt", Multi),
         ("cxxopt", Multi),
         ("conlyopt", Multi),
@@ -175,15 +180,20 @@ pub async fn run_command(
 
     let exec_root = crate::commands::output_base_for(context.server, &context.workspace_root).join("execroot/_main");
     let backend = context.server.backend();
+    let wanted: Vec<Vec<Artifact>> = analyzed
+        .iter()
+        .map(|(_, target)| match target.incompatible {
+            Some(_) => Vec::new(),
+            None => top_level_artifacts(target),
+        })
+        .collect();
+    let all: Vec<Artifact> = wanted.iter().flatten().copied().collect::<BTreeSet<_>>().into_iter().collect();
+    let (built, failed) = execute(session, &all, out).await;
+    errors |= failed;
+    let built: HashMap<PathId, OutputFile> = built.into_iter().map(|file| (file.path, file)).collect();
     let mut targets = Vec::new();
-    for (label, target) in analyzed {
-        if target.incompatible.is_some() {
-            targets.push((label, target, Vec::new()));
-            continue;
-        }
-        let artifacts = top_level_artifacts(&target);
-        let (files, failed) = execute(session, &artifacts, out).await;
-        errors |= failed;
+    for ((label, target), artifacts) in analyzed.into_iter().zip(wanted) {
+        let files: Vec<OutputFile> = artifacts.iter().filter_map(|artifact| built.get(&artifact.exec_path).copied()).collect();
         if let Some(backend) = &backend {
             if let Err(error) = write_outputs(session, backend, &target, &files, &exec_root, &context.workspace_root).await {
                 out.error(error.message()).await;
@@ -191,9 +201,6 @@ pub async fn run_command(
             }
         }
         targets.push((label, target, files));
-        if errors && !keep_going {
-            break;
-        }
     }
     Ok(Built {
         main_mapping,
@@ -405,6 +412,13 @@ async fn package_tests(universe: &Universe<&Session>, package: &bazel_packages::
 }
 
 /// The configuration targets are built in, from the options.
+/// Options `config_setting(values = ...)` can match that bb records as they
+/// are given.
+const VALUE_OPTIONS: [&str; 3] = ["strict_proto_deps", "strict_public_imports", "proto_compiler"];
+
+/// Boolean options `config_setting(values = ...)` can match.
+const BOOL_OPTIONS: [&str; 1] = ["experimental_proto_descriptor_sets_include_source_info"];
+
 fn configuration(context: &CommandContext<'_>, options: &ParsedOptions, main_mapping: &RepoMappingTable) -> Result<ConfigId, String> {
     let parse_label = |text: &str| {
         let label_context = LabelContext::new(bazel_label::PackageId::new(RepoName::MAIN, intern::PathId::ROOT), main_mapping);
@@ -441,10 +455,20 @@ fn configuration(context: &CommandContext<'_>, options: &ParsedOptions, main_map
         build.starlark_flags.push((label, value.to_string()));
     }
     build.starlark_flags.sort();
-    for name in ["copt", "cxxopt", "conlyopt", "linkopt", "features"] {
+    for name in ["copt", "cxxopt", "conlyopt", "linkopt", "features", "protocopt"] {
         let values = options.all(name);
         if !values.is_empty() {
             build.values.push((name.to_string(), values.join(" ")));
+        }
+    }
+    for name in VALUE_OPTIONS {
+        if let Some(value) = options.get(name) {
+            build.values.push((name.to_string(), value.to_string()));
+        }
+    }
+    for name in BOOL_OPTIONS {
+        if options.get(name).is_some() {
+            build.values.push((name.to_string(), options.flag(name, false).to_string()));
         }
     }
     if options.flag("stamp", false) {
@@ -539,6 +563,8 @@ pub async fn execute(session: &Session, artifacts: &[Artifact], out: &Output) ->
     let results = session.evaluate_many(&unique).await;
     let mut files = Vec::new();
     let mut errors = false;
+    // A failed action fails every action that needs it, with its error.
+    let mut reported = BTreeSet::new();
     for (key, result) in unique.iter().zip(results) {
         match result {
             Ok(outputs) => {
@@ -548,7 +574,9 @@ pub async fn execute(session: &Session, artifacts: &[Artifact], out: &Output) ->
             }
             Err(error) => {
                 errors = true;
-                out.error(error.message()).await;
+                if reported.insert(error.message().to_string()) {
+                    out.error(error.message()).await;
+                }
             }
         }
     }

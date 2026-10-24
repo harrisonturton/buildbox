@@ -180,6 +180,10 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("ios_multi_cpus", ""),
     ("macos_cpus", ""),
     ("experimental_platform_in_output_dir", "false"),
+    ("strict_proto_deps", "error"),
+    ("strict_public_imports", "off"),
+    ("experimental_proto_descriptor_sets_include_source_info", "false"),
+    ("proto_compiler", "@bazel_tools//tools/proto:protoc"),
 ];
 
 /// The default value of a native option.

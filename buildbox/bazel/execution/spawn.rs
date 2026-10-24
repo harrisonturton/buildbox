@@ -42,7 +42,7 @@ pub struct SpawnResult {
 /// Run a command, or reuse a cached successful result. A command that runs
 /// and exits with a non-zero code still has a result.
 pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnResult, SkyError> {
-    let tree = input_tree(backend, &request.inputs).await?;
+    let tree = input_tree(backend, &request.inputs, &request.output_directories).await?;
     let command = command_proto(&request);
     let command_bytes = command.encode_to_vec();
     let command_digest = cas::Digest::of_bytes(&command_bytes);
@@ -140,10 +140,19 @@ async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<String, Input>, S
 }
 
 /// The input tree's `Directory` messages. Directories that are outputs of
-/// other actions are spliced in from their `Tree`s.
-async fn input_tree(backend: &Backend, inputs: &BTreeMap<String, Input>) -> Result<crate::inputs::MerkleTree, SkyError> {
+/// other actions are spliced in from their `Tree`s. The action's output
+/// directories are in it, empty, as Bazel gives them, since tools expect
+/// them to exist and workers don't create them.
+async fn input_tree(backend: &Backend, inputs: &BTreeMap<String, Input>, output_directories: &[String]) -> Result<crate::inputs::MerkleTree, SkyError> {
     let mut tree = InputTree::default();
     let mut blobs = Vec::new();
+    if !output_directories.is_empty() {
+        let empty = cas::Digest::of_bytes(&[]);
+        blobs.push((empty.clone(), Vec::new()));
+        for path in output_directories {
+            tree.add_directory(path, BlobDigest::from_cas(&empty)).map_err(SkyError::new)?;
+        }
+    }
     for (path, input) in inputs {
         let added = match input.is_directory {
             false => tree.add_file(path, input.digest, input.executable),
