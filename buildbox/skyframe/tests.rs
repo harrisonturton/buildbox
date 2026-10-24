@@ -20,6 +20,8 @@ struct Counts {
     files: AtomicU64,
     lines: AtomicU64,
     totals: AtomicU64,
+    /// Computations of [`Gated`] keys dropped before they finished.
+    cancelled: AtomicU64,
 }
 
 impl Counts {
@@ -89,6 +91,20 @@ string_key!(Total);
 string_key!(Fails);
 string_key!(Panics);
 string_key!(Flaky);
+string_key!(Waits);
+string_key!(Gated);
+
+/// Holds [`Gated`] keys' computations until it's opened.
+struct Gate(tokio::sync::Semaphore);
+
+/// Counts a [`Gated`] computation as cancelled if it's dropped unfinished.
+struct Unfinished(Arc<Counts>);
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        self.0.cancelled.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 impl Key for File {
     type Value = Text;
@@ -150,6 +166,32 @@ impl Key for Flaky {
     async fn compute(&self, ctx: &Ctx) -> Result<Number, SkyError> {
         ctx.global::<Counts>()?.totals.fetch_add(1, Ordering::SeqCst);
         Err(SkyError::transient(format!("{} failed this time", self.0)))
+    }
+}
+
+/// Is the value of a [`Gated`] key.
+impl Key for Waits {
+    type Value = Number;
+    const KIND: &'static str = "WAITS";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<Number, SkyError> {
+        ctx.compute(&Gated(self.0.clone())).await.map(|number| Number(number.0))
+    }
+}
+
+/// Is 7 once the [`Gate`] opens.
+impl Key for Gated {
+    type Value = Number;
+    const KIND: &'static str = "GATED";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<Number, SkyError> {
+        let counts = ctx.global::<Counts>()?;
+        counts.totals.fetch_add(1, Ordering::SeqCst);
+        let unfinished = Unfinished(counts);
+        let gate = ctx.global::<Gate>()?;
+        let _permit = gate.0.acquire().await.map_err(|_| SkyError::new("the gate closed"))?;
+        std::mem::forget(unfinished);
+        Ok(Number(7))
     }
 }
 
@@ -406,6 +448,64 @@ async fn transient_results_are_kept_until_invalidated() {
     }
     assert_eq!(counts.get().2, 3, "the transient error is computed again, the other kept");
     assert_eq!(graph.invalidate_transient().await, 1);
+}
+
+fn gated_workspace(engine: &Engine, counts: &Arc<Counts>) -> (Graph, Arc<Gate>) {
+    let gate = Arc::new(Gate(tokio::sync::Semaphore::new(0)));
+    let globals = Globals::new().with(counts.clone()).with(gate.clone());
+    (engine.graph(globals), gate)
+}
+
+/// Wait until `condition` holds, for work happening on other tasks.
+async fn eventually(condition: impl Fn() -> bool) {
+    for _ in 0..200 {
+        if condition() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("the condition never held");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn evaluations_nobody_waits_for_are_cancelled() {
+    let engine = Engine::default();
+    let counts = Arc::new(Counts::default());
+    let (graph, gate) = gated_workspace(&engine, &counts);
+    let session = Arc::new(graph.session().await);
+
+    let request = tokio::spawn({
+        let session = session.clone();
+        async move { session.evaluate(&Waits("x".into())).await.map(|number| number.0) }
+    });
+    eventually(|| counts.get().2 == 1).await;
+    request.abort();
+    eventually(|| counts.cancelled.load(Ordering::SeqCst) == 1).await;
+
+    gate.0.add_permits(10);
+    let value = session.evaluate(&Waits("x".into())).await.unwrap();
+    assert_eq!(value.0, 7);
+    assert_eq!(counts.get().2, 2, "the cancelled key is computed afresh");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn evaluations_continue_while_anyone_waits() {
+    let engine = Engine::default();
+    let counts = Arc::new(Counts::default());
+    let (graph, gate) = gated_workspace(&engine, &counts);
+    let session = Arc::new(graph.session().await);
+
+    let spawn_request = |session: Arc<skyframe::Session>| tokio::spawn(async move { session.evaluate(&Gated("x".into())).await.map(|number| number.0) });
+    let abandoned = spawn_request(session.clone());
+    let kept = spawn_request(session.clone());
+    eventually(|| counts.get().2 == 1).await;
+    abandoned.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(counts.cancelled.load(Ordering::SeqCst), 0);
+
+    gate.0.add_permits(10);
+    assert_eq!(kept.await.unwrap().unwrap(), 7);
+    assert_eq!(counts.get().2, 1, "computed once, for both");
 }
 
 #[tokio::test]

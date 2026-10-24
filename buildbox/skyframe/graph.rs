@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 use tokio::sync::{Notify, OwnedRwLockReadGuard, RwLock};
+use tokio::task::AbortHandle;
 use tracing::Instrument;
 
 /// A node must be computed again, even if its dependencies are unchanged.
@@ -55,7 +56,7 @@ struct GraphState {
     /// invalidation can reach. May list keys that no longer read it, which
     /// only makes invalidating check more than it needs to.
     rdeps: FxHashMap<u32, Vec<u32>>,
-    in_flight: FxHashMap<u32, Arc<InFlight>>,
+    in_flight: FxHashMap<u32, Flight>,
     /// Which in-flight keys each computing key is waiting for, to find cycles.
     waiting_on: FxHashMap<u32, Vec<u32>>,
 }
@@ -88,6 +89,15 @@ impl Outcome {
     }
 }
 
+/// A key being evaluated: by which task, and for how many requests. When
+/// none still wait for it, the evaluation is cancelled.
+struct Flight {
+    shared: Arc<InFlight>,
+    waiters: usize,
+    task: AbortHandle,
+}
+
+/// What the requests for a key being evaluated wait on.
 #[derive(Default)]
 struct InFlight {
     outcome: OnceLock<Result<Outcome, SkyError>>,
@@ -308,7 +318,7 @@ impl GraphInner {
     }
 
     async fn request_unboxed(self: Arc<Self>, requester: Option<KeyId>, key: KeyId, revision: u32) -> Result<Outcome, SkyError> {
-        let (in_flight, started, cycle) = {
+        let (in_flight, cycle) = {
             let mut state = self.lock();
             if let Some(node) = state.nodes.get(&key.0) {
                 if node.verified_at == revision && node.flags & DIRTY == 0 {
@@ -318,31 +328,46 @@ impl GraphInner {
                     });
                 }
             }
-            let existing = state.in_flight.get(&key.0).cloned();
             if let Some(requester) = requester {
                 state.waiting_on.entry(requester.0).or_default().push(key.0);
             }
-            match existing {
-                Some(in_flight) => (in_flight, false, state.stalled_cycle()),
-                None => {
-                    let in_flight = Arc::new(InFlight::default());
-                    state.in_flight.insert(key.0, in_flight.clone());
-                    (in_flight, true, None)
+            match state.in_flight.get_mut(&key.0) {
+                Some(flight) => {
+                    flight.waiters += 1;
+                    let shared = flight.shared.clone();
+                    (shared, state.stalled_cycle())
                 }
+                None => (self.start(&mut state, key, revision), None),
             }
         };
 
         if let Some((path, broken)) = cycle {
             self.break_cycle(path, &broken);
         }
-        if started {
-            tokio::spawn(self.clone().evaluate(key, revision, in_flight.clone()).in_current_span());
-        }
+        let waiting = Waiting {
+            graph: &self,
+            requester,
+            key,
+            in_flight: &in_flight,
+        };
         let outcome = in_flight.wait().await;
-        if let Some(requester) = requester {
-            self.lock().stop_waiting(requester.0, key.0);
-        }
+        drop(waiting);
         outcome
+    }
+
+    /// Start evaluating `key` for one waiting request. The task is started
+    /// while the state is locked, so it can be cancelled from the moment
+    /// it's in flight.
+    fn start(self: &Arc<Self>, state: &mut GraphState, key: KeyId, revision: u32) -> Arc<InFlight> {
+        let shared = Arc::new(InFlight::default());
+        let task = tokio::spawn(self.clone().evaluate(key, revision, shared.clone()).in_current_span());
+        let flight = Flight {
+            shared: shared.clone(),
+            waiters: 1,
+            task: task.abort_handle(),
+        };
+        state.in_flight.insert(key.0, flight);
+        shared
     }
 
     /// Evaluate `key`, which this task has claimed, and publish its result.
@@ -356,13 +381,15 @@ impl GraphInner {
                 panic_message(&*panic)
             ))),
         };
-        let outcome = self.finish(key, revision, resolution);
+        let outcome = self.finish(key, revision, &in_flight, resolution);
         let _ = in_flight.outcome.set(outcome);
         in_flight.done.notify_waiters();
     }
 
-    /// Record a resolved node and stop tracking it as in flight.
-    fn finish(&self, key: KeyId, revision: u32, resolution: Result<Resolution, SkyError>) -> Result<Outcome, SkyError> {
+    /// Record a resolved node and stop tracking it as in flight. If its
+    /// evaluation was cancelled as it finished, another may be in flight
+    /// for the key, which is left alone.
+    fn finish(&self, key: KeyId, revision: u32, in_flight: &Arc<InFlight>, resolution: Result<Resolution, SkyError>) -> Result<Outcome, SkyError> {
         let engine = &self.engine.0;
         // Read a new trace before taking the lock, which every request takes.
         let new = match resolution {
@@ -372,8 +399,10 @@ impl GraphInner {
         };
         let (outcome, released, cycle) = {
             let mut state = self.lock();
-            state.in_flight.remove(&key.0);
-            state.waiting_on.remove(&key.0);
+            if state.in_flight.get(&key.0).is_some_and(|flight| Arc::ptr_eq(&flight.shared, in_flight)) {
+                state.in_flight.remove(&key.0);
+                state.waiting_on.remove(&key.0);
+            }
             let (outcome, released) = match new {
                 Err(error) => (Err(error), None),
                 Ok(None) => (state.keep(key, revision), None),
@@ -430,16 +459,23 @@ impl GraphInner {
     /// the caller owns.
     async fn reuse(self: Arc<Self>, key: KeyId, current: Option<ValueRef>, revision: u32) -> Option<ValueRef> {
         let engine = self.engine.clone();
-        let candidates = engine.0.memo_candidates(key.0);
-        let mut found = None;
-        for candidate in candidates {
-            if found.is_none() && Some(candidate) != current && !engine.0.has_absent_value(candidate) && self.clone().verify(key, candidate, revision).await {
-                found = Some(candidate);
-                continue;
+        let mut held = HeldTraces {
+            engine: engine.clone(),
+            candidates: engine.0.memo_candidates(key.0).into(),
+            found: None,
+        };
+        while let Some(&candidate) = held.candidates.front() {
+            let matches = held.found.is_none()
+                && Some(candidate) != current
+                && !engine.0.has_absent_value(candidate)
+                && self.clone().verify(key, candidate, revision).await;
+            held.candidates.pop_front();
+            match matches {
+                true => held.found = Some(candidate),
+                false => engine.0.release_trace(candidate),
             }
-            engine.0.release_trace(candidate);
         }
-        found
+        held.found.take()
     }
 
     /// Whether every dependency in `trace` still has the value it recorded,
@@ -499,6 +535,55 @@ impl GraphInner {
             engine.0.memo_add(key.0, trace);
         }
         Ok(trace)
+    }
+}
+
+/// A request waiting for an in-flight key. Dropping it, whether the result
+/// came or the request was cancelled, stops it waiting; if it was the last
+/// request waiting and there's no result yet, the evaluation is cancelled.
+struct Waiting<'a> {
+    graph: &'a GraphInner,
+    requester: Option<KeyId>,
+    key: KeyId,
+    in_flight: &'a Arc<InFlight>,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let mut state = self.graph.lock();
+        if let Some(requester) = self.requester {
+            state.stop_waiting(requester.0, self.key.0);
+        }
+        let Some(flight) = state.in_flight.get_mut(&self.key.0) else {
+            return;
+        };
+        if !Arc::ptr_eq(&flight.shared, self.in_flight) {
+            return;
+        }
+        flight.waiters -= 1;
+        if flight.waiters > 0 || self.in_flight.outcome.get().is_some() {
+            return;
+        }
+        if let Some(flight) = state.in_flight.remove(&self.key.0) {
+            state.waiting_on.remove(&self.key.0);
+            flight.task.abort();
+        }
+    }
+}
+
+/// References to traces a [`GraphInner::reuse`] holds, released if it's
+/// cancelled before it's done with them.
+struct HeldTraces {
+    engine: Engine,
+    candidates: std::collections::VecDeque<ValueRef>,
+    found: Option<ValueRef>,
+}
+
+impl Drop for HeldTraces {
+    fn drop(&mut self) {
+        for trace in self.candidates.drain(..).chain(self.found.take()) {
+            self.engine.0.release_trace(trace);
+        }
     }
 }
 
@@ -599,7 +684,7 @@ impl GraphState {
             return None;
         }
         let path = self.find_cycle()?;
-        let broken = self.in_flight.get(&path[1])?.clone();
+        let broken = self.in_flight.get(&path[1])?.shared.clone();
         Some((path, broken))
     }
 
