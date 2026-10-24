@@ -26,14 +26,10 @@ pub async fn layout(session: &Session, target: &ConfiguredTarget, exec_root: &Pa
     }))
 }
 
-/// A target's executable, if it has one.
-pub fn executable(target: &ConfiguredTarget) -> Option<Artifact> {
-    FileValue::artifact(target.target_value()?.default_info("executable")?)
-}
-
 /// A target's executable, and its runfiles.
 pub fn executable_runfiles(target: &ConfiguredTarget) -> Option<(Artifact, Vec<(String, Artifact)>)> {
-    let value = target.target_value()?;
+    let providers = target.providers().ok()?;
+    let value = providers.get()?;
     let executable = FileValue::artifact(value.default_info("executable")?)?;
     let runfiles = Runfiles::from_value(value.default_info("default_runfiles")?)?;
     Some((executable, runfiles.entries(runfiles_repo_name(RepoName::MAIN))))

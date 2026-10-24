@@ -224,33 +224,51 @@ pub async fn clean(context: &CommandContext<'_>, args: &[String], out: &Output) 
     exit::SUCCESS
 }
 
-/// `page-check`: whether every analyzed target in the workspace can be
-/// serialized for paging, and what can't. A diagnostic.
+/// `page-check`: page every analyzed target in the workspace out of
+/// memory and read each back, reporting how long it took and what failed.
+/// A diagnostic.
 pub async fn page_check(context: &CommandContext<'_>, out: &Output) -> i32 {
     let workspace = context.server.workspaces().get(&context.workspace_root);
     let keys = workspace.graph.keys::<bazel_analysis::ConfiguredTargetKey>();
     let session = workspace.graph.session().await;
-    let targets = session.evaluate_many(&keys).await;
-    let mut serialized = 0;
-    let mut bytes = 0;
-    let mut failures: std::collections::BTreeMap<String, (usize, String)> = std::collections::BTreeMap::new();
-    for (key, target) in keys.iter().zip(targets) {
-        let Ok(target) = target else {
-            continue;
-        };
-        match bazel_analysis::paging::round_trip(&target.value) {
-            Ok(len) => {
-                serialized += 1;
-                bytes += len;
-            }
-            Err(error) => {
-                let reason = error.lines().next().unwrap_or_default().to_string();
-                let entry = failures.entry(reason).or_insert((0, key.label.to_string()));
-                entry.0 += 1;
+    let targets: Vec<_> = session.evaluate_many(&keys).await.into_iter().filter_map(Result::ok).collect();
+    let paged_targets = targets.clone();
+    let started = std::time::Instant::now();
+    let paged = tokio::task::spawn_blocking(move || bazel_analysis::paging::page_out(paged_targets.iter().map(|target| target.paged_value()))).await;
+    let page_out_time = started.elapsed();
+    let paged = match paged {
+        Ok(Ok(paged)) => paged,
+        Ok(Err(error)) => {
+            out.error(&format!("paging out failed: {error:#}")).await;
+            return exit::BUILD_FAILURE;
+        }
+        Err(error) => {
+            out.error(&format!("paging out failed: {error}")).await;
+            return exit::BUILD_FAILURE;
+        }
+    };
+    let started = std::time::Instant::now();
+    let read_back = tokio::task::spawn_blocking(move || {
+        let mut failures: std::collections::BTreeMap<String, (usize, String)> = std::collections::BTreeMap::new();
+        let mut read = 0;
+        for target in &targets {
+            match target.providers() {
+                Ok(providers) if providers.get().is_some() => read += 1,
+                Ok(_) => failures.entry("no providers".to_string()).or_insert((0, target.label.to_string())).0 += 1,
+                Err(error) => {
+                    let reason = error.message().lines().next().unwrap_or_default().to_string();
+                    failures.entry(reason).or_insert((0, target.label.to_string())).0 += 1;
+                }
             }
         }
-    }
-    let mut text = format!("{serialized} targets serialized, {bytes} bytes\n");
+        (read, failures)
+    })
+    .await;
+    let Ok((read, failures)) = read_back else {
+        out.error("reading back panicked").await;
+        return exit::BUILD_FAILURE;
+    };
+    let mut text = format!("{paged} targets paged out in {page_out_time:?}; {read} read back in {:?}\n", started.elapsed());
     for (reason, (count, example)) in &failures {
         text.push_str(&format!("{count:>6}  {reason}  (e.g. {example})\n"));
     }

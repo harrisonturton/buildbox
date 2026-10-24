@@ -116,7 +116,7 @@ pub fn cc_toolchain_alias<'v>(input: &RuleInput, heap: Heap<'v>) -> anyhow::Resu
     let Some(target) = input.toolchains.resolved.iter().find_map(|(_, target)| target.as_ref()) else {
         return Ok(Value::new_none());
     };
-    let value = heap.access_owned_frozen_value(&target.value);
+    let value = heap.access_owned_frozen_value(target.providers()?.owned());
     let Some(target) = TargetValue::from_value(value) else {
         return Ok(Value::new_none());
     };
@@ -133,7 +133,7 @@ fn resolved_toolchain<'v>(input: &RuleInput, heap: Heap<'v>) -> anyhow::Result<&
         .find(|(toolchain_type, _)| Some(*toolchain_type) == wanted)
         .and_then(|(_, target)| target.as_ref())
         .ok_or_else(|| anyhow::anyhow!("no C++ toolchain was found for {}", input.label))?;
-    let value = heap.access_owned_frozen_value(&target.value);
+    let value = heap.access_owned_frozen_value(target.providers()?.owned());
     let toolchain = TargetValue::from_value(value)
         .and_then(|target| target.provider("CcToolchainInfo"))
         .and_then(CcToolchain::from_value)

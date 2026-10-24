@@ -17,8 +17,18 @@ pub struct TopLevel {
     /// The generated files to build: the target's default outputs, and if
     /// it's executable, its runfiles. Source files need no building.
     pub artifacts: Vec<Artifact>,
-    /// Identifies the executable's runfiles tree, if the target has one.
-    pub runfiles: Option<Fingerprint>,
+    /// The executable's runfiles tree, if the target has one.
+    pub runfiles: Option<RunfilesTree>,
+}
+
+/// An executable's runfiles tree, recorded so a build can tell whether the
+/// tree on disk is current without reading the target's providers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct RunfilesTree {
+    /// The executable the tree belongs to.
+    pub executable: Artifact,
+    /// Identifies the tree's entries and repository mapping.
+    pub fingerprint: Fingerprint,
 }
 
 encoded_value!(TopLevel);
@@ -32,7 +42,10 @@ impl Key for TopLevelKey {
         let flattened = bazel_loading::blocking(move || flatten(&target)).await?;
         let Flattened { mut artifacts, runfiles } = flattened;
         let runfiles = match runfiles {
-            Some(entries) => Some(runfiles_fingerprint(&entries, &bazel_execution::repo_mapping(ctx, &entries).await?)),
+            Some((executable, entries)) => {
+                let fingerprint = runfiles_fingerprint(&entries, &bazel_execution::repo_mapping(ctx, &entries).await?);
+                Some(RunfilesTree { executable, fingerprint })
+            }
             None => None,
         };
         let mut seen = BTreeSet::new();
@@ -43,12 +56,13 @@ impl Key for TopLevelKey {
 
 struct Flattened {
     artifacts: Vec<Artifact>,
-    runfiles: Option<Vec<(String, Artifact)>>,
+    runfiles: Option<(Artifact, Vec<(String, Artifact)>)>,
 }
 
 /// A target's default outputs and its executable's runfiles, flattened.
 fn flatten(target: &ConfiguredTarget) -> Flattened {
-    let Some(value) = target.target_value() else {
+    let providers = target.providers().ok();
+    let Some(value) = providers.as_ref().and_then(|providers| providers.get()) else {
         return Flattened {
             artifacts: Vec::new(),
             runfiles: None,
@@ -65,7 +79,7 @@ fn flatten(target: &ConfiguredTarget) -> Flattened {
     artifacts.extend(entries.iter().map(|(_, artifact)| *artifact));
     Flattened {
         artifacts,
-        runfiles: Some(entries),
+        runfiles: Some((executable, entries)),
     }
 }
 

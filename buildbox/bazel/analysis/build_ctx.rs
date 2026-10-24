@@ -252,7 +252,7 @@ fn dep_values<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Hash
     for (key, dep) in &input.deps {
         let value = match dep {
             Dep::File(label, artifact) => heap.alloc(providers::file_target(*label, *artifact, heap)?),
-            Dep::Target(target) => heap.access_owned_frozen_value(&target.value),
+            Dep::Target(target) => heap.access_owned_frozen_value(target.providers()?.owned()),
         };
         values.insert(*key, value);
     }

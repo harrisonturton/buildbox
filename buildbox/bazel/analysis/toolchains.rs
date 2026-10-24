@@ -328,7 +328,7 @@ impl<'v> ToolchainContext<'v> {
             let value = toolchain
                 .as_ref()
                 .and_then(|toolchain| {
-                    let value = heap.access_owned_frozen_value(&toolchain.value);
+                    let value = heap.access_owned_frozen_value(toolchain.providers().ok()?.owned());
                     TargetValue::from_value(value)?.provider("ToolchainInfo")
                 })
                 .unwrap_or_else(Value::new_none);

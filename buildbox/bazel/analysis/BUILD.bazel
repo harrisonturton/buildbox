@@ -39,6 +39,7 @@ rust_library(
     crate_name = "bazel_analysis",
     crate_root = "analysis.rs",
     visibility = ["//buildbox:__subpackages__"],
+    proc_macro_deps = ["@crates//:async-trait"],
     deps = [
         "//buildbox/bazel/config",
         "//buildbox/bazel/label",
@@ -50,16 +51,19 @@ rust_library(
         "//buildbox/skyframe",
         "@crates//:allocative",
         "@crates//:anyhow",
+        "@crates//:dashmap",
         "@crates//:futures",
         "@crates//:pagable",
         "@crates//:rustc-hash",
         "@crates//:starlark",
         "@crates//:thiserror",
         "@crates//:tracing",
+        "@crates//:zstd",
     ],
 )
 
 rust_test(
     name = "analysis_test",
     crate = ":analysis",
+    deps = ["@crates//:tempfile"],
 )

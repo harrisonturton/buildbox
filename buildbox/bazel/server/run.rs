@@ -55,8 +55,10 @@ fn shown_executable(built: &Built, options: &bazel_options::ParsedOptions) -> St
     let executable = built
         .targets
         .first()
-        .and_then(|(_, target, _)| target.target_value()?.default_info("executable"))
-        .and_then(FileValue::artifact);
+        .and_then(|(_, target, _)| {
+            let providers = target.providers().ok()?;
+            FileValue::artifact(providers.get()?.default_info("executable")?)
+        });
     match executable {
         Some(artifact) => build::display_path(&artifact, prefix, &config.output_directory),
         None => String::new(),
@@ -70,8 +72,9 @@ async fn command_line(session: &Session, built: &Built, pattern: &str, program_a
         return Err(format!("Only a single target can be run. Your target pattern {pattern} matches {} targets", built.targets.len()));
     };
     let shown = bazel_query::display_label(*label, &built.main_mapping);
-    let executable = target
-        .target_value()
+    let providers = target.providers().map_err(|error| error.message().to_string())?;
+    let executable = providers
+        .get()
         .and_then(|value| value.default_info("executable"))
         .and_then(FileValue::artifact)
         .ok_or_else(|| format!("Cannot run target {shown}: Not executable"))?;

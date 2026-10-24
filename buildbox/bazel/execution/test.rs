@@ -149,7 +149,8 @@ struct TestSpec {
 impl TestSpec {
     async fn of(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<TestSpec, SkyError> {
         let target = ctx.compute(&key).await?;
-        let value = target.target_value().ok_or_else(|| SkyError::new(format!("{} has no providers", key.label)))?;
+        let providers = target.providers()?;
+        let value = providers.get().ok_or_else(|| SkyError::new(format!("{} has no providers", key.label)))?;
         let executable = value
             .default_info("executable")
             .and_then(FileValue::artifact)

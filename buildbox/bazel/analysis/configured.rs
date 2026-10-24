@@ -1,6 +1,7 @@
 //! Configured targets: targets analyzed in a configuration.
 
 use crate::action::{Action, StoredAction};
+use crate::paging::PagedValue;
 use crate::artifact::{self, Artifact};
 use crate::attrs::resolve_attrs;
 use crate::build_ctx::{self, Dep, RuleInput};
@@ -38,8 +39,9 @@ pub struct ConfiguredTarget {
     /// The kind of rule, such as `genrule`, or `source file`.
     pub kind: Symbol,
     pub is_test: bool,
-    /// The [`TargetValue`](crate::TargetValue) dependents see.
-    pub value: OwnedFrozenValue,
+    /// The [`TargetValue`](crate::TargetValue) dependents see, which may
+    /// be paged out; see [`ConfiguredTarget::providers`].
+    value: PagedValue,
     pub actions: Vec<StoredAction>,
     /// Which action generates each output, by exec path, sorted.
     pub generating: Vec<(PathId, u32)>,
@@ -86,9 +88,29 @@ impl ConfiguredTarget {
         Some((action, &self.actions[action as usize]))
     }
 
-    /// The target's providers, as a [`TargetValue`](crate::TargetValue).
-    pub fn target_value(&self) -> Option<&crate::target_value::TargetValue<'_>> {
-        crate::target_value::TargetValue::from_value(self.value.value())
+    /// The target's providers, read back if they're paged out.
+    pub fn providers(&self) -> Result<Providers, SkyError> {
+        self.value.get().map(Providers).map_err(|error| SkyError::new(format!("{}: reading back its providers: {error:#}", self.label)))
+    }
+
+    /// The target's providers' value, for paging them out.
+    pub fn paged_value(&self) -> &PagedValue {
+        &self.value
+    }
+}
+
+/// A target's providers, and the frozen heap they're in.
+pub struct Providers(OwnedFrozenValue);
+
+impl Providers {
+    /// The providers, as a [`TargetValue`](crate::TargetValue).
+    pub fn get(&self) -> Option<&crate::target_value::TargetValue<'_>> {
+        crate::target_value::TargetValue::from_value(self.0.value())
+    }
+
+    /// The value and the heap it's in, to use in another heap.
+    pub fn owned(&self) -> &OwnedFrozenValue {
+        &self.0
     }
 }
 
@@ -380,7 +402,7 @@ async fn alias(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule) -> Result<Confi
         config: key.config,
         kind: target.kind,
         is_test: target.is_test,
-        value: target.value.clone(),
+        value: PagedValue::new(target.providers()?.owned().clone()),
         actions: Vec::new(),
         generating: Vec::new(),
         fingerprint: target.fingerprint,
@@ -412,7 +434,7 @@ fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool, 
         config: key.config,
         kind,
         is_test,
-        value,
+        value: PagedValue::new(value),
         actions,
         generating,
         fingerprint,

@@ -3,7 +3,7 @@
 
 use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
-use crate::top_level::{TopLevel, TopLevelKey};
+use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey};
 use crate::written::Written;
 use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Incompatibility};
 use bazel_config::{BuildOptions, ConfigId};
@@ -19,7 +19,6 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::stream::FuturesUnordered;
 use futures::future::BoxFuture;
 use intern::{PathId, Symbol};
-use skycodec::Fingerprint;
 use skyframe::Session;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -260,7 +259,7 @@ async fn analyze_and_build(
         let trees: Vec<_> = targets
             .iter()
             .zip(&top_levels)
-            .filter_map(|((_, target, files), top)| Some((target, files, top.as_ref()?.runfiles?)))
+            .filter_map(|((_, target, files), top)| Some((target, files, top.as_ref()?.runfiles.as_ref()?)))
             .map(|(target, files, runfiles)| Box::pin(write_runfiles_tree(session, &written, target, files, runfiles, &exec_root, &context.workspace_root)))
             .collect();
         results.extend(futures::stream::iter(trees).buffer_unordered(OUTPUT_WRITERS).collect::<Vec<_>>().await);
@@ -406,13 +405,11 @@ async fn write_runfiles_tree(
     written: &Arc<Written>,
     target: &ConfiguredTarget,
     files: &[OutputFile],
-    fingerprint: Fingerprint,
+    tree: &RunfilesTree,
     exec_root: &Path,
     workspace: &Path,
 ) -> Result<(), skyframe::SkyError> {
-    let Some(executable) = crate::runfiles::executable(target) else {
-        return Ok(());
-    };
+    let RunfilesTree { executable, fingerprint } = *tree;
     if !files.iter().any(|file| file.path == executable.exec_path) {
         return Ok(());
     }
@@ -793,7 +790,8 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
 }
 
 fn default_files(target: &ConfiguredTarget) -> Vec<Artifact> {
-    match target.target_value() {
+    let providers = target.providers().ok();
+    match providers.as_ref().and_then(|providers| providers.get()) {
         Some(value) => depset_files(value.default_info("files")),
         None => Vec::new(),
     }
