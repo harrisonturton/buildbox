@@ -24,8 +24,29 @@ const ABANDONING_INTERRUPTS: u32 = 3;
 
 /// Whether a command line is a Bazel command rather than one of bb's own.
 pub fn is_bazel_command(args: &[OsString]) -> bool {
-    let first = args.first().and_then(|arg| arg.to_str());
-    !first.is_some_and(|first| BB_COMMANDS.contains(&first))
+    !command_name(args).is_some_and(|command| BB_COMMANDS.contains(&command))
+}
+
+/// The command a command line runs: its first argument after the startup
+/// options, which Bazel takes only as `--name=value`.
+fn command_name(args: &[OsString]) -> Option<&str> {
+    args.iter().filter_map(|arg| arg.to_str()).find(|arg| !arg.starts_with("--"))
+}
+
+/// One of bb's own command lines, after the program name, without its
+/// startup options, and the server `--server_name=NAME` among them names.
+/// That's the only startup option bb's commands take.
+pub fn bb_command_line(args: &[OsString]) -> Result<(Vec<OsString>, Option<String>), String> {
+    let startup = args.iter().take_while(|arg| arg.to_str().is_some_and(|arg| arg.starts_with("--"))).count();
+    let mut server_name = None;
+    for option in &args[..startup] {
+        let option = option.to_string_lossy();
+        match option.strip_prefix(SERVER_NAME_OPTION) {
+            Some(name) => server_name = Some(name.to_string()),
+            None => return Err(format!("unknown startup option '{option}' for '{PRODUCT} {}'", command_name(args).unwrap_or_default())),
+        }
+    }
+    Ok((args[startup..].to_vec(), server_name))
 }
 
 /// How a command ended.

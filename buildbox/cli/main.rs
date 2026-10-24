@@ -68,7 +68,17 @@ fn main() -> ExitCode {
         return run_bazel(args[1..].to_vec());
     }
 
-    let cli = Cli::parse();
+    let (command_line, server_name) = match bazel::bb_command_line(&args[1..]) {
+        Ok(command_line) => command_line,
+        Err(message) => {
+            eprintln!("ERROR: {message}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Some(name) = server_name {
+        std::env::set_var("BB_SERVER_NAME", name);
+    }
+    let cli = Cli::parse_from(args.iter().take(1).chain(&command_line));
     // The server sets up logging itself, once it has read its config, which
     // says where to send traces.
     if !matches!(cli.command, Command::Up(_)) {
