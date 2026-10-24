@@ -452,13 +452,21 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         this: Value<'v>,
         patch_file: Value<'v>,
         #[starlark(default = 0)] strip: i32,
+        #[starlark(require = named)] directory: Option<Value<'v>>,
         #[starlark(require = named)] watch_patch: Option<Value<'v>>,
     ) -> anyhow::Result<NoneType> {
         let _ = watch_patch;
         let io = io_of(this)?;
         let patch = io.path(patch_file)?;
+        let directory = match directory.filter(|directory| directory.unpack_str() != Some("")) {
+            Some(directory) => io.path(directory)?,
+            None => io.base_dir.clone(),
+        };
+        if !directory.starts_with(&io.base_dir) {
+            anyhow::bail!("Cannot write outside of the repository directory for path {}", directory.display());
+        }
         let text = std::fs::read_to_string(&patch).map_err(|error| anyhow::anyhow!("failed to read {}: {error}", patch.display()))?;
-        bazel_fetch::apply_patch(&io.base_dir, &text, strip.max(0) as usize, &patch.display().to_string())?;
+        bazel_fetch::apply_patch(&directory, &text, strip.max(0) as usize, &patch.display().to_string())?;
         Ok(NoneType)
     }
 
