@@ -102,7 +102,9 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         "clean" => crate::commands::clean(&context, args, out).await,
         "dump" => crate::commands::dump(&context, out).await,
         "build" => crate::build::build(&context, args, out).await,
-        "test" | "run" | "coverage" | "cquery" | "aquery" | "fetch" | "sync" | "mod" | "print_action"
+        "test" => crate::test::test(&context, args, out).await,
+        "run" => crate::run::run(&context, args, out).await,
+        "coverage" | "cquery" | "aquery" | "fetch" | "sync" | "mod" | "print_action"
         | "canonicalize-flags" | "config" | "mobile-install" | "vendor" => {
             out.error(&format!("'{command}' isn't supported by bb yet")).await;
             exit::COMMAND_LINE_ERROR

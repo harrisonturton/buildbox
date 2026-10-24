@@ -118,6 +118,17 @@ pub async fn parse(context: &CommandContext<'_>, command: &str, args: &[String],
 
 /// Analyze the targets the options name and build their files.
 pub async fn run(context: &CommandContext<'_>, session: &Session, options: &ParsedOptions, out: &Output) -> Result<Built, i32> {
+    run_command(context, session, options, false, out).await
+}
+
+/// [`run`], for a command that tests, which reports its test targets.
+pub async fn run_command(
+    context: &CommandContext<'_>,
+    session: &Session,
+    options: &ParsedOptions,
+    testing: bool,
+    out: &Output,
+) -> Result<Built, i32> {
     let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
         Ok(mapping) => Arc::new(mapping.0.clone()),
         Err(error) => {
@@ -145,8 +156,7 @@ pub async fn run(context: &CommandContext<'_>, session: &Session, options: &Pars
         out.error("Analysis of target failed; build aborted").await;
         return Err(exit::BUILD_FAILURE);
     }
-    out.info(&format!("Analyzed {} {}.", analyzed.len(), plural(analyzed.len(), "target"))).await;
-    out.info(&format!("Found {} {}...", analyzed.len(), plural(analyzed.len(), "target"))).await;
+    report_analysis(&analyzed, &main_mapping, testing, out).await;
 
     let exec_root = crate::commands::output_base_for(context.server, &context.workspace_root).join("execroot/_main");
     let backend = context.server.backend();
@@ -173,6 +183,20 @@ pub async fn run(context: &CommandContext<'_>, session: &Session, options: &Pars
         exec_root,
         errors,
     })
+}
+
+/// Say what was analyzed, as Bazel does.
+async fn report_analysis(analyzed: &[(Label, Arc<ConfiguredTarget>)], mapping: &RepoMappingTable, testing: bool, out: &Output) {
+    match analyzed {
+        [(label, _)] => out.info(&format!("Analyzed target {}.", bazel_query::display_label(*label, mapping))).await,
+        _ => out.info(&format!("Analyzed {} targets.", analyzed.len())).await,
+    }
+    let tests = analyzed.iter().filter(|(_, target)| target.is_test).count();
+    let others = analyzed.len() - tests;
+    match testing {
+        true => out.info(&format!("Found {others} {} and {tests} test {}...", plural(others, "target"), plural(tests, "target"))).await,
+        false => out.info(&format!("Found {} {}...", analyzed.len(), plural(analyzed.len(), "target"))).await,
+    }
 }
 
 /// Write a target's files to the output tree, and its executable's
@@ -218,8 +242,9 @@ async fn targets(context: &CommandContext<'_>, session: &Session, options: &Pars
         };
         let mut labels = universe.resolve(text).await.map_err(|error| error.0)?;
         if is_wildcard(text, package, main_mapping) {
-            labels = without_manual(&universe, labels).await;
+            labels = buildable_by_wildcard(&universe, labels).await;
         }
+        labels = expand_test_suites(&universe, labels).await?;
         match negative {
             true => excluded.extend(labels),
             false => included.extend(labels),
@@ -236,21 +261,74 @@ fn is_wildcard(text: &str, package: bazel_label::PackageId, mapping: &RepoMappin
     !matches!(TargetPattern::parse(text, &context), Ok(TargetPattern::Target(_)))
 }
 
-async fn without_manual(universe: &Universe<&Session>, labels: TargetSet) -> TargetSet {
+/// Rules that wildcard patterns skip, as Bazel's do: they configure the
+/// build rather than produce anything.
+const NOT_BUILT_BY_WILDCARDS: &[&str] = &["config_setting", "constraint_setting", "constraint_value", "platform", "toolchain"];
+
+/// The targets a wildcard pattern builds: not those tagged `manual`, nor
+/// the rules that only configure the build.
+async fn buildable_by_wildcard(universe: &Universe<&Session>, labels: TargetSet) -> TargetSet {
     let mut kept = TargetSet::new();
     for label in labels {
         let Ok(target) = universe.target(label).await else {
             continue;
         };
         if let Target::Rule(rule) = target.target() {
-            let manual = matches!(rule.attr(Symbol::intern("tags")), Some(AttrValue::StringList(tags)) if tags.iter().any(|tag| tag == "manual"));
-            if manual {
+            let kind = target.package().rule_class(rule).kind;
+            if is_manual(rule) || NOT_BUILT_BY_WILDCARDS.contains(&kind.as_str()) {
                 continue;
             }
         }
         kept.insert(label);
     }
     kept
+}
+
+fn is_manual(rule: &bazel_packages::Rule) -> bool {
+    matches!(rule.attr(Symbol::intern("tags")), Some(AttrValue::StringList(tags)) if tags.iter().any(|tag| tag == "manual"))
+}
+
+/// Replace each `test_suite` with the tests it names, or with every test of
+/// its package when it names none.
+async fn expand_test_suites(universe: &Universe<&Session>, labels: TargetSet) -> Result<TargetSet, String> {
+    let mut expanded = TargetSet::new();
+    let mut pending: Vec<Label> = labels.into_iter().collect();
+    let mut seen = BTreeSet::new();
+    while let Some(label) = pending.pop() {
+        if !seen.insert(label) {
+            continue;
+        }
+        let target = universe.target(label).await.map_err(|error| error.0)?;
+        let Target::Rule(rule) = target.target() else {
+            expanded.insert(label);
+            continue;
+        };
+        let package = target.package();
+        if package.rule_class(rule).kind.as_str() != "test_suite" {
+            expanded.insert(label);
+            continue;
+        }
+        let tests = match rule.attr(Symbol::intern("tests")) {
+            Some(AttrValue::LabelList(tests)) if !tests.is_empty() => tests.clone(),
+            _ => package_tests(universe, package).await,
+        };
+        pending.extend(tests);
+    }
+    Ok(expanded)
+}
+
+/// The tests of a package that aren't tagged `manual`.
+async fn package_tests(universe: &Universe<&Session>, package: &bazel_packages::Package) -> Vec<Label> {
+    let mut tests = Vec::new();
+    for rule in package.rules() {
+        let Ok(class) = universe.rule_class(package.rule_class(rule)).await else {
+            continue;
+        };
+        if class.test && !is_manual(rule) {
+            tests.push(package.label(rule.name));
+        }
+    }
+    tests
 }
 
 /// The configuration targets are built in, from the options.
@@ -416,7 +494,7 @@ async fn generating_action(session: &Session, artifact: Artifact) -> Option<Acti
 }
 
 /// Print what each target built, and make the convenience symlinks.
-async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built: &Built, out: &Output) {
+pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built: &Built, out: &Output) {
     let prefix = options.get("symlink_prefix").unwrap_or("bazel-");
     let config = built.config.get();
     if let Err(error) = convenience_symlinks(&context.workspace_root, &built.exec_root, prefix, &config.output_directory) {
@@ -428,14 +506,14 @@ async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built: &B
     }
     for (label, target, files) in &built.targets {
         let shown = bazel_query::display_label(*label, &built.main_mapping);
-        let defaults = default_files(target);
+        let defaults: Vec<Artifact> = default_files(target).into_iter().filter(|artifact| !artifact.is_source()).collect();
         if defaults.is_empty() {
             out.stderr(&format!("Target {shown} up-to-date (nothing to build)\n")).await;
             continue;
         }
         out.stderr(&format!("Target {shown} up-to-date:\n")).await;
         for artifact in defaults {
-            let built = artifact.is_source() || files.iter().any(|file| file.path == artifact.exec_path);
+            let built = files.iter().any(|file| file.path == artifact.exec_path);
             if built {
                 out.stderr(&format!("  {}\n", display_path(&artifact, prefix, &config.output_directory))).await;
             }
@@ -451,7 +529,7 @@ fn default_files(target: &ConfiguredTarget) -> Vec<Artifact> {
 }
 
 /// An output's path as Bazel prints it: through the `bazel-bin` symlink.
-fn display_path(artifact: &Artifact, prefix: &str, output_directory: &str) -> String {
+pub fn display_path(artifact: &Artifact, prefix: &str, output_directory: &str) -> String {
     let path = artifact.exec_path.to_string();
     let bin = format!("bazel-out/{output_directory}/bin/");
     match path.strip_prefix(&bin) {

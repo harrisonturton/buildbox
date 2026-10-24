@@ -12,8 +12,10 @@ mod commands;
 mod memory;
 mod output;
 mod repos;
+mod run;
 mod runfiles;
 mod service;
+mod test;
 mod workspace;
 
 pub use command::{BAZEL_VERSION, Invocation, exit};

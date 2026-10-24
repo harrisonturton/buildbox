@@ -15,18 +15,45 @@ use std::sync::Arc;
 /// How much of an action's output an error message shows.
 const MAX_OUTPUT_IN_ERROR: usize = 64 * 1024;
 
-/// Run a spawn action, or reuse its cached result.
-pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action, spawn: &Spawn) -> Result<ActionOutputs, SkyError> {
-    let inputs = inputs(ctx, action).await?;
-    let tree = input_tree(backend, &inputs).await?;
-    let command = command(action, spawn);
+/// A command to run through the backend.
+pub struct SpawnRequest {
+    /// The files of the input tree, by path.
+    pub inputs: BTreeMap<String, Input>,
+    pub arguments: Vec<String>,
+    /// Sorted by name.
+    pub env: Vec<(String, String)>,
+    pub output_files: Vec<String>,
+    pub output_directories: Vec<String>,
+    /// Whether the result may be taken from, and stored in, the action
+    /// cache.
+    pub cacheable: bool,
+    pub timeout: Option<std::time::Duration>,
+    /// What to call the command in messages.
+    pub description: String,
+}
+
+/// What running a command produced.
+pub struct SpawnResult {
+    pub result: reapi::ActionResult,
+    /// Whether the result came from the action cache.
+    pub cached: bool,
+}
+
+/// Run a command, or reuse a cached successful result. A command that runs
+/// and exits with a non-zero code still has a result.
+pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnResult, SkyError> {
+    let tree = input_tree(backend, &request.inputs).await?;
+    let command = command_proto(&request);
     let command_bytes = command.encode_to_vec();
     let command_digest = cas::Digest::of_bytes(&command_bytes);
-    let no_cache = spawn.execution_info.iter().any(|(key, _)| key == "no-cache");
     let proto = reapi::Action {
         command_digest: command_digest.to_proto().into(),
         input_root_digest: tree.root.to_proto().into(),
-        do_not_cache: no_cache,
+        do_not_cache: !request.cacheable,
+        timeout: request.timeout.map(|timeout| buffa_types::google::protobuf::Duration {
+            seconds: timeout.as_secs() as i64,
+            ..Default::default()
+        }).into(),
         ..Default::default()
     };
     let action_bytes = proto.encode_to_vec();
@@ -36,39 +63,55 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, 
     blobs.push((command_digest, command_bytes));
     blobs.push((action_digest.clone(), action_bytes));
     upload_blobs(backend, blobs).await?;
-    let sources: Vec<&Input> = inputs.values().collect();
+    let sources: Vec<&Input> = request.inputs.values().collect();
     upload(backend, &sources).await?;
 
-    if !no_cache {
-        if let Some(outputs) = cached(backend, &action_digest, action).await? {
-            return Ok(outputs);
+    if request.cacheable {
+        if let Some(result) = cached(backend, &action_digest).await? {
+            return Ok(SpawnResult { result, cached: true });
         }
     }
-    let request = executor::Action {
+    let executable = executor::Action {
         digest: action_digest.clone(),
         command,
         input_root: tree.root,
-        timeout: None,
+        timeout: request.timeout,
         platform: Vec::new(),
     };
-    tracing::info!(label = %owner.label, "{}", progress(action, owner));
+    tracing::info!("{}", request.description);
     let result = backend
         .executor
-        .execute(&request)
+        .execute(&executable)
         .await
-        .map_err(|error| SkyError::transient(format!("{}: {error}", progress(action, owner))))?;
-    if result.exit_code != 0 {
-        return Err(failed(backend, action, owner, &result).await);
-    }
-    let outputs = outputs(action, &result)?;
-    if !no_cache {
+        .map_err(|error| SkyError::transient(format!("{}: {error}", request.description)))?;
+    if request.cacheable && result.exit_code == 0 {
         backend
             .action_cache
             .put(&action_digest, &result)
             .await
             .map_err(|error| SkyError::transient(format!("action cache: {error}")))?;
     }
-    Ok(outputs)
+    Ok(SpawnResult { result, cached: false })
+}
+
+/// Run a spawn action, or reuse its cached result.
+pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action, spawn: &Spawn) -> Result<ActionOutputs, SkyError> {
+    let (output_files, output_directories) = output_paths(action);
+    let request = SpawnRequest {
+        inputs: inputs(ctx, action).await?,
+        arguments: spawn.arguments.clone(),
+        env: spawn.env.clone(),
+        output_files,
+        output_directories,
+        cacheable: !spawn.execution_info.iter().any(|(key, _)| key == "no-cache"),
+        timeout: None,
+        description: progress(action, owner),
+    };
+    let spawned = execute(backend, request).await?;
+    if spawned.result.exit_code != 0 {
+        return Err(failed(backend, action, owner, &spawned.result).await);
+    }
+    outputs(action, &spawned.result)
 }
 
 fn progress(action: &Action, owner: ConfiguredTargetKey) -> String {
@@ -143,7 +186,8 @@ async fn upload_blobs(backend: &Backend, blobs: Vec<(cas::Digest, Vec<u8>)>) -> 
     Ok(())
 }
 
-fn command(action: &Action, spawn: &Spawn) -> reapi::Command {
+/// The outputs of an action, as files and directories, sorted.
+fn output_paths(action: &Action) -> (Vec<String>, Vec<String>) {
     let mut files: Vec<String> = Vec::new();
     let mut directories: Vec<String> = Vec::new();
     for output in &action.outputs {
@@ -154,7 +198,11 @@ fn command(action: &Action, spawn: &Spawn) -> reapi::Command {
     }
     files.sort();
     directories.sort();
-    let environment_variables = spawn
+    (files, directories)
+}
+
+fn command_proto(request: &SpawnRequest) -> reapi::Command {
+    let environment_variables = request
         .env
         .iter()
         .map(|(name, value)| reapi::command::EnvironmentVariable {
@@ -164,17 +212,17 @@ fn command(action: &Action, spawn: &Spawn) -> reapi::Command {
         })
         .collect();
     reapi::Command {
-        arguments: spawn.arguments.clone(),
+        arguments: request.arguments.clone(),
         environment_variables,
-        output_files: files,
-        output_directories: directories,
+        output_files: request.output_files.clone(),
+        output_directories: request.output_directories.clone(),
         ..Default::default()
     }
 }
 
-/// The outputs of a cached result, if there is one and its outputs are
-/// still in the CAS.
-async fn cached(backend: &Backend, digest: &cas::Digest, action: &Action) -> Result<Option<ActionOutputs>, SkyError> {
+/// A cached successful result, if there is one and the outputs it names
+/// are still in the CAS.
+async fn cached(backend: &Backend, digest: &cas::Digest) -> Result<Option<reapi::ActionResult>, SkyError> {
     let result = backend
         .action_cache
         .get(digest)
@@ -183,12 +231,11 @@ async fn cached(backend: &Backend, digest: &cas::Digest, action: &Action) -> Res
     let Some(result) = result.filter(|result| result.exit_code == 0) else {
         return Ok(None);
     };
-    let Ok(outputs) = outputs(action, &result) else {
-        return Ok(None);
-    };
-    let digests: Vec<cas::Digest> = outputs.files.iter().map(|output| output.digest.to_cas()).collect();
+    let file_digests = result.output_files.iter().filter_map(|file| file.digest.as_option());
+    let tree_digests = result.output_directories.iter().filter_map(|dir| dir.tree_digest.as_option());
+    let digests: Vec<cas::Digest> = file_digests.chain(tree_digests).filter_map(|digest| cas::Digest::from_proto(digest).ok()).collect();
     let missing = backend.cas.find_missing(&digests).await.map_err(cas_error)?;
-    Ok(missing.is_empty().then_some(outputs))
+    Ok(missing.is_empty().then_some(result))
 }
 
 /// The outputs of a result, which must include every declared output.
@@ -235,7 +282,8 @@ async fn failed(backend: &Backend, action: &Action, owner: ConfiguredTargetKey, 
     SkyError::transient(message)
 }
 
-async fn output_text(backend: &Backend, raw: &[u8], digest: Option<&reapi::Digest>) -> String {
+/// What a command printed to one of its streams, up to a limit.
+pub async fn output_text(backend: &Backend, raw: &[u8], digest: Option<&reapi::Digest>) -> String {
     if !raw.is_empty() {
         return String::from_utf8_lossy(raw).into_owned();
     }
