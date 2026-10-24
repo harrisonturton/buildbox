@@ -1,5 +1,6 @@
 //! The workspaces the server knows, each with its own graph.
 
+use bazel_execution::SourceDigestKey;
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
 use skyframe::{Engine, Globals, Graph};
 use std::collections::HashMap;
@@ -40,9 +41,11 @@ impl Workspace {
         let states: Vec<FileStateKey> = changed.iter().map(|path| FileStateKey(*path)).collect();
         let listings: Vec<DirListingKey> = changed.iter().map(|path| DirListingKey(*path)).collect();
         let contents: Vec<FileContentKey> = changed.iter().map(|path| FileContentKey(*path)).collect();
+        let digests: Vec<SourceDigestKey> = changed.iter().map(|path| SourceDigestKey(*path)).collect();
         self.graph.invalidate(&states).await;
         self.graph.invalidate(&listings).await;
         self.graph.invalidate(&contents).await;
+        self.graph.invalidate(&digests).await;
         changed.len()
     }
 }

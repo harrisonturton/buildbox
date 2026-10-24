@@ -121,9 +121,18 @@ fn parse_into(
                 parsed.values.push(("keep_going".into(), "true".into()));
                 continue;
             }
+            if arg == "-c" {
+                let value = next_value(args, &mut index, "compilation_mode")?;
+                parsed.values.push(("compilation_mode".into(), value));
+                continue;
+            }
             parsed.residue.push(arg.clone());
             continue;
         };
+        if let Some(flag) = starlark_flag(option) {
+            parsed.values.push((STARLARK_FLAG.to_string(), flag));
+            continue;
+        }
         let (name, inline) = match option.split_once('=') {
             Some((name, value)) => (name, Some(value.to_string())),
             None => (option, None),
@@ -163,6 +172,24 @@ fn parse_into(
         }
     }
     Ok(())
+}
+
+/// The name under which Starlark flags, such as `--//pkg:flag=value`, are
+/// recorded, with values `label=value`.
+pub const STARLARK_FLAG: &str = "starlark_flag";
+
+/// A Starlark flag, as `label=value`: `--//pkg:flag=value`,
+/// `--@repo//pkg:flag`, or `--no//pkg:flag` for false.
+fn starlark_flag(option: &str) -> Option<String> {
+    let is_label = |text: &str| text.starts_with("//") || text.starts_with('@');
+    if is_label(option) {
+        return Some(match option.split_once('=') {
+            Some((label, value)) => format!("{label}={value}"),
+            None => format!("{option}=true"),
+        });
+    }
+    let negated = option.strip_prefix("no").filter(|rest| is_label(rest))?;
+    Some(format!("{negated}=false"))
 }
 
 /// Whether an argument after an unknown `--option` is probably its value

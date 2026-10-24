@@ -6,6 +6,7 @@
 //! concurrently, in the same workspace or different ones; there is no
 //! server lock.
 
+mod build;
 mod command;
 mod commands;
 mod memory;
@@ -21,16 +22,19 @@ pub use service::BazelService;
 pub use workspace::{Workspace, Workspaces, find_root};
 
 use bazel_bzlmod::{BzlmodConfig, BzlmodRepositories};
+use bazel_execution::Backend;
 use bazel_loading::{BuiltinsDir, Repositories};
 use skyframe::{Engine, EngineConfig, Globals};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Where the server keeps what it fetches and builds.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub bazel_dir: PathBuf,
     pub home: Option<PathBuf>,
+    /// Where actions run, or `None` if this server can't build.
+    pub backend: Option<Arc<Backend>>,
 }
 
 /// The server's state: the shared engine, and each workspace's graph.
@@ -63,10 +67,13 @@ impl BazelServer {
             Some(dir) => tracing::info!("using @_builtins from {}", dir.display()),
             None => tracing::warn!("no @_builtins found; native rules such as cc_library are unavailable"),
         }
-        let services = Globals::new()
+        let mut services = Globals::new()
             .with(Arc::new(Repositories(Arc::new(BzlmodRepositories))))
             .with(Arc::new(BzlmodConfig::new(config.bazel_dir.clone(), bazel_tools)))
             .with(Arc::new(BuiltinsDir(builtins)));
+        if let Some(backend) = &config.backend {
+            services = services.with(backend.clone());
+        }
         let engine = Engine::new(engine_config());
         BazelServer {
             config,
@@ -76,6 +83,11 @@ impl BazelServer {
 
     pub fn config(&self) -> &ServerConfig {
         &self.config
+    }
+
+    /// Where this server runs actions.
+    pub fn backend(&self) -> Option<&Arc<Backend>> {
+        self.config.backend.as_ref()
     }
 
     pub fn workspaces(&self) -> &Workspaces {

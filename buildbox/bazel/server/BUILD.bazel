@@ -21,6 +21,7 @@ rust_connect_library(
 rust_library(
     name = "server",
     srcs = [
+        "build.rs",
         "command.rs",
         "commands.rs",
         "memory.rs",
@@ -38,12 +39,16 @@ rust_library(
     ],
     deps = [
         ":bazel_rust_connect",
+        "//buildbox/bazel/analysis",
         "//buildbox/bazel/bzlmod",
+        "//buildbox/bazel/config",
+        "//buildbox/bazel/execution",
         "//buildbox/bazel/fetch",
         "//buildbox/bazel/fs",
         "//buildbox/bazel/label",
         "//buildbox/bazel/loading",
         "//buildbox/bazel/options",
+        "//buildbox/bazel/packages",
         "//buildbox/bazel/query",
         "//buildbox/bazel/starlark",
         "//buildbox/intern",
@@ -52,6 +57,7 @@ rust_library(
         "@crates//:connectrpc",
         "@crates//:futures",
         "@crates//:libc",
+        "@crates//:starlark",
         "@crates//:tokio",
         "@crates//:tracing",
         "@crates//:zip",

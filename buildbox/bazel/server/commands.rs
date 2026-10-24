@@ -136,8 +136,13 @@ fn query_expression(options: &bazel_options::ParsedOptions) -> Result<String, St
 /// The directory a workspace's outputs go in: like Bazel's output base, one
 /// per workspace, named by a hash of the workspace's path.
 pub fn output_base(context: &CommandContext<'_>) -> PathBuf {
-    let digest = skycodec::Fingerprint::of(context.workspace_root.display().to_string().as_bytes());
-    context.server.config().bazel_dir.join("output_bases").join(digest.to_string())
+    output_base_for(context.server, &context.workspace_root)
+}
+
+/// The output base of the workspace at `root`.
+pub fn output_base_for(server: &crate::BazelServer, root: &std::path::Path) -> PathBuf {
+    let digest = skycodec::Fingerprint::of(root.display().to_string().as_bytes());
+    server.config().bazel_dir.join("output_bases").join(digest.to_string())
 }
 
 pub async fn info(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {

@@ -41,6 +41,8 @@ pub struct CommandContext<'a> {
     pub workspace_root: PathBuf,
     pub working_directory: PathBuf,
     pub rc: RcFile,
+    /// The client's environment.
+    pub env: HashMap<String, String>,
 }
 
 /// Run a command line, returning its exit code.
@@ -90,6 +92,7 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         workspace_root,
         working_directory: invocation.working_directory.clone(),
         rc,
+        env: invocation.env.clone(),
     };
 
     match command.as_str() {
@@ -98,7 +101,8 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         "shutdown" => crate::commands::shutdown(&context, out).await,
         "clean" => crate::commands::clean(&context, args, out).await,
         "dump" => crate::commands::dump(&context, out).await,
-        "build" | "test" | "run" | "coverage" | "cquery" | "aquery" | "fetch" | "sync" | "mod" | "print_action"
+        "build" => crate::build::build(&context, args, out).await,
+        "test" | "run" | "coverage" | "cquery" | "aquery" | "fetch" | "sync" | "mod" | "print_action"
         | "canonicalize-flags" | "config" | "mobile-install" | "vendor" => {
             out.error(&format!("'{command}' isn't supported by bb yet")).await;
             exit::COMMAND_LINE_ERROR

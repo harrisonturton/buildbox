@@ -3,6 +3,7 @@
 use actioncache::{ActionCache, ActionCacheError};
 use actioncache_fs::FsActionCache;
 use admin::{AdminService, Components};
+use bazel_execution::Backend;
 use bazel_server::{BazelServer, BazelService, ServerConfig};
 use artifacts::{ArtifactError, ArtifactStore};
 use artifacts_fs::FsArtifactStore;
@@ -82,9 +83,17 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     let cas_service = reapi::ContentAddressableStorageService::new(cas.clone());
     let bytestream_service = reapi::ByteStreamService::new(cas.clone());
     let capabilities_service = reapi::CapabilitiesService::default();
+    // Builds run their actions in this process, through the same stores
+    // and scheduler as remote execution requests.
+    let backend = Arc::new(Backend {
+        cas: cas.clone(),
+        action_cache: action_cache.clone(),
+        executor: scheduler.clone(),
+    });
     let bazel_server = Arc::new(BazelServer::new(ServerConfig {
         bazel_dir: config.bazel_dir.clone(),
         home: std::env::var_os("HOME").map(PathBuf::from),
+        backend: Some(backend),
     }));
     if std::env::var_os("BB_KEEP_STATE_ON_EXIT").is_some() {
         // For heap profiling: keep the build graphs alive at exit, so the

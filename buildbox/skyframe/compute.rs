@@ -32,3 +32,13 @@ impl Compute for Session {
         self.evaluate_many(keys).await
     }
 }
+
+impl<C: Compute> Compute for &C {
+    async fn compute<K: Key>(&self, key: &K) -> Result<Arc<K::Value>, SkyError> {
+        (**self).compute(key).await
+    }
+
+    async fn compute_many<K: Key>(&self, keys: &[K]) -> Vec<Result<Arc<K::Value>, SkyError>> {
+        (**self).compute_many(keys).await
+    }
+}
