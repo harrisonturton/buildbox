@@ -832,13 +832,17 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
     if let Err(error) = convenience_symlinks(&context.workspace_root, &built.exec_root, prefix, &config.output_directory) {
         out.warning(&format!("failed to create convenience symlinks: {error}")).await;
     }
-    let failed = built.targets.iter().filter(|(_, target, files)| !all_built(target, files)).count();
+    let executed = options.flag("build", true);
+    let failed = match executed {
+        true => built.targets.iter().filter(|(_, target, files)| !all_built(target, files)).count(),
+        false => 0,
+    };
     if failed > 0 && options.flag("keep_going", false) {
         let succeeded = built.targets.len() - failed;
         out.info(&format!("Build succeeded for only {succeeded} of {} top-level targets", built.targets.len())).await;
     }
     let show_result: usize = options.get("show_result").and_then(|value| value.parse().ok()).unwrap_or(1);
-    if built.targets.len() <= show_result {
+    if executed && built.targets.len() <= show_result {
         for (label, target, files) in &built.targets {
             report_target(*label, target, files, built, prefix, out).await;
         }
