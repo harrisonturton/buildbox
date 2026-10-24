@@ -20,6 +20,7 @@ impl AttrContext<'_> {
         let context = LabelContext {
             package: PackageId::new(self.repo, PathId::ROOT),
             mapping: self.mapping,
+            lenient: false,
         };
         Ok(Label::parse(text, &context)?)
     }

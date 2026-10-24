@@ -7,7 +7,7 @@ use crate::instantiate::instantiate;
 use crate::native_rules;
 use allocative::Allocative;
 use bazel_label::Label;
-use bazel_packages::{AttrDefault, AttrSchema, AttrValue, Cfg, RuleClass, RuleClassRef};
+use bazel_packages::{AttrDefault, AttrSchema, AttrType, AttrValue, Cfg, RuleClass, RuleClassRef};
 use intern::Symbol;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
@@ -116,9 +116,13 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
         };
         own.push(attr_schema(name, attribute, &parser)?);
     }
+    if let Some(ty) = build_setting_type(rule) {
+        own.push(AttrSchema::new("build_setting_default", ty).mandatory().nonconfigurable());
+    }
     own.sort_by(|a, b| a.name.cmp(&b.name));
     let mut class = native_rules::rule_class(kind, own, rule.test, rule.executable);
     class.outputs = predeclared_outputs(rule)?;
+    class.toolchain_types = toolchain_types(rule, &parser)?;
     Ok(class)
 }
 
@@ -156,6 +160,22 @@ fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelParser<'_>) 
     })
 }
 
+/// The type of a build setting rule's value, from its
+/// `build_setting = config.<type>(...)`.
+fn build_setting_type<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> Option<AttrType> {
+    let setting = rule.option("build_setting").filter(|value| !value.is_none())?;
+    let opaque = setting.downcast_ref::<crate::opaque::Opaque>()?;
+    let ty = match opaque.type_name.trim_end_matches("()") {
+        "config.bool" => AttrType::Bool,
+        "config.int" => AttrType::Int,
+        "config.string" => AttrType::String,
+        "config.string_list" | "config.string_set" => AttrType::StringList,
+        "config.label" | "config.label_flag" => AttrType::Label,
+        _ => AttrType::String,
+    };
+    Some(ty)
+}
+
 fn is_late_bound(value: Value<'_>) -> bool {
     value
         .downcast_ref::<crate::opaque::Opaque>()
@@ -164,6 +184,22 @@ fn is_late_bound(value: Value<'_>) -> bool {
 
 fn is_computed(value: Value<'_>) -> bool {
     matches!(value.get_type(), "function" | "builtin_function_or_method")
+}
+
+/// The toolchain types `rule(toolchains = [...])` names.
+fn toolchain_types<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, parser: &LabelParser<'_>) -> anyhow::Result<Vec<Label>> {
+    let Some(toolchains) = rule.option("toolchains").and_then(convert::items) else {
+        return Ok(Vec::new());
+    };
+    let mut labels = Vec::with_capacity(toolchains.len());
+    for toolchain in toolchains {
+        if let Some(toolchain_type) = toolchain.downcast_ref::<crate::toolchain_type::ToolchainType>() {
+            labels.push(toolchain_type.label);
+        } else if toolchain.unpack_str().is_some() || toolchain.downcast_ref::<crate::label_value::LabelValue>().is_some() {
+            labels.push(parser.label(toolchain)?);
+        }
+    }
+    Ok(labels)
 }
 
 fn predeclared_outputs<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> anyhow::Result<Vec<(Symbol, String)>> {

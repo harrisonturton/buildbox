@@ -38,11 +38,13 @@ rust_library(
     deps = [
         ":bazel_rust_connect",
         "//buildbox/bazel/bzlmod",
+        "//buildbox/bazel/fetch",
         "//buildbox/bazel/fs",
         "//buildbox/bazel/label",
         "//buildbox/bazel/loading",
         "//buildbox/bazel/options",
         "//buildbox/bazel/query",
+        "//buildbox/bazel/starlark",
         "//buildbox/intern",
         "//buildbox/skycodec",
         "//buildbox/skyframe",
@@ -50,5 +52,6 @@ rust_library(
         "@crates//:futures",
         "@crates//:tokio",
         "@crates//:tracing",
+        "@crates//:zip",
     ],
 )

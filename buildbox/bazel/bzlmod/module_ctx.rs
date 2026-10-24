@@ -73,7 +73,7 @@ where
 #[starlark_module]
 fn module_methods(builder: &mut MethodsBuilder) {
     /// Whether a tag came from a `dev_dependency = True` use.
-    fn is_dev_dependency<'v>(this: Value<'v>, #[starlark(require = pos)] tag: Value<'v>) -> anyhow::Result<bool> {
+    fn is_dev_dependency<'v>(this: Value<'v>, tag: Value<'v>) -> anyhow::Result<bool> {
         let _ = this;
         match Tag::from_value(tag) {
             Some(tag) => Ok(tag.dev),

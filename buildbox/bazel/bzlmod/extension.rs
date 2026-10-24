@@ -101,8 +101,11 @@ fn run_extension(
 
     Module::with_temp_heap(|env| -> anyhow::Result<()> {
         let heap = env.heap();
-        env.import_public_symbols(&module.module);
-        let value = env.get(&info.name).ok_or_else(|| anyhow::anyhow!("{} doesn't export '{}'", info.bzl, info.name))?;
+        let (value, _) = module
+            .module
+            .get_any_visibility(&info.name)
+            .map_err(|_| anyhow::anyhow!("{} doesn't export '{}'", info.bzl, info.name))?;
+        let value = heap.access_owned_frozen_value(&value);
         let Some(extension) = ModuleExtension::from_value(value) else {
             anyhow::bail!("{}%{} isn't a module extension", info.bzl, info.name);
         };
@@ -155,6 +158,14 @@ fn module_values<'v>(
     }
     by_module.sort_by_key(|(module, _)| *module);
 
+    let owner_mapping = match graph.module(info.bzl.repo()) {
+        Some((owner, _)) => graph.module_mapping(owner),
+        None => RepoMappingTable::new(info.bzl.repo(), Vec::new()),
+    };
+    let default_context = AttrContext {
+        repo: info.bzl.repo(),
+        mapping: &owner_mapping,
+    };
     let mut values = Vec::with_capacity(by_module.len());
     for (module_index, usages) in by_module {
         let module = &graph.modules[module_index];
@@ -173,7 +184,7 @@ fn module_values<'v>(
                     anyhow::bail!("tag class '{}' isn't a tag_class() value", tag.class);
                 };
                 let what = format!("{}: tag {}", tag.location, tag.class);
-                let attrs = apply_schema(&what, &class.attrs, &tag.attrs, &attr_context, &attr_context)?;
+                let attrs = apply_schema(&what, &class.attrs, &tag.attrs, &attr_context, &default_context)?;
                 let mut fields = SmallMap::with_capacity(attrs.len());
                 for (name, value) in attrs {
                     fields.insert(name, value.to_value(heap));

@@ -96,6 +96,8 @@ impl Key for PackageKey {
         let repos = transitive_repos(id.repo, loaded.iter().map(|(_, module)| &**module));
         let mappings = mappings(ctx, &repos).await?;
         let load_labels = loaded.iter().map(|(_, module)| module.label).collect();
+        let builtins = ctx.compute(&crate::BuiltinsKey).await?;
+        let module = ctx.global::<crate::Repositories>()?.0.module(ctx, id.repo).await?;
         let globber = GraphGlobber {
             ctx: ctx.clone(),
             package: RootedPath::new(root, id.path),
@@ -109,8 +111,9 @@ impl Key for PackageKey {
             let mut context = EvalContext::new(FileKind::Build, build_label);
             context.mappings = mappings;
             context.globber = Some(Box::new(globber));
+            context.module = module;
             let builder = PackageBuilder::new(id, build_file);
-            bazel_starlark::eval_build(ast, &loads, context, builder)
+            bazel_starlark::eval_build(ast, &builtins.build, &loads, context, builder)
         })
         .await?;
         for line in printed {

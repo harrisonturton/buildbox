@@ -27,6 +27,11 @@ impl Key for RuleClassKey {
     const KIND: &'static str = "RULE_CLASS";
 
     async fn compute(&self, ctx: &Ctx) -> Result<RuleClassValue, SkyError> {
+        if self.bzl.repo().as_str() == crate::BUILTINS_REPO {
+            let builtins = ctx.compute(&crate::BuiltinsKey).await?;
+            let class = builtins.rule_classes.get(&self.name).ok_or_else(|| SkyError::new(format!("no builtin rule named '{}'", self.name)))?;
+            return Ok(RuleClassValue((**class).clone()));
+        }
         let module = ctx.compute(&BzlLoadKey(self.bzl)).await?;
         let missing = || SkyError::new(format!("{} doesn't export a rule named '{}'", self.bzl, self.name));
         let (value, _) = module.module.get_any_visibility(self.name.as_str()).map_err(|_| missing())?;

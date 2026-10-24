@@ -13,6 +13,7 @@ rust_library(
         "depset.rs",
         "eval.rs",
         "instantiate.rs",
+        "json_module.rs",
         "label_value.rs",
         "native_rules.rs",
         "opaque.rs",
@@ -22,6 +23,7 @@ rust_library(
         "rule_value.rs",
         "select.rs",
         "symbolic_macro.rs",
+        "toolchain_type.rs",
         "starlark.rs",
     ],
     crate_name = "bazel_starlark",
@@ -33,9 +35,15 @@ rust_library(
         "//buildbox/intern",
         "@crates//:allocative",
         "@crates//:anyhow",
+        "@crates//:serde_json",
         "@crates//:starlark",
         "@crates//:thiserror",
     ],
+)
+
+rust_test(
+    name = "starlark_unit_test",
+    crate = ":starlark",
 )
 
 rust_test(

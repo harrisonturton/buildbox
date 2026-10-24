@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::Instrument;
 
-/// The Bazel version these commands behave like, which `version` reports.
-pub const BAZEL_VERSION: &str = "8.8.1";
+pub use bazel_starlark::BAZEL_VERSION;
 
 /// A command line to run, and where it was run from.
 pub struct Invocation {

@@ -56,9 +56,8 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
                 "default_testonly" => builder.args.default_testonly = value.to_bool(),
                 "default_deprecation" => builder.args.default_deprecation = value.unpack_str().map(str::to_string),
                 "features" => builder.args.features = convert::strings(value).unwrap_or_default(),
-                "default_applicable_licenses" | "default_package_metadata" => {
-                    builder.args.default_applicable_licenses = labels(value, &parser)?
-                }
+                "default_applicable_licenses" => builder.args.default_applicable_licenses = labels(value, &parser)?,
+                "default_package_metadata" => builder.args.default_package_metadata = labels(value, &parser)?,
                 "licenses" | "distribs" | "default_compatible_with" | "default_restricted_to" | "default_hdrs_check"
                 | "default_copts" => {}
                 other => anyhow::bail!("package() got an unexpected keyword argument '{other}'"),
@@ -142,6 +141,26 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
         Ok(format!("@{}", context.build_package("repository_name()")?.repo))
     }
 
+    /// The name of the module the package's repository belongs to, or
+    /// `None`.
+    fn module_name<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        let context = EvalContext::get(eval)?;
+        Ok(match &context.module {
+            Some((name, _)) => eval.heap().alloc(name.as_str()),
+            None => Value::new_none(),
+        })
+    }
+
+    /// The version of the module the package's repository belongs to, or
+    /// `None`.
+    fn module_version<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        let context = EvalContext::get(eval)?;
+        Ok(match &context.module {
+            Some((_, version)) => eval.heap().alloc(version.as_str()),
+            None => Value::new_none(),
+        })
+    }
+
     /// The canonical name of the package's repository.
     fn repo_name(eval: &mut Evaluator<'_, '_, '_>) -> anyhow::Result<String> {
         let context = EvalContext::get(eval)?;
@@ -161,8 +180,17 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
     }
 
     /// The attributes of a rule already defined in this package, or `None`.
+    /// In a module extension, the repositories it has defined so far.
     fn existing_rule<'v>(#[starlark(require = pos)] name: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
         let context = EvalContext::get(eval)?;
+        if let Some(repos) = &context.repos {
+            let defined = repos.borrow().iter().any(|repo| repo.name == name);
+            if !defined {
+                return Ok(Value::new_none());
+            }
+            let heap = eval.heap();
+            return Ok(heap.alloc(AllocDict([("name", heap.alloc(name))])));
+        }
         let builder = context.package_builder("existing_rule()")?;
         let Some(Target::Rule(rule)) = builder.target(Symbol::intern(name)) else {
             return Ok(Value::new_none());
@@ -173,6 +201,12 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
     /// Every rule already defined in this package, by name.
     fn existing_rules<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
         let context = EvalContext::get(eval)?;
+        if let Some(repos) = &context.repos {
+            let heap = eval.heap();
+            let names: Vec<String> = repos.borrow().iter().map(|repo| repo.name.clone()).collect();
+            let entries = names.iter().map(|name| (name.as_str(), heap.alloc(AllocDict([("name", heap.alloc(name.as_str()))]))));
+            return Ok(heap.alloc(AllocDict(entries.collect::<Vec<_>>())));
+        }
         let builder = context.package_builder("existing_rules()")?;
         let heap = eval.heap();
         let rules: Vec<(&str, Value<'v>)> = builder

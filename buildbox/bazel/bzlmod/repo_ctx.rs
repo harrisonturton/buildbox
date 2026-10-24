@@ -213,8 +213,11 @@ fn run_rule(
     let mut context = EvalContext::new(FileKind::Bzl, spec.bzl);
     context.mappings = mappings.clone();
     Module::with_temp_heap(|env| -> anyhow::Result<()> {
-        env.import_public_symbols(&module.module);
-        let value = env.get(&spec.rule).ok_or_else(|| anyhow::anyhow!("{} doesn't export '{}'", spec.bzl, spec.rule))?;
+        let (value, _) = module
+            .module
+            .get_any_visibility(&spec.rule)
+            .map_err(|_| anyhow::anyhow!("{} doesn't export '{}'", spec.bzl, spec.rule))?;
+        let value = env.heap().access_owned_frozen_value(&value);
         let Some(rule) = RepositoryRule::from_value(value) else {
             anyhow::bail!("{what} isn't a repository rule");
         };

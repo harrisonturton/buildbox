@@ -3,7 +3,7 @@
 use crate::label_value::LabelValue;
 use crate::select::{Select, selector_parts};
 use bazel_label::{Label, LabelContext, PackageId, RepoMapping};
-use bazel_packages::{AttrType, AttrValue, Select as SelectValue, SelectorPart};
+use bazel_packages::{AttrType, AttrValue, DEFAULT_CONDITION, Select as SelectValue, SelectorPart};
 use intern::Symbol;
 use starlark::values::dict::{AllocDict, DictRef};
 use starlark::values::list::{AllocList, ListRef};
@@ -22,6 +22,7 @@ impl LabelParser<'_> {
         let context = LabelContext {
             package: self.package,
             mapping: self.mapping,
+            lenient: true,
         };
         Ok(Label::parse(text, &context)?)
     }
@@ -59,7 +60,10 @@ pub fn attr_value(value: Value<'_>, ty: AttrType, parser: &LabelParser<'_>, attr
         };
         let mut branches = Vec::with_capacity(select.branches.len());
         for (condition, value) in &select.branches {
-            let condition = parser.label(*condition)?;
+            let condition = match condition.unpack_str() {
+                Some(DEFAULT_CONDITION) => Label::parse_canonical(DEFAULT_CONDITION)?,
+                _ => parser.label(*condition)?,
+            };
             let value = if value.is_none() {
                 AttrValue::None
             } else {

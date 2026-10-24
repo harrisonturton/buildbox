@@ -44,23 +44,57 @@ impl<'v> StarlarkValue<'v> for Opaque {
         true
     }
 
-    fn invoke(&self, _me: Value<'v>, _args: &Arguments<'v, '_>, eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<Value<'v>> {
+    fn invoke(&self, _me: Value<'v>, args: &Arguments<'v, '_>, eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<Value<'v>> {
+        if self.type_name == "_builtins.toplevel.config_common.toolchain_type" {
+            return builtins_toolchain_type(args, eval).map_err(starlark::Error::new_other);
+        }
         Ok(eval.heap().alloc(Opaque::new(&format!("{}()", self.type_name))))
+    }
+
+    fn iterate_collect(&self, _heap: Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
+        Ok(Vec::new())
+    }
+
+    fn length(&self) -> starlark::Result<i32> {
+        Ok(0)
+    }
+
+    fn is_in(&self, _other: Value<'v>) -> starlark::Result<bool> {
+        Ok(false)
+    }
+
+    fn to_bool(&self) -> bool {
+        true
     }
 }
 
-/// The builtin namespaces and providers `.bzl` files can name, stood in for
-/// by opaque values while loading.
+/// `_builtins.toplevel.config_common.toolchain_type`, which the builtin
+/// rules use to name the toolchains they need, as the real function.
+fn builtins_toolchain_type<'v>(args: &Arguments<'v, '_>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+    let positions: Vec<Value<'v>> = args.positions(eval.heap()).map_err(|error| anyhow::anyhow!("{error}"))?.collect();
+    let names = args.names_map().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let Some(name) = positions.first().copied() else {
+        anyhow::bail!("toolchain_type() takes a label");
+    };
+    let mandatory = names
+        .iter()
+        .find(|(key, _)| key.as_str() == "mandatory")
+        .map(|(_, value)| value.to_bool())
+        .unwrap_or(true);
+    let toolchain_type = crate::toolchain_type::toolchain_type(name, mandatory, eval)?;
+    Ok(eval.heap().alloc(toolchain_type))
+}
+
+/// The builtin namespaces and providers Bazel 8 gives `.bzl` files, stood
+/// in for by opaque values while loading. Those Bazel 8 moved out to rule
+/// sets, such as `JavaInfo` and `PyInfo`, are deliberately missing, since
+/// rule sets check for them to decide whether to define their own.
 pub const BUILTIN_NAMESPACES: &[&str] = &[
     "platform_common",
-    "config_common",
     "coverage_common",
     "testing",
     "apple_common",
     "cc_common",
-    "java_common",
-    "android_common",
-    "py_common",
     "proto_common_do_not_use",
     "config",
     "proto",
@@ -70,16 +104,10 @@ pub const BUILTIN_NAMESPACES: &[&str] = &[
     "InstrumentedFilesInfo",
     "CcInfo",
     "CcToolchainConfigInfo",
+    "CcSharedLibraryInfo",
+    "CcSharedLibraryHintInfo",
     "DebugPackageInfo",
-    "JavaInfo",
-    "JavaPluginInfo",
-    "ProguardSpecProvider",
-    "PyInfo",
-    "PyRuntimeInfo",
-    "ProtoInfo",
     "PackageSpecificationInfo",
     "AnalysisTestResultInfo",
-    "cc_proto_aspect",
-    "java_proto_common",
     "Actions",
 ];

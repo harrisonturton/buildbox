@@ -56,7 +56,8 @@ fn workspace() -> tempfile::TempDir {
 fn graph(engine: &Engine, root: &Path) -> Graph {
     let globals = Globals::new()
         .with(bazel_fs::workspace(root))
-        .with(Arc::new(Repositories(Arc::new(MainOnly))));
+        .with(Arc::new(Repositories(Arc::new(MainOnly))))
+        .with(Arc::new(bazel_loading::BuiltinsDir(None)));
     engine.graph(globals)
 }
 

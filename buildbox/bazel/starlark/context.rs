@@ -37,6 +37,8 @@ pub struct EvalContext {
     /// The package a BUILD file is defining.
     pub package: Option<RefCell<PackageBuilder>>,
     pub globber: Option<Box<dyn Globber>>,
+    /// The name and version of the module the file's repository belongs to.
+    pub module: Option<(String, String)>,
     /// The repositories a module extension defines.
     pub repos: Option<RefCell<Vec<crate::repo_api::RepoDefinition>>>,
     /// What `print()` printed.
@@ -52,6 +54,7 @@ impl EvalContext {
             package: None,
             globber: None,
             repos: None,
+            module: None,
             printed: RefCell::new(Vec::new()),
         }
     }
@@ -115,6 +118,7 @@ impl EvalContext {
         let context = LabelContext {
             package: caller.package,
             mapping: &*mapping,
+            lenient: false,
         };
         Ok(Label::parse(text, &context)?)
     }

@@ -42,6 +42,20 @@ pub struct LabelError {
 pub struct LabelContext<'a> {
     pub package: PackageId,
     pub mapping: &'a dyn RepoMapping,
+    /// Whether a repository the mapping doesn't know is an error, or names
+    /// an [unknown](RepoName::unknown) repository that is only an error if
+    /// it's used, as attribute values' labels do.
+    pub lenient: bool,
+}
+
+impl<'a> LabelContext<'a> {
+    pub fn new(package: PackageId, mapping: &'a dyn RepoMapping) -> LabelContext<'a> {
+        LabelContext {
+            package,
+            mapping,
+            lenient: false,
+        }
+    }
 }
 
 impl PackageId {
@@ -88,10 +102,7 @@ impl Label {
     /// Parse a label in canonical form: `@@repo//package:name`, or
     /// `//package:name` in the main repository.
     pub fn parse_canonical(text: &str) -> Result<Label, LabelError> {
-        let context = LabelContext {
-            package: PackageId::new(RepoName::MAIN, PathId::ROOT),
-            mapping: &repo::NoMapping,
-        };
+        let context = LabelContext::new(PackageId::new(RepoName::MAIN, PathId::ROOT), &repo::NoMapping);
         if !text.starts_with("@@") && !text.starts_with("//") {
             return Err(error(text, "a canonical label starts with '@@' or '//'"));
         }
@@ -130,6 +141,9 @@ fn split_repo<'t>(text: &'t str, context: &LabelContext<'_>) -> Result<(Option<R
     }
     repo::validate(name).map_err(|reason| error(text, &reason))?;
     let Some(repo) = context.mapping.resolve(name) else {
+        if context.lenient {
+            return Ok((Some(RepoName::unknown(name, context.package.repo)), rest));
+        }
         return Err(error(text, &format!("no repository visible as '@{name}' from {}", context.package.repo.describe())));
     };
     Ok((Some(repo), rest))

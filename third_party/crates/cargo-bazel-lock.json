@@ -1,5 +1,5 @@
 {
-  "checksum": "1f6221f62444adee27b885eb4d9227e1d9afa1b8eae22956eb2f7f43a67b3c2f",
+  "checksum": "e3b6836b399199ee7a4c71e8072d2dedff6c42f61c6e7c484f955cea1ed678bf",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -10678,11 +10678,21 @@
           "alloc",
           "arbitrary_precision",
           "default",
+          "indexmap",
+          "preserve_order",
           "raw_value",
           "std"
         ],
         "deps": {
           "common": [
+            {
+              "id": "foldhash 0.2.0",
+              "target": "foldhash"
+            },
+            {
+              "id": "indexmap 2.14.2",
+              "target": "indexmap"
+            },
             {
               "id": "itoa 1.0.18",
               "target": "itoa"

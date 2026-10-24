@@ -1,6 +1,6 @@
 use bazel_label::{Label, PackageId};
 use bazel_packages::{AttrValue, Package, SelectorPart, Target};
-use bazel_starlark::{EvalContext, FileKind, Globber, Loads, PackageBuilder, eval_build, eval_bzl, parse};
+use bazel_starlark::{BUILD_GLOBALS, BZL_GLOBALS, EvalContext, FileKind, Globber, Loads, PackageBuilder, eval_build, eval_bzl, parse};
 use intern::Symbol;
 use std::collections::HashMap;
 
@@ -68,7 +68,7 @@ exports_files(["exported.txt"])
 fn load_package() -> Package {
     let defs_label = label("//pkg:defs.bzl");
     let defs = parse(defs_label, DEFS.to_string()).unwrap();
-    let (defs_module, _) = eval_bzl(defs, &Loads { modules: HashMap::new() }, EvalContext::new(FileKind::Bzl, defs_label)).unwrap();
+    let (defs_module, _) = eval_bzl(defs, &BZL_GLOBALS, &Loads { modules: HashMap::new() }, EvalContext::new(FileKind::Bzl, defs_label)).unwrap();
 
     let build_label = label("//pkg:BUILD");
     let build = parse(build_label, BUILD.to_string()).unwrap();
@@ -78,7 +78,7 @@ fn load_package() -> Package {
     let mut context = EvalContext::new(FileKind::Build, build_label);
     context.globber = Some(Box::new(FakeGlobber(vec!["x.c", "y.c", "z.h"])));
     let builder = PackageBuilder::new(PackageId::main("pkg").unwrap(), Symbol::intern("BUILD"));
-    let (package, _) = eval_build(build, &loads, context, builder);
+    let (package, _) = eval_build(build, &BUILD_GLOBALS, &loads, context, builder);
     package
 }
 
@@ -135,7 +135,7 @@ fn errors_keep_earlier_targets() {
     let build = parse(build_label, "filegroup(name = 'ok')\nfilegroup(name = 'bad', nope = 1)\n".to_string()).unwrap();
     let context = EvalContext::new(FileKind::Build, build_label);
     let builder = PackageBuilder::new(PackageId::main("pkg").unwrap(), Symbol::intern("BUILD"));
-    let (package, _) = eval_build(build, &Loads { modules: HashMap::new() }, context, builder);
+    let (package, _) = eval_build(build, &BUILD_GLOBALS, &Loads { modules: HashMap::new() }, context, builder);
     assert!(package.target(Symbol::intern("ok")).is_some());
     assert_eq!(package.errors.len(), 1);
     assert!(package.errors[0].contains("no such attribute 'nope'"), "{}", package.errors[0]);

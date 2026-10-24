@@ -27,6 +27,9 @@ pub struct RuleClass {
     /// Outputs every rule of the class declares, as attribute name and file
     /// name template, such as `("out", "%{name}.txt")`.
     pub outputs: Vec<(Symbol, String)>,
+    /// The toolchain types the rule's implementation resolves toolchains
+    /// for, which `query` counts as dependencies.
+    pub toolchain_types: Vec<Label>,
 }
 
 /// One attribute a rule class takes.

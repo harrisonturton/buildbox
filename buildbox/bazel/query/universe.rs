@@ -186,7 +186,11 @@ impl<C: Compute> Universe<C> {
         match target.target() {
             Target::Rule(rule) => {
                 let class = self.rule_class(target.package().rule_class(rule)).await?;
-                Ok(rule_deps(rule, &class, &self.options))
+                let mut deps = rule_deps(rule, &class, &self.options);
+                package_default_deps(target.package(), rule, class.kind, &mut deps);
+                deps.sort();
+                deps.dedup();
+                Ok(deps)
             }
             Target::OutputFile { rule, .. } => Ok(vec![target.package().label(*rule)]),
             Target::SourceFile(_) => Ok(Vec::new()),
@@ -199,6 +203,7 @@ impl<C: Compute> Universe<C> {
         let context = LabelContext {
             package: self.working_package,
             mapping: &*self.main_mapping,
+            lenient: false,
         };
         let pattern = TargetPattern::parse(text, &context).map_err(|error| QueryError(error.to_string()))?;
         match pattern {
@@ -284,6 +289,7 @@ pub fn rule_deps(rule: &Rule, class: &RuleClass, options: &QueryOptions) -> Vec<
             value.labels(&mut labels);
         }
     }
+    labels.extend(class.toolchain_types.iter().copied());
     let mut conditions = Vec::new();
     for (_, value) in &rule.attrs {
         value.conditions(&mut conditions);
@@ -292,6 +298,35 @@ pub fn rule_deps(rule: &Rule, class: &RuleClass, options: &QueryOptions) -> Vec<
     labels.sort();
     labels.dedup();
     labels
+}
+
+/// Rules used to resolve dependencies, which package defaults such as
+/// licenses don't apply to.
+const DEPENDENCY_RESOLUTION_RULES: [&str; 7] = [
+    "config_setting",
+    "constraint_setting",
+    "constraint_value",
+    "platform",
+    "toolchain",
+    "toolchain_type",
+    "alias",
+];
+
+/// The dependencies a rule gets from its package's defaults: the
+/// licenses `package(default_applicable_licenses = ...)` applies to rules
+/// that don't set their own, other than the licenses themselves and rules
+/// used to resolve dependencies.
+fn package_default_deps(package: &Package, rule: &Rule, kind: intern::Symbol, deps: &mut Vec<Label>) {
+    let defaults = &package.args.default_applicable_licenses;
+    if defaults.is_empty() || DEPENDENCY_RESOLUTION_RULES.contains(&kind.as_str()) {
+        return;
+    }
+    if defaults.contains(&package.label(rule.name)) {
+        return;
+    }
+    if rule.attr(intern::Symbol::intern("applicable_licenses")).is_none() {
+        deps.extend(defaults.iter().copied());
+    }
 }
 
 fn follows(attr: &AttrSchema, options: &QueryOptions) -> bool {

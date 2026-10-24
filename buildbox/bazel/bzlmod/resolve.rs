@@ -61,6 +61,7 @@ impl IncludeReader for Includes {
         let context = LabelContext {
             package: PackageId::new(RepoName::MAIN, PathId::ROOT),
             mapping: &mapping,
+            lenient: false,
         };
         let label = Label::parse(label, &context)?;
         if !label.repo().is_main() {
@@ -454,6 +455,19 @@ fn reachable(
     Ok(modules)
 }
 
+/// `prefix`, or, if another extension of the same name in the same
+/// repository already has it, `prefix2`, `prefix3` and so on, in order of
+/// first use, as Bazel names them.
+fn unique_prefix(extensions: &[ExtensionInfo], prefix: &str) -> String {
+    if !extensions.iter().any(|extension| extension.prefix == prefix) {
+        return prefix.to_string();
+    }
+    (2..)
+        .map(|counter| format!("{prefix}{counter}"))
+        .find(|candidate| !extensions.iter().any(|extension| &extension.prefix == candidate))
+        .expect("some counter is free")
+}
+
 /// Every module extension used, with the canonical-name prefix of its
 /// repositories.
 fn extensions(modules: &[ResolvedModule]) -> Result<Vec<ExtensionInfo>, SkyError> {
@@ -463,6 +477,7 @@ fn extensions(modules: &[ResolvedModule]) -> Result<Vec<ExtensionInfo>, SkyError
         let context = LabelContext {
             package: PackageId::new(module.repo, PathId::ROOT),
             mapping: &mapping,
+            lenient: false,
         };
         for (usage_index, usage) in module.file.extension_usages.iter().enumerate() {
             let bzl = Label::parse(&usage.bzl, &context)
@@ -481,13 +496,16 @@ fn extensions(modules: &[ResolvedModule]) -> Result<Vec<ExtensionInfo>, SkyError
             }
             match extensions.iter_mut().find(|e| e.bzl == bzl && e.name == usage.name && !e.isolated) {
                 Some(extension) => extension.users.push(user),
-                None => extensions.push(ExtensionInfo {
-                    bzl,
-                    name: usage.name.clone(),
-                    prefix: format!("{}+{}", bzl.repo(), usage.name),
-                    users: vec![user],
-                    isolated: false,
-                }),
+                None => {
+                    let prefix = unique_prefix(&extensions, &format!("{}+{}", bzl.repo(), usage.name));
+                    extensions.push(ExtensionInfo {
+                        bzl,
+                        name: usage.name.clone(),
+                        prefix,
+                        users: vec![user],
+                        isolated: false,
+                    });
+                }
             }
         }
     }

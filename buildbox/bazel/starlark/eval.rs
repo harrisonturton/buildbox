@@ -2,7 +2,8 @@
 
 use crate::context::{EvalContext, FileKind};
 use crate::package_builder::PackageBuilder;
-use crate::{BUILD_GLOBALS, BZL_GLOBALS, dialect};
+use crate::dialect;
+use starlark::environment::Globals;
 use bazel_label::Label;
 use bazel_packages::Package;
 use starlark::environment::{FrozenModule, Module};
@@ -63,7 +64,7 @@ impl PrintHandler for Printer<'_> {
 }
 
 /// Evaluate a `.bzl` file, returning its frozen module and what it printed.
-pub fn eval_bzl(ast: AstModule, loads: &Loads<'_>, context: EvalContext) -> Result<(FrozenModule, Vec<String>), EvalError> {
+pub fn eval_bzl(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: EvalContext) -> Result<(FrozenModule, Vec<String>), EvalError> {
     debug_assert_eq!(context.kind, FileKind::Bzl);
     Module::with_temp_heap(|module| {
         {
@@ -72,7 +73,7 @@ pub fn eval_bzl(ast: AstModule, loads: &Loads<'_>, context: EvalContext) -> Resu
             eval.extra = Some(&context);
             eval.set_loader(loads);
             eval.set_print_handler(&printer);
-            eval.eval_module(ast, &BZL_GLOBALS).map_err(EvalError::new)?;
+            eval.eval_module(ast, globals).map_err(EvalError::new)?;
         }
         let frozen = module.freeze().map_err(|error| EvalError::new(format!("{error:?}")))?;
         Ok((frozen, context.printed.take()))
@@ -82,7 +83,13 @@ pub fn eval_bzl(ast: AstModule, loads: &Loads<'_>, context: EvalContext) -> Resu
 /// Evaluate a BUILD file into a package, and what it printed. An error
 /// partway through still returns the targets defined before it, with the
 /// error recorded in the package.
-pub fn eval_build(ast: AstModule, loads: &Loads<'_>, mut context: EvalContext, builder: PackageBuilder) -> (Package, Vec<String>) {
+pub fn eval_build(
+    ast: AstModule,
+    globals: &Globals,
+    loads: &Loads<'_>,
+    mut context: EvalContext,
+    builder: PackageBuilder,
+) -> (Package, Vec<String>) {
     debug_assert_eq!(context.kind, FileKind::Build);
     context.package = Some(std::cell::RefCell::new(builder));
     let result = Module::with_temp_heap(|module| {
@@ -91,7 +98,7 @@ pub fn eval_build(ast: AstModule, loads: &Loads<'_>, mut context: EvalContext, b
         eval.extra = Some(&context);
         eval.set_loader(loads);
         eval.set_print_handler(&printer);
-        eval.eval_module(ast, &BUILD_GLOBALS).map(|_| ()).map_err(EvalError::new)
+        eval.eval_module(ast, globals).map(|_| ()).map_err(EvalError::new)
     });
     let printed = context.printed.take();
     let mut builder = context.package.take().expect("set above").into_inner();

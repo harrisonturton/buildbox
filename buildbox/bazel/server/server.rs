@@ -19,7 +19,7 @@ pub use service::BazelService;
 pub use workspace::{Workspace, Workspaces, find_root};
 
 use bazel_bzlmod::{BzlmodConfig, BzlmodRepositories};
-use bazel_loading::Repositories;
+use bazel_loading::{BuiltinsDir, Repositories};
 use skyframe::{Engine, EngineConfig, Globals};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,14 +39,22 @@ pub struct BazelServer {
 
 impl BazelServer {
     pub fn new(config: ServerConfig) -> BazelServer {
-        let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), None);
+        let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), Some(BAZEL_VERSION));
         match &bazel_tools {
             Some(dir) => tracing::info!("using @bazel_tools from {}", dir.display()),
             None => tracing::warn!("no @bazel_tools found; set BB_BAZEL_TOOLS"),
         }
+        let builtins = bazel_tools
+            .as_deref()
+            .and_then(|tools| repos::find_builtins(tools, &config.bazel_dir.join("builtins")));
+        match &builtins {
+            Some(dir) => tracing::info!("using @_builtins from {}", dir.display()),
+            None => tracing::warn!("no @_builtins found; native rules such as cc_library are unavailable"),
+        }
         let services = Globals::new()
             .with(Arc::new(Repositories(Arc::new(BzlmodRepositories))))
-            .with(Arc::new(BzlmodConfig::new(config.bazel_dir.clone(), bazel_tools)));
+            .with(Arc::new(BzlmodConfig::new(config.bazel_dir.clone(), bazel_tools)))
+            .with(Arc::new(BuiltinsDir(builtins)));
         let engine = Engine::new(EngineConfig::default());
         BazelServer {
             config,

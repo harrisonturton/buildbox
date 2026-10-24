@@ -102,6 +102,7 @@ fn label_methods(builder: &mut MethodsBuilder) {
             &bazel_label::LabelContext {
                 package: this.0.package,
                 mapping: &*mapping,
+                lenient: false,
             },
         )?;
         Ok(LabelValue(label))

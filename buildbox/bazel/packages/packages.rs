@@ -40,6 +40,7 @@ pub struct PackageArgs {
     pub default_deprecation: Option<String>,
     pub features: Vec<String>,
     pub default_applicable_licenses: Vec<Label>,
+    pub default_package_metadata: Vec<Label>,
 }
 
 /// Something a label can name.

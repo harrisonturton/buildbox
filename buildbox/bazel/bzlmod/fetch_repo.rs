@@ -12,8 +12,9 @@ use skyframe::{encoded_value, Ctx, Key, SkyError};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The file marking a repository directory as completely fetched.
-const COMPLETE_MARKER: &str = ".bb_fetched";
+/// The files that mark a directory as a repository's root. A fetched
+/// repository without one gets an empty `REPO.bazel`, as Bazel gives it.
+const BOUNDARY_FILES: [&str; 4] = ["REPO.bazel", "MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"];
 
 /// A fetched repository's directory.
 ///
@@ -76,11 +77,22 @@ pub fn repo_dir(config: &BzlmodConfig, repo: RepoName, spec_bytes: &[u8]) -> Pat
     config.repos_dir.join(format!("{}-{}", repo, &digest[..16]))
 }
 
+/// The file beside a repository's directory that marks it completely
+/// fetched. It's outside the directory so the repository's own globs don't
+/// see it.
+fn complete_marker(dest: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.fetched", dest.display()))
+}
+
 /// Run `fetch` to fill a temporary directory, then move it into place,
 /// unless the repository was fetched before. Blocks.
 pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), SkyError> {
-    if dest.join(COMPLETE_MARKER).exists() {
+    let marker = complete_marker(dest);
+    if marker.exists() {
         return Ok(());
+    }
+    if dest.exists() {
+        let _ = std::fs::remove_dir_all(dest);
     }
     let parent = dest.parent().ok_or_else(|| SkyError::new("repository directory has no parent"))?;
     std::fs::create_dir_all(parent).map_err(|error| SkyError::transient(format!("failed to create {}: {error}", parent.display())))?;
@@ -91,13 +103,17 @@ pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) 
         let _ = std::fs::remove_dir_all(&temporary);
         return Err(SkyError::new(message));
     }
-    std::fs::write(temporary.join(COMPLETE_MARKER), b"").map_err(|error| SkyError::transient(error.to_string()))?;
+    if !BOUNDARY_FILES.iter().any(|name| temporary.join(name).exists()) {
+        let _ = std::fs::write(temporary.join("REPO.bazel"), b"");
+    }
     if std::fs::rename(&temporary, dest).is_err() {
         let _ = std::fs::remove_dir_all(&temporary);
-        if !dest.join(COMPLETE_MARKER).exists() {
+        if !marker.exists() {
             return Err(SkyError::transient(format!("failed to move fetched repository to {}", dest.display())));
         }
+        return Ok(());
     }
+    std::fs::write(&marker, b"").map_err(|error| SkyError::transient(format!("failed to write {}: {error}", marker.display())))?;
     Ok(())
 }
 
@@ -135,6 +151,7 @@ async fn read_label_patches(ctx: &Ctx, archive: &ArchiveSpec) -> Result<HashMap<
         let context = LabelContext {
             package: PackageId::new(RepoName::MAIN, PathId::ROOT),
             mapping: &mapping,
+            lenient: false,
         };
         let parsed = Label::parse(label, &context).map_err(|error| SkyError::new(error.to_string()))?;
         let path = parsed.package.path.join_path(PathId::parse(parsed.name.as_str()).map_err(|e| SkyError::new(e.to_string()))?);
@@ -178,7 +195,7 @@ fn fill_archive(
                 downloads
                     .download(std::slice::from_ref(&patch.url), integrity.as_ref(), &file)
                     .map_err(|error| error.to_string())?;
-                let contents = std::fs::read(&file).map_err(|error| error.to_string())?;
+                let contents = std::fs::read(&file).map_err(|error| format!("failed to read patch {}: {error}", file.display()))?;
                 let _ = std::fs::remove_file(&file);
                 contents
             }
@@ -187,9 +204,21 @@ fn fill_archive(
         bazel_fetch::apply_patch(dir, &text, archive.patch_strip as usize, &patch.url).map_err(|error| error.to_string())?;
     }
     if let Some(module_file) = module_file {
-        std::fs::write(dir.join("MODULE.bazel"), module_file).map_err(|error| error.to_string())?;
+        let path = dir.join("MODULE.bazel");
+        make_writable(&path);
+        std::fs::write(&path, module_file).map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     }
     Ok(())
+}
+
+/// Archives can contain read-only files that the registry's files replace.
+fn make_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o200);
+        let _ = std::fs::set_permissions(path, permissions);
+    }
 }
 
 fn parse_integrity(text: &str) -> Result<Option<Integrity>, String> {

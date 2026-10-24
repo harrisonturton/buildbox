@@ -47,4 +47,21 @@ impl RepositoryResolver for BzlmodRepositories {
             Err(SkyError::new(format!("no repository is visible as '@@{repo}'")))
         })
     }
+
+    fn module<'a>(&'a self, ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<Option<(String, String)>, SkyError>> {
+        Box::pin(async move {
+            let graph = ctx.compute(&DepGraphKey).await?;
+            let owner = match graph.module(repo) {
+                Some((index, _)) => Some(index),
+                None => graph
+                    .extension_of(repo)
+                    .and_then(|(extension, _)| graph.module(graph.extensions[extension].bzl.repo()))
+                    .map(|(index, _)| index),
+            };
+            Ok(owner.map(|index| {
+                let module = &graph.modules[index];
+                (module.name.clone(), module.version.clone())
+            }))
+        })
+    }
 }

@@ -5,11 +5,13 @@
 //! [`Repositories`] service, which a higher layer (such as Bzlmod)
 //! provides. Everything else is computed from files.
 
+mod builtins;
 mod bzl;
 mod package;
 mod recursive;
 mod rule_class;
 
+pub use builtins::{BUILTINS_REPO, Builtins, BuiltinsDir, BuiltinsKey, builtins_mapping};
 pub use bzl::{BzlLoadKey, BzlModule};
 pub use package::{LoadedPackage, PackageKey, PackageLookup, PackageLookupKey, display as display_package};
 pub use recursive::{PackagesUnderDirectory, PackagesUnderDirectoryKey, packages_beneath};
@@ -29,6 +31,13 @@ use std::sync::Arc;
 pub trait RepositoryResolver: Send + Sync + 'static {
     fn root<'a>(&'a self, ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<Root, SkyError>>;
     fn mapping<'a>(&'a self, ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<RepoMappingTable, SkyError>>;
+
+    /// The name and version of the module a repository belongs to, as
+    /// `module_name()` and `module_version()` give them.
+    fn module<'a>(&'a self, ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<Option<(String, String)>, SkyError>> {
+        let _ = (ctx, repo);
+        Box::pin(async { Ok(None) })
+    }
 }
 
 /// The graph service holding the [`RepositoryResolver`].
@@ -68,6 +77,10 @@ impl Key for RepoMappingKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<RepoMappingValue, SkyError> {
         let repositories = ctx.global::<Repositories>()?;
+        if self.0.as_str() == builtins::BUILTINS_REPO {
+            let bazel_tools = repositories.0.mapping(ctx, RepoName::new("bazel_tools")).await?;
+            return Ok(RepoMappingValue(builtins::builtins_mapping(&bazel_tools)));
+        }
         Ok(RepoMappingValue(repositories.0.mapping(ctx, self.0).await?))
     }
 }

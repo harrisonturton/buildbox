@@ -197,11 +197,11 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         Ok(os_struct(heap, &io_of(this)?.env))
     }
 
-    fn path<'v>(this: Value<'v>, #[starlark(require = pos)] path: Value<'v>) -> anyhow::Result<PathValue> {
+    fn path<'v>(this: Value<'v>, path: Value<'v>) -> anyhow::Result<PathValue> {
         Ok(PathValue(io_of(this)?.path(path)?))
     }
 
-    fn read<'v>(this: Value<'v>, #[starlark(require = pos)] path: Value<'v>, #[starlark(require = named)] watch: Option<Value<'v>>) -> anyhow::Result<String> {
+    fn read<'v>(this: Value<'v>, path: Value<'v>, #[starlark(require = named)] watch: Option<Value<'v>>) -> anyhow::Result<String> {
         let _ = watch;
         let path = io_of(this)?.path(path)?;
         std::fs::read_to_string(&path).map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))
@@ -209,7 +209,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
 
     fn file<'v>(
         this: Value<'v>,
-        #[starlark(require = pos)] path: Value<'v>,
+        path: Value<'v>,
         #[starlark(default = "")] content: &str,
         #[starlark(default = true)] executable: bool,
         #[starlark(default = true)] legacy_utf8: bool,
@@ -222,8 +222,8 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
 
     fn template<'v>(
         this: Value<'v>,
-        #[starlark(require = pos)] path: Value<'v>,
-        #[starlark(require = pos)] template: Value<'v>,
+        path: Value<'v>,
+        template: Value<'v>,
         substitutions: Option<Value<'v>>,
         #[starlark(default = true)] executable: bool,
         #[starlark(require = named)] watch_template: Option<Value<'v>>,
@@ -243,7 +243,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         Ok(NoneType)
     }
 
-    fn symlink<'v>(this: Value<'v>, #[starlark(require = pos)] target: Value<'v>, #[starlark(require = pos)] link_name: Value<'v>) -> anyhow::Result<NoneType> {
+    fn symlink<'v>(this: Value<'v>, target: Value<'v>, link_name: Value<'v>) -> anyhow::Result<NoneType> {
         let io = io_of(this)?;
         let target = io.path(target)?;
         let link = io.path(link_name)?;
@@ -255,7 +255,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         Ok(NoneType)
     }
 
-    fn delete<'v>(this: Value<'v>, #[starlark(require = pos)] path: Value<'v>) -> anyhow::Result<bool> {
+    fn delete<'v>(this: Value<'v>, path: Value<'v>) -> anyhow::Result<bool> {
         let path = io_of(this)?.path(path)?;
         let existed = path.symlink_metadata().is_ok();
         if path.is_dir() && !path.is_symlink() {
@@ -266,14 +266,14 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         Ok(existed)
     }
 
-    fn which<'v>(this: Value<'v>, #[starlark(require = pos)] program: &str) -> anyhow::Result<NoneOr<PathValue>> {
+    fn which<'v>(this: Value<'v>, program: &str) -> anyhow::Result<NoneOr<PathValue>> {
         Ok(match io_of(this)?.which(program) {
             Some(path) => NoneOr::Other(PathValue(path)),
             None => NoneOr::None,
         })
     }
 
-    fn getenv<'v>(this: Value<'v>, #[starlark(require = pos)] name: &str, default: Option<Value<'v>>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+    fn getenv<'v>(this: Value<'v>, name: &str, default: Option<Value<'v>>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         Ok(match io_of(this)?.env.get(name) {
             Some(value) => heap.alloc(value.as_str()),
             None => default.unwrap_or_else(Value::new_none),
@@ -282,7 +282,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
 
     fn execute<'v>(
         this: Value<'v>,
-        #[starlark(require = pos)] arguments: Value<'v>,
+        arguments: Value<'v>,
         #[starlark(default = 600)] timeout: i32,
         environment: Option<Value<'v>>,
         #[starlark(default = true)] quiet: bool,
@@ -335,7 +335,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
 
     fn download<'v>(
         this: Value<'v>,
-        #[starlark(require = pos)] url: Value<'v>,
+        url: Value<'v>,
         output: Option<Value<'v>>,
         #[starlark(default = "")] sha256: &str,
         #[starlark(default = false)] executable: bool,
@@ -369,7 +369,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
 
     fn download_and_extract<'v>(
         this: Value<'v>,
-        #[starlark(require = pos)] url: Value<'v>,
+        url: Value<'v>,
         output: Option<Value<'v>>,
         #[starlark(default = "")] sha256: &str,
         #[starlark(default = "")] r#type: &str,
@@ -408,7 +408,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
 
     fn extract<'v>(
         this: Value<'v>,
-        #[starlark(require = pos)] archive: Value<'v>,
+        archive: Value<'v>,
         output: Option<Value<'v>>,
         #[starlark(default = "")] strip_prefix: &str,
         #[starlark(require = named)] rename_files: Option<Value<'v>>,
@@ -432,7 +432,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
 
     fn patch<'v>(
         this: Value<'v>,
-        #[starlark(require = pos)] patch_file: Value<'v>,
+        patch_file: Value<'v>,
         #[starlark(default = 0)] strip: i32,
         #[starlark(require = named)] watch_patch: Option<Value<'v>>,
     ) -> anyhow::Result<NoneType> {
@@ -452,12 +452,12 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         Ok(NoneType)
     }
 
-    fn watch<'v>(this: Value<'v>, #[starlark(require = pos)] path: Value<'v>) -> anyhow::Result<NoneType> {
+    fn watch<'v>(this: Value<'v>, path: Value<'v>) -> anyhow::Result<NoneType> {
         let _ = (this, path);
         Ok(NoneType)
     }
 
-    fn watch_tree<'v>(this: Value<'v>, #[starlark(require = pos)] path: Value<'v>) -> anyhow::Result<NoneType> {
+    fn watch_tree<'v>(this: Value<'v>, path: Value<'v>) -> anyhow::Result<NoneType> {
         let _ = (this, path);
         Ok(NoneType)
     }

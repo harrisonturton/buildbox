@@ -32,6 +32,7 @@ impl Key for RepoSpecKey {
             let context = LabelContext {
                 package: PackageId::new(module.repo, PathId::ROOT),
                 mapping: &mapping,
+                lenient: false,
             };
             let bzl = Label::parse(&call.bzl, &context).map_err(|error| SkyError::new(error.to_string()))?;
             return Ok(RepoSpec::RepoRule(RepoRuleSpec {

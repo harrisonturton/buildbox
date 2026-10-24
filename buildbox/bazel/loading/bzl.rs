@@ -62,6 +62,7 @@ impl Key for BzlLoadKey {
         let loaded = load_all(ctx, label, &bazel_starlark::loads(&ast), &mapping.0).await?;
         let repos = transitive_repos(label.repo(), loaded.iter().map(|(_, module)| &**module));
         let mappings = mappings(ctx, &repos).await?;
+        let builtins = ctx.compute(&crate::BuiltinsKey).await?;
         let fingerprint = fingerprint(label, &source, &mapping.0, &loaded);
         let load_labels = loaded.iter().map(|(_, module)| module.label).collect();
 
@@ -71,7 +72,7 @@ impl Key for BzlLoadKey {
             };
             let mut context = EvalContext::new(FileKind::Bzl, label);
             context.mappings = mappings;
-            bazel_starlark::eval_bzl(ast, &loads, context)
+            bazel_starlark::eval_bzl(ast, &builtins.bzl, &loads, context)
         })
         .await?;
         let (module, printed) = module.map_err(|error| SkyError::new(error.message))?;
@@ -116,6 +117,7 @@ pub(crate) async fn load_all(
     let context = LabelContext {
         package: from.package,
         mapping,
+        lenient: false,
     };
     let mut keys = Vec::with_capacity(loads.len());
     for load in loads {

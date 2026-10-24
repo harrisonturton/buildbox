@@ -34,6 +34,16 @@ impl RepoName {
         self == RepoName::MAIN
     }
 
+    /// The name Bazel gives a repository that `from` can't see as
+    /// `@apparent`: a name no real repository has, so using it fails.
+    pub fn unknown(apparent: &str, from: RepoName) -> RepoName {
+        RepoName::new(&format!("[unknown repo '{apparent}' requested from @@{from}]"))
+    }
+
+    pub fn is_unknown(self) -> bool {
+        self.as_str().starts_with("[unknown repo")
+    }
+
     /// The repository, for messages: `the main repository` or `@@name`.
     pub fn describe(self) -> String {
         if self.is_main() {

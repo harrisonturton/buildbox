@@ -12,6 +12,7 @@ fn context(package: &str) -> LabelContext<'static> {
     LabelContext {
         package: PackageId::main(package).unwrap(),
         mapping: &mapping,
+        lenient: false,
     }
 }
 
@@ -43,6 +44,7 @@ fn repository_labels() {
     let in_repo = LabelContext {
         package: PackageId::new(RepoName::new("rules_rust+"), PathId::parse("rust").unwrap()),
         mapping: &mapping,
+        lenient: false,
     };
     assert_eq!(Label::parse("//x:y", &in_repo).unwrap().to_string(), "@@rules_rust+//x:y");
     assert_eq!(Label::parse(":y", &in_repo).unwrap().to_string(), "@@rules_rust+//rust:y");

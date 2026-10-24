@@ -9,6 +9,7 @@ pub mod convert;
 pub mod depset;
 pub mod eval;
 pub mod instantiate;
+pub mod json_module;
 pub mod label_value;
 pub mod native_rules;
 pub mod opaque;
@@ -18,14 +19,20 @@ pub mod repo_api;
 pub mod rule_value;
 pub mod select;
 pub mod symbolic_macro;
+pub mod toolchain_type;
 
 pub use context::{EvalContext, FileKind, Globber};
 pub use eval::{EvalError, Loads, eval_bzl, eval_build, loads, parse};
 pub use package_builder::PackageBuilder;
 
 use starlark::environment::{Globals, GlobalsBuilder, LibraryExtension};
+use starlark::values::{FrozenHeapRef, FrozenValue};
 use starlark::syntax::{Dialect, DialectTypes};
 use std::sync::LazyLock;
+
+/// The Bazel version these builtins behave like, which `native.bazel_version`
+/// and `bb version` report.
+pub const BAZEL_VERSION: &str = "8.8.1";
 
 /// The dialect BUILD and `.bzl` files are parsed with.
 pub fn dialect() -> Dialect {
@@ -42,30 +49,40 @@ pub fn dialect() -> Dialect {
 }
 
 fn standard() -> GlobalsBuilder {
-    GlobalsBuilder::extended_by(&[
+    let mut builder = GlobalsBuilder::extended_by(&[
         LibraryExtension::StructType,
-        LibraryExtension::Json,
         LibraryExtension::Print,
         LibraryExtension::Map,
         LibraryExtension::Filter,
         LibraryExtension::Partial,
         LibraryExtension::Debug,
         LibraryExtension::SetType,
-    ])
+    ]);
+    json_module::register(&mut builder);
+    builder
 }
 
-/// The globals of BUILD files.
-pub static BUILD_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
+/// Builtins defined in Starlark, as Bazel's `@_builtins` defines them,
+/// added to the globals: rules for BUILD files and `native`, and values
+/// for `.bzl` files.
+pub struct StarlarkBuiltins<'a> {
+    pub rules: Vec<(String, FrozenValue)>,
+    pub toplevels: Vec<(String, FrozenValue)>,
+    /// The heap the values are in, which the globals keep alive.
+    pub heap: &'a FrozenHeapRef,
+}
+
+fn build_globals_builder() -> GlobalsBuilder {
     let mut builder = standard()
         .with(build_api::build_functions)
         .with(select::select_function)
-        .with(label_value::label_constructor);
+        .with(label_value::label_constructor)
+        .with(depset::depset_function);
     native_rules::register(&mut builder);
-    builder.build()
-});
+    builder
+}
 
-/// The globals of `.bzl` files.
-pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
+fn bzl_globals_builder() -> GlobalsBuilder {
     let mut builder = standard()
         .with(select::select_function)
         .with(label_value::label_constructor)
@@ -76,13 +93,56 @@ pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
         .with(depset::depset_function)
         .with(repo_api::repo_functions);
     attr_module::register(&mut builder);
+    toolchain_type::register(&mut builder);
     for name in opaque::BUILTIN_NAMESPACES {
         let value = builder.alloc(opaque::Opaque::new(name));
         builder.set(name, value);
     }
+    builder
+}
+
+/// The globals of BUILD files, before builtins.
+pub static BUILD_GLOBALS: LazyLock<Globals> = LazyLock::new(|| build_globals_builder().build());
+
+/// The globals of `.bzl` files, before builtins. `@_builtins` itself is
+/// evaluated with these and a stand-in `_builtins` object.
+pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
+    let mut builder = bzl_globals_builder();
     builder.namespace("native", |native| {
         build_api::build_functions(native);
         native_rules::register(native);
+        native.set("bazel_version", BAZEL_VERSION);
     });
+    let value = builder.alloc(opaque::Opaque::new("_builtins"));
+    builder.set("_builtins", value);
     builder.build()
 });
+
+/// The globals of BUILD files, with builtin rules.
+pub fn build_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
+    let mut builder = build_globals_builder();
+    builder.frozen_heap().add_reference(builtins.heap);
+    for (name, value) in &builtins.rules {
+        builder.set(name, *value);
+    }
+    builder.build()
+}
+
+/// The globals of `.bzl` files, with builtin rules and values.
+pub fn bzl_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
+    let mut builder = bzl_globals_builder();
+    builder.frozen_heap().add_reference(builtins.heap);
+    for (name, value) in &builtins.toplevels {
+        builder.set(name, *value);
+    }
+    builder.namespace("native", |native| {
+        build_api::build_functions(native);
+        native_rules::register(native);
+        native.set("bazel_version", BAZEL_VERSION);
+        native.frozen_heap().add_reference(builtins.heap);
+        for (name, value) in &builtins.rules {
+            native.set(name, *value);
+        }
+    });
+    builder.build()
+}
