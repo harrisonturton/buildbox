@@ -27,8 +27,9 @@ pub struct ProviderGen<V: ValueLifetimeless> {
     /// The allowed fields, if restricted.
     pub fields: Option<Vec<String>>,
     pub init: Option<V>,
-    /// Calling the provider runs `init`; calling the raw constructor doesn't.
-    pub raw: bool,
+    /// For a raw constructor, the provider it makes instances of, without
+    /// running its `init`.
+    pub of: Option<V>,
     #[freeze(identity)]
     #[allocative(skip)]
     #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
@@ -53,7 +54,7 @@ impl<'v, V: ValueLike<'v>> ProviderGen<V> {
         let provider = ProviderGen {
             fields,
             init: None,
-            raw: false,
+            of: None,
             definition: None,
             name: OnceLock::new(),
         };
@@ -100,13 +101,14 @@ where
     }
 
     fn invoke(&self, me: Value<'v>, args: &Arguments<'v, '_>, eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<Value<'v>> {
-        if let (Some(init), false) = (self.init, self.raw) {
+        let provider = self.of.map(|of| of.to_value()).unwrap_or(me);
+        if let (Some(init), None) = (self.init, self.of) {
             let result = eval.eval_function(init.to_value(), &args.positions(eval.heap())?.collect::<Vec<_>>(), &named(args)?)?;
             let Some(fields) = DictRef::from_value(result) else {
                 return Err(starlark::Error::new_other(anyhow::anyhow!("{}: init must return a dict", self.name())));
             };
             let fields = Fields::new(fields.iter().filter_map(|(k, v)| Some((k.unpack_str()?, v))));
-            return Ok(eval.heap().alloc(ProviderInstance { provider: me, fields }));
+            return Ok(eval.heap().alloc(ProviderInstance { provider, fields }));
         }
         let positional: Vec<Value<'v>> = args.positions(eval.heap())?.collect();
         let names = args.names_map()?;
@@ -138,7 +140,7 @@ where
             fields.push((name.as_str(), *value));
         }
         let fields = Fields::new(fields);
-        Ok(eval.heap().alloc(ProviderInstance { provider: me, fields }))
+        Ok(eval.heap().alloc(ProviderInstance { provider, fields }))
     }
 }
 
@@ -227,6 +229,22 @@ where
     /// asks.
     fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
         Ok(other.unpack_str().is_some_and(|name| self.fields.contains_key(name)))
+    }
+
+    /// An `OutputGroupInfo`'s group, by name, as `info["group"]` asks.
+    /// Other providers can't be indexed.
+    fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        let error = |message: String| starlark::Error::new_other(anyhow::anyhow!(message));
+        if self.provider_name() != "OutputGroupInfo" {
+            return Err(error(format!("type '{}' has no operator [](string)", self.provider_name())));
+        }
+        let Some(name) = index.unpack_str() else {
+            return Err(error(format!("output groups are indexed by name, not {}", index.get_type())));
+        };
+        match self.fields.get(name) {
+            Some(group) => Ok(group.to_value()),
+            None => Err(error(format!("Output group {name} not present"))),
+        }
     }
 }
 
@@ -342,7 +360,7 @@ pub(crate) fn provider_function(builder: &mut GlobalsBuilder) {
         let provider = Provider {
             fields: fields.clone(),
             init,
-            raw: false,
+            of: None,
             definition: Some(context.caller_file(eval)),
             name: OnceLock::new(),
         };
@@ -354,7 +372,7 @@ pub(crate) fn provider_function(builder: &mut GlobalsBuilder) {
         let raw = heap.alloc(Provider {
             fields,
             init: None,
-            raw: true,
+            of: Some(provider),
             definition: Some(context.caller_file(eval)),
             name: OnceLock::new(),
         });
