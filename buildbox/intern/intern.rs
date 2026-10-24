@@ -10,6 +10,7 @@ mod arena;
 mod blob;
 mod path;
 mod segvec;
+pub mod snapshot;
 mod symbol;
 mod table;
 

@@ -53,6 +53,23 @@ fn hash_entry(value: u64) -> u64 {
     value.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(26)
 }
 
+/// How many paths have been interned.
+pub(crate) fn count() -> u32 {
+    PATHS.len()
+}
+
+/// A path's parent's id, `NO_PARENT` for the root, and its name's.
+pub(crate) fn raw_entry(path: PathId) -> (u32, u32) {
+    let value = PATHS.value(path.0);
+    ((value >> 32) as u32, value as u32)
+}
+
+/// Intern the path with this parent and name, as [`raw_entry`] gave them.
+pub(crate) fn restore_entry(parent: u32, name: u32) -> PathId {
+    let name = Symbol::from_id(name).unwrap_or(Symbol::EMPTY);
+    intern_entry(&PATHS, parent, name)
+}
+
 fn intern_entry(table: &Table, parent: u32, name: Symbol) -> PathId {
     let value = pack(parent, name);
     PathId(table.intern(&EntryHashing, hash_entry(value), |v| v == value, || value))

@@ -92,6 +92,11 @@ impl Symbol {
     }
 }
 
+/// How many symbols have been interned.
+pub(crate) fn count() -> u32 {
+    SYMBOLS.table.len()
+}
+
 impl From<&str> for Symbol {
     fn from(s: &str) -> Symbol {
         Symbol::intern(s)
