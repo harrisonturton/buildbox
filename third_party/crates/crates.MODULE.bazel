@@ -151,6 +151,38 @@ crate.spec(
     version = "0.9.0",
 )
 
+# The engine behind bb's Bazel-compatible commands: compressing stored values,
+# fast hashing of interned ids, and the Starlark language.
+crate.spec(
+    package = "lz4_flex",
+    version = "0.11",
+)
+
+crate.spec(
+    package = "hashbrown",
+    version = "0.16",
+)
+
+crate.spec(
+    package = "rustc-hash",
+    version = "2",
+)
+
+crate.spec(
+    package = "starlark",
+    version = "0.14",
+)
+
+crate.spec(
+    package = "allocative",
+    version = "0.3",
+)
+
+crate.spec(
+    package = "regex",
+    version = "1",
+)
+
 # Resolved crate versions are pinned in these lockfiles. To update them, run:
 #   CARGO_BAZEL_REPIN=1 bazel build //...
 crate.from_specs(

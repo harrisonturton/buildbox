@@ -1,0 +1,27 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "intern",
+    srcs = [
+        "arena.rs",
+        "intern.rs",
+        "path.rs",
+        "segvec.rs",
+        "symbol.rs",
+        "table.rs",
+    ],
+    crate_root = "intern.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "@crates//:hashbrown",
+        "@crates//:rustc-hash",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "intern_test",
+    crate = ":intern",
+)

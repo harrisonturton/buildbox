@@ -34,6 +34,12 @@ alike.
   being attempted. Don't discard the underlying error.
 - **No blocking work on the async runtime.** Filesystem and process work runs
   on blocking threads (`tokio::task::spawn_blocking`, `tokio::process`).
+- **Document APIs, not implementations.** Give every module a short `//!`
+  comment and every public type and function a short `///` comment saying
+  what it is for, written as you go. Keep them concise. Avoid `//` comments
+  narrating implementation details inside function bodies; if code needs
+  explaining, prefer clearer code or put it in the API docs. Brief `SAFETY:`
+  notes on `unsafe` blocks are the exception.
 - Match the comment density, naming and idioms of the surrounding code.
 
 ## Repository layout
