@@ -93,12 +93,25 @@ impl<'v, V: ValueLike<'v>> DepsetGen<V> {
                 .all(|child| Depset::from_value(child.to_value()).is_none_or(|child| child.is_empty()))
     }
 
-    fn children(&self) -> impl Iterator<Item = &'v Depset<'v>> + '_ {
-        self.transitive.iter().filter_map(|child| Depset::from_value(child.to_value()))
+    /// The children not yet visited, marking them visited. A depset is
+    /// usually reachable along many paths, so visiting it once keeps
+    /// flattening linear in the size of the graph.
+    fn unvisited_children(&self, seen: &mut Seen<'v>) -> Vec<&'v Depset<'v>> {
+        let mut children = Vec::with_capacity(self.transitive.len());
+        for child in &self.transitive {
+            let child = child.to_value();
+            let Some(depset) = Depset::from_value(child) else {
+                continue;
+            };
+            if seen.visited.insert(child.identity()) {
+                children.push(depset);
+            }
+        }
+        children
     }
 
     fn postorder(&self, seen: &mut Seen<'v>, out: &mut Vec<Value<'v>>) {
-        for child in self.children() {
+        for child in self.unvisited_children(seen) {
             child.postorder(seen, out);
         }
         for value in &self.direct {
@@ -110,7 +123,7 @@ impl<'v, V: ValueLike<'v>> DepsetGen<V> {
         for value in &self.direct {
             seen.add(value.to_value(), out);
         }
-        for child in self.children() {
+        for child in self.unvisited_children(seen) {
             child.preorder(seen, out);
         }
     }
@@ -119,7 +132,7 @@ impl<'v, V: ValueLike<'v>> DepsetGen<V> {
         for value in self.direct.iter().rev() {
             seen.add(value.to_value(), out);
         }
-        for child in self.children().collect::<Vec<_>>().into_iter().rev() {
+        for child in self.unvisited_children(seen).into_iter().rev() {
             child.reverse_postorder(seen, out);
         }
     }
@@ -132,6 +145,8 @@ impl<'v, V: ValueLike<'v>> DepsetGen<V> {
 struct Seen<'v> {
     by_hash: HashMap<u32, Vec<Value<'v>>>,
     by_identity: std::collections::HashSet<starlark::values::ValueIdentity<'v>>,
+    /// The depsets already traversed.
+    visited: std::collections::HashSet<starlark::values::ValueIdentity<'v>>,
 }
 
 impl<'v> Seen<'v> {
