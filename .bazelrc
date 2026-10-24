@@ -6,3 +6,12 @@ build --incompatible_enable_proto_toolchain_resolution
 # Treat warnings in our Rust code as errors. Third-party crates are built with
 # capped lints, so this only affects code in this repository.
 build --@rules_rust//rust/settings:extra_rustc_flag=-Dwarnings
+
+# An optimized bb, for running and benchmarking: `bazel build --config=release`.
+# Fat LTO and one codegen unit per crate let LLVM optimize across the whole
+# program; x86-64-v3 (AVX2, any x86 CPU since about 2015) widens the
+# instructions it can use. Panics still unwind: the engine catches them.
+build:release -c opt
+build:release --@rules_rust//rust/settings:lto=fat
+build:release --@rules_rust//rust/settings:extra_rustc_flag=-Ccodegen-units=1
+build:release --@rules_rust//rust/settings:extra_rustc_flag=-Ctarget-cpu=x86-64-v3
