@@ -8,7 +8,7 @@ mod pattern;
 mod repo;
 
 pub use pattern::{PatternError, TargetPattern};
-pub use repo::{RepoMapping, RepoName};
+pub use repo::{RepoMapping, RepoMappingTable, RepoName};
 
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};

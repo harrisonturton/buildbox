@@ -1,0 +1,135 @@
+//! Creating a rule in the package being defined.
+
+use crate::context::EvalContext;
+use crate::convert::{self, LabelParser};
+use crate::select::selector_parts;
+use bazel_packages::{AttrType, AttrValue, Generator, Location, Rule, RuleClass, RuleClassRef};
+use intern::Symbol;
+use starlark::codemap::FileSpan;
+use starlark::eval::Evaluator;
+use starlark::values::Value;
+
+/// Create a rule of class `schema` from the keyword arguments of a call.
+pub fn instantiate<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    class: RuleClassRef,
+    schema: &RuleClass,
+    kwargs: &[(&str, Value<'v>)],
+) -> anyhow::Result<()> {
+    let context = EvalContext::get(eval)?;
+    let (location, generator) = call_site(eval);
+    let mut builder = context.package_builder(&format!("{}()", schema.kind))?;
+    let package = builder.id;
+    let mapping = context.mapping_for(package.repo);
+    let parser = LabelParser {
+        package,
+        mapping: &*mapping,
+    };
+
+    let name = rule_name(schema, kwargs)?;
+    let mut attrs = Vec::with_capacity(kwargs.len());
+    for (attr, value) in kwargs {
+        if *attr == "name" || value.is_none() {
+            continue;
+        }
+        let symbol = Symbol::intern(attr);
+        let Some(attr_schema) = schema.attr(symbol) else {
+            anyhow::bail!("{}: no such attribute '{attr}' in '{}' rule", package.label(name), schema.kind);
+        };
+        if !attr_schema.configurable && selector_parts(*value).is_some() {
+            anyhow::bail!("{}: attribute '{attr}' is not configurable", package.label(name));
+        }
+        let converted = convert::attr_value(*value, attr_schema.ty, &parser, attr)
+            .map_err(|error| anyhow::anyhow!("{}: {error}", package.label(name)))?;
+        attrs.push((symbol, converted));
+    }
+    check_mandatory(schema, &attrs, name, &package)?;
+
+    let outputs = outputs(schema, &attrs, name);
+    let rule = Rule {
+        name,
+        class: 0,
+        attrs,
+        location,
+        generator,
+        outputs,
+    };
+    builder.add_rule(class, rule)
+}
+
+fn rule_name(schema: &RuleClass, kwargs: &[(&str, Value<'_>)]) -> anyhow::Result<Symbol> {
+    let Some((_, name)) = kwargs.iter().find(|(attr, _)| *attr == "name") else {
+        anyhow::bail!("{}() missing mandatory argument 'name'", schema.kind);
+    };
+    let Some(name) = name.unpack_str() else {
+        anyhow::bail!("{}(): 'name' must be a string, not {}", schema.kind, name.get_type());
+    };
+    convert::target_name(name)
+}
+
+fn check_mandatory(schema: &RuleClass, attrs: &[(Symbol, AttrValue)], name: Symbol, package: &bazel_label::PackageId) -> anyhow::Result<()> {
+    for attr in &schema.attrs {
+        if !attr.mandatory || attr.name.as_str() == "name" {
+            continue;
+        }
+        if !attrs.iter().any(|(given, _)| *given == attr.name) {
+            anyhow::bail!("{}: missing value for mandatory attribute '{}' in '{}' rule", package.label(name), attr.name, schema.kind);
+        }
+    }
+    Ok(())
+}
+
+/// The files a rule declares: the values of its output attributes, and the
+/// class's predeclared outputs.
+fn outputs(schema: &RuleClass, attrs: &[(Symbol, AttrValue)], name: Symbol) -> Vec<Symbol> {
+    let mut outputs = Vec::new();
+    for (attr, value) in attrs {
+        let is_output = schema.attr(*attr).is_some_and(|attr| attr.ty.is_output());
+        if !is_output {
+            continue;
+        }
+        let mut labels = Vec::new();
+        match value {
+            AttrValue::Label(label) => labels.push(*label),
+            AttrValue::LabelList(list) => labels.extend(list),
+            _ => {}
+        }
+        outputs.extend(labels.into_iter().map(|label| label.name));
+    }
+    for (_, template) in &schema.outputs {
+        outputs.push(Symbol::intern(&template.replace("%{name}", name.as_str())));
+    }
+    outputs
+}
+
+/// Where the BUILD file called the rule, directly or through macros, and
+/// the outermost macro if there was one.
+fn call_site(eval: &Evaluator<'_, '_, '_>) -> (Location, Option<Generator>) {
+    let stack = eval.call_stack();
+    let Some(outermost) = stack.frames.first() else {
+        return (Location::default(), None);
+    };
+    let location = outermost.location.as_ref().map(location_of).unwrap_or_default();
+    if stack.frames.len() < 2 {
+        return (location, None);
+    }
+    let generator = Generator {
+        function: Symbol::intern(&outermost.name),
+        name: Symbol::EMPTY,
+        location,
+    };
+    (location, Some(generator))
+}
+
+fn location_of(span: &FileSpan) -> Location {
+    let resolved = span.resolve_span();
+    Location {
+        line: resolved.begin.line as u32 + 1,
+        column: resolved.begin.column as u32 + 1,
+    }
+}
+
+/// Whether an attribute type is a list that a rule may give as a select.
+pub fn is_list(ty: AttrType) -> bool {
+    matches!(ty, AttrType::StringList | AttrType::LabelList | AttrType::IntList | AttrType::OutputList)
+}

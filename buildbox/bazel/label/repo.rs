@@ -9,6 +9,12 @@ use std::fmt;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
 pub struct RepoName(Symbol);
 
+impl Default for RepoName {
+    fn default() -> RepoName {
+        RepoName::MAIN
+    }
+}
+
 impl RepoName {
     pub const MAIN: RepoName = RepoName(Symbol::EMPTY);
 
@@ -54,6 +60,35 @@ impl fmt::Debug for RepoName {
 /// names it uses, as in `@rules_rust//...`, to canonical names.
 pub trait RepoMapping: Send + Sync {
     fn resolve(&self, apparent: &str) -> Option<RepoName>;
+}
+
+/// A repository mapping as a table, sorted by apparent name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct RepoMappingTable {
+    /// The repository whose view this is.
+    pub repo: RepoName,
+    pub entries: Vec<(Symbol, RepoName)>,
+}
+
+impl RepoMappingTable {
+    pub fn new(repo: RepoName, mut entries: Vec<(Symbol, RepoName)>) -> RepoMappingTable {
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.dedup_by(|a, b| a.0 == b.0);
+        RepoMappingTable { repo, entries }
+    }
+
+    /// The apparent name `repo` has in this mapping, if it's visible.
+    pub fn apparent_name(&self, repo: RepoName) -> Option<Symbol> {
+        self.entries.iter().find(|(_, canonical)| *canonical == repo).map(|(apparent, _)| *apparent)
+    }
+}
+
+impl RepoMapping for RepoMappingTable {
+    fn resolve(&self, apparent: &str) -> Option<RepoName> {
+        let apparent = Symbol::get(apparent)?;
+        let index = self.entries.binary_search_by(|(name, _)| name.cmp(&apparent)).ok()?;
+        Some(self.entries[index].1)
+    }
 }
 
 /// A mapping that sees no other repositories.

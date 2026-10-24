@@ -1,0 +1,49 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "starlark",
+    srcs = [
+        "attr_module.rs",
+        "build_api.rs",
+        "bzl_api.rs",
+        "context.rs",
+        "convert.rs",
+        "eval.rs",
+        "instantiate.rs",
+        "label_value.rs",
+        "native_rules.rs",
+        "opaque.rs",
+        "package_builder.rs",
+        "provider.rs",
+        "rule_value.rs",
+        "select.rs",
+        "starlark.rs",
+    ],
+    crate_name = "bazel_starlark",
+    crate_root = "starlark.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/bazel/label",
+        "//buildbox/bazel/packages",
+        "//buildbox/intern",
+        "@crates//:allocative",
+        "@crates//:anyhow",
+        "@crates//:starlark",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "starlark_test",
+    srcs = ["tests.rs"],
+    deps = [
+        ":starlark",
+        "//buildbox/bazel/label",
+        "//buildbox/bazel/packages",
+        "//buildbox/intern",
+        "@crates//:anyhow",
+        "@crates//:starlark",
+    ],
+)
