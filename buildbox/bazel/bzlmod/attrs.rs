@@ -9,16 +9,24 @@ use bazel_starlark::repo_api::StarlarkAttr;
 use intern::PathId;
 use starlark::values::Value;
 
-/// Resolves label strings in attribute values.
+/// Resolves label strings in attribute values, relative to a package.
 pub struct AttrContext<'a> {
-    pub repo: RepoName,
+    pub package: PackageId,
     pub mapping: &'a dyn RepoMapping,
 }
 
-impl AttrContext<'_> {
+impl<'a> AttrContext<'a> {
+    /// Labels relative to a repository's root.
+    pub fn repo_root(repo: RepoName, mapping: &'a dyn RepoMapping) -> AttrContext<'a> {
+        AttrContext {
+            package: PackageId::new(repo, PathId::ROOT),
+            mapping,
+        }
+    }
+
     fn label(&self, text: &str) -> anyhow::Result<Label> {
         let context = LabelContext {
-            package: PackageId::new(self.repo, PathId::ROOT),
+            package: self.package,
             mapping: self.mapping,
             lenient: false,
         };

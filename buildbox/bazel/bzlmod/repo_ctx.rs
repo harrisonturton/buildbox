@@ -202,12 +202,10 @@ fn run_rule(
     let empty = Arc::new(RepoMappingTable::new(spec.base_repo, Vec::new()));
     let base_mapping = mappings.get(&spec.base_repo).cloned().unwrap_or_else(|| empty.clone());
     let rule_mapping = mappings.get(&spec.bzl.repo()).cloned().unwrap_or(empty);
-    let given = AttrContext {
-        repo: spec.base_repo,
-        mapping: &*base_mapping,
-    };
+    let given = AttrContext::repo_root(spec.base_repo, &*base_mapping);
+    // Defaults are relative to the file defining the rule.
     let defaults = AttrContext {
-        repo: spec.bzl.repo(),
+        package: spec.bzl.package,
         mapping: &*rule_mapping,
     };
     let what = format!("{}%{}", spec.bzl, spec.rule);

@@ -162,18 +162,16 @@ fn module_values<'v>(
         Some((owner, _)) => graph.module_mapping(owner),
         None => RepoMappingTable::new(info.bzl.repo(), Vec::new()),
     };
+    // Defaults are relative to the file defining the tag classes.
     let default_context = AttrContext {
-        repo: info.bzl.repo(),
+        package: info.bzl.package,
         mapping: &owner_mapping,
     };
     let mut values = Vec::with_capacity(by_module.len());
     for (module_index, usages) in by_module {
         let module = &graph.modules[module_index];
         let mapping = graph.module_mapping(module_index);
-        let attr_context = AttrContext {
-            repo: module.repo,
-            mapping: &mapping,
-        };
+        let attr_context = AttrContext::repo_root(module.repo, &mapping);
         let mut tags_by_class: Vec<(&str, Vec<Value<'v>>)> = tag_classes.iter().map(|(name, _)| (name.as_str(), Vec::new())).collect();
         for usage in usages {
             for tag in &module.file.extension_usages[usage].tags {
