@@ -2,3 +2,4 @@
 rust-project.json
 examples/helloworld/MODULE.bazel.lock
 .rules_rust_analyzer
+.claude/worktrees

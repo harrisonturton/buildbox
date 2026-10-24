@@ -1,2 +1,5 @@
 # Standalone modules, built on their own rather than as part of //...
 examples/helloworld
+
+# Agent worktrees, each a full checkout of this repository
+.claude/worktrees
