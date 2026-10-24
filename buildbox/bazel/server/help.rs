@@ -178,7 +178,7 @@ fn option_list(spec: &OptionSpec) -> String {
     for (name, kind) in spec.options() {
         let line = match kind {
             OptionKind::Bool => format!("  --[no]{name}\n"),
-            OptionKind::Value => format!("  --{name}\n"),
+            OptionKind::Value | OptionKind::Int => format!("  --{name}\n"),
             OptionKind::Multi => format!("  --{name} (may be used multiple times)\n"),
         };
         text.push_str(&line);

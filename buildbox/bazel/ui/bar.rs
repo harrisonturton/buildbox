@@ -18,10 +18,6 @@ pub enum Phase {
     Executing,
 }
 
-/// How many running actions the progress bar lists, one per line, when it's
-/// redrawn in place.
-const SAMPLED_ACTIONS: usize = 3;
-
 /// How long an action runs before the progress bar shows its time, unless
 /// it shows its runner, and so its time, anyway.
 const SHOW_TIME_AFTER_SECONDS: u64 = 3;
@@ -78,15 +74,16 @@ fn execution_lines(snapshot: &Snapshot, now: Option<Instant>, options: &UiOption
             let description = describe(oldest, now, rest.saturating_sub(more.len()));
             vec![format!("{prefix} {description}{more}")]
         }
-        _ => sampled_lines(prefix, &running, now, options.columns),
+        _ => sampled_lines(prefix, &running, now, options),
     }
 }
 
 /// The bar redrawn in place with several actions running: their count, then
 /// the oldest few, one per line.
-fn sampled_lines(prefix: String, running: &[&RunningAction], now: Option<Instant>, columns: usize) -> Vec<String> {
+fn sampled_lines(prefix: String, running: &[&RunningAction], now: Option<Instant>, options: &UiOptions) -> Vec<String> {
+    let columns = options.columns;
     let mut lines = vec![format!("{prefix} {}", count_actions(running))];
-    let shown = running.len().min(SAMPLED_ACTIONS);
+    let shown = running.len().min(options.actions_shown.max(1));
     for (index, action) in running.iter().take(shown).enumerate() {
         let last_of_more = index + 1 == shown && shown < running.len();
         let suffix = if last_of_more { AND_MORE } else { "" };
@@ -154,6 +151,7 @@ mod tests {
             cursor_control,
             show_progress: true,
             columns: 80,
+            actions_shown: 3,
         }
     }
 
@@ -227,6 +225,20 @@ mod tests {
         );
         let line = progress_bar(&Phase::Executing, &snapshot(running), now, &plain(false));
         assert_eq!(line, ["[1 / 3] Compiling a.cc; 2s linux-sandbox ... (4 actions, 3 running)"]);
+    }
+
+    #[test]
+    fn as_many_actions_are_listed_as_ui_actions_shown_says() {
+        let start = Instant::now();
+        let running: Vec<_> = (0..10).map(|index| action(&format!("Compiling {index}.cc"), start, Some("linux-sandbox"))).collect();
+        let mut options = plain(true);
+        options.actions_shown = 8;
+        let lines = progress_bar(&Phase::Executing, &snapshot(running.clone()), None, &options);
+        assert_eq!(lines.len(), 1 + 8);
+        assert!(lines[8].ends_with(" ..."));
+        options.actions_shown = 0;
+        let lines = progress_bar(&Phase::Executing, &snapshot(running), None, &options);
+        assert_eq!(lines.len(), 1 + 1);
     }
 
     #[test]

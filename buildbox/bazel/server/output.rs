@@ -66,12 +66,15 @@ impl Output {
     }
 
     /// Set how output looks from a command's `--color`, `--curses`,
-    /// `--[no]show_progress` and `--[no]verbose_failures`.
+    /// `--[no]show_progress`, `--ui_actions_shown` and
+    /// `--[no]verbose_failures`.
     pub async fn configure(&self, options: &ParsedOptions) {
         let mut ui = self.ui.lock().await;
         ui.failure_format.verbose = options.flag("verbose_failures", false);
-        let options = UiOptions::new(&ui.terminal, options.get("color"), options.get("curses"), options.flag("show_progress", true));
-        let cleared = ui.screen.set_options(options);
+        let mut ui_options = UiOptions::new(&ui.terminal, options.get("color"), options.get("curses"), options.flag("show_progress", true));
+        let actions_shown = options.int("ui_actions_shown", bazel_ui::DEFAULT_ACTIONS_SHOWN as i64);
+        ui_options.actions_shown = usize::try_from(actions_shown.max(1)).unwrap_or(bazel_ui::DEFAULT_ACTIONS_SHOWN);
+        let cleared = ui.screen.set_options(ui_options);
         ui.drawn.clear();
         ui.send_stderr(cleared).await;
     }

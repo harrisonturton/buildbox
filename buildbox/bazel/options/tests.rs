@@ -10,7 +10,17 @@ fn spec() -> OptionSpec {
         ("implicit_deps", OptionKind::Bool),
         ("output", OptionKind::Value),
         ("copt", OptionKind::Multi),
+        ("ui_actions_shown", OptionKind::Int),
     ])
+}
+
+#[test]
+fn integer_options_must_be_integers() {
+    let rc = RcFile::default();
+    let parsed = parse(&args("--ui_actions_shown=12"), &spec(), &rc, "build").unwrap();
+    assert_eq!(parsed.int("ui_actions_shown", 8), 12);
+    let error = parse(&args("--ui_actions_shown=many"), &spec(), &rc, "build").unwrap_err();
+    assert_eq!(error.to_string(), "While parsing option --ui_actions_shown=many: 'many' is not an int");
 }
 
 #[test]

@@ -41,7 +41,13 @@ pub struct UiOptions {
     pub show_progress: bool,
     /// How wide lines may be when the progress bar is redrawn in place.
     pub columns: usize,
+    /// How many running actions the progress bar lists when it's redrawn in
+    /// place: `--ui_actions_shown`, at least 1.
+    pub actions_shown: usize,
 }
+
+/// Bazel's default `--ui_actions_shown`.
+pub const DEFAULT_ACTIONS_SHOWN: usize = 8;
 
 /// The width Bazel assumes for a terminal whose width it doesn't know.
 const DEFAULT_COLUMNS: usize = 80;
@@ -60,6 +66,7 @@ impl UiOptions {
             cursor_control: tristate(curses, terminal.is_capable()),
             show_progress,
             columns,
+            actions_shown: DEFAULT_ACTIONS_SHOWN,
         }
     }
 

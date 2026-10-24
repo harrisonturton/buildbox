@@ -15,6 +15,8 @@ pub enum OptionKind {
     Bool,
     /// `--flag=value` or `--flag value`; the last one given wins.
     Value,
+    /// A [`OptionKind::Value`] that must be an integer.
+    Int,
     /// `--flag=value` or `--flag value`, which may be given many times.
     Multi,
 }
@@ -65,6 +67,14 @@ impl ParsedOptions {
         self.values.iter().filter(|(option, _)| option == name).map(|(_, value)| value.as_str()).collect()
     }
 
+    /// An integer option's value, or `default` if it wasn't given.
+    pub fn int(&self, name: &str, default: i64) -> i64 {
+        match self.get(name) {
+            Some(value) => value.parse().unwrap_or(default),
+            None => default,
+        }
+    }
+
     /// A boolean option's value, or `default` if it wasn't given.
     pub fn flag(&self, name: &str, default: bool) -> bool {
         match self.get(name) {
@@ -81,6 +91,9 @@ pub enum OptionsError {
 
     #[error("invalid value '{value}' for boolean option '--{name}'")]
     InvalidBool { name: String, value: String },
+
+    #[error("While parsing option --{name}={value}: '{value}' is not an int")]
+    InvalidInt { name: String, value: String },
 
     #[error("config value '{0}' is not defined in any .rc file")]
     UnknownConfig(String),
@@ -163,11 +176,17 @@ fn parse_into(
                 };
                 parsed.values.push((name.to_string(), (value != negated).to_string()));
             }
-            Some((name, _, _)) => {
+            Some((name, kind, _)) => {
                 let value = match inline {
                     Some(value) => value,
                     None => next_value(args, &mut index, name)?,
                 };
+                if kind == OptionKind::Int && value.parse::<i64>().is_err() {
+                    return Err(OptionsError::InvalidInt {
+                        name: name.to_string(),
+                        value,
+                    });
+                }
                 parsed.values.push((name.to_string(), value));
             }
             None => {

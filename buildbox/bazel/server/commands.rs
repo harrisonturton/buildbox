@@ -48,6 +48,7 @@ pub(crate) fn query_spec() -> OptionSpec {
         ("repo_env", Multi),
         ("color", Value),
         ("curses", Value),
+        ("ui_actions_shown", Int),
         ("show_progress", Bool),
     ])
 }

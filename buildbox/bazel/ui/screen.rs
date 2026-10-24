@@ -120,6 +120,7 @@ mod tests {
             cursor_control,
             show_progress: true,
             columns: 80,
+            actions_shown: 3,
         }
     }
 

@@ -78,6 +78,7 @@ pub fn build_spec() -> OptionSpec {
         ("disk_cache", Value),
         ("color", Value),
         ("curses", Value),
+        ("ui_actions_shown", Int),
         ("show_progress", Bool),
         ("announce_rc", Bool),
         ("enable_bzlmod", Bool),
