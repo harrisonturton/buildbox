@@ -22,6 +22,7 @@ rust_library(
         "opaque.rs",
         "package_builder.rs",
         "paging.rs",
+        "print.rs",
         "provider.rs",
         "repo_api.rs",
         "rule_value.rs",

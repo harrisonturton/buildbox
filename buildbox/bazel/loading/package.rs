@@ -126,9 +126,7 @@ async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyErro
         bazel_starlark::eval_build(ast, &builtins.build, &loads, context, builder)
     })
     .await?;
-    for line in printed {
-        tracing::info!("DEBUG: {build_label}: {line}");
-    }
+    crate::report_printed(ctx, &printed).await;
     package.loads = load_labels;
     Ok(LoadedPackage(package))
 }

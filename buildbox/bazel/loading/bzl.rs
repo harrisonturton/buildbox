@@ -75,10 +75,9 @@ impl Key for BzlLoadKey {
             bazel_starlark::eval_bzl(ast, &builtins.bzl, &loads, context, bazel_starlark::heap_name("bzl", label, fingerprint))
         })
         .await?;
-        let (module, printed) = module.map_err(|error| SkyError::new(error.message))?;
-        for line in printed {
-            tracing::info!("DEBUG: {label}: {line}");
-        }
+        let (module, printed) = module;
+        crate::report_printed(ctx, &printed).await;
+        let module = module.map_err(|error| SkyError::new(error.message))?;
         Ok(BzlModule {
             label,
             module,

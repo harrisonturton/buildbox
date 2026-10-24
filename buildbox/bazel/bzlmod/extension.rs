@@ -99,8 +99,9 @@ fn run_extension(
     let mut context = EvalContext::new(FileKind::Bzl, info.bzl);
     context.mappings = mappings;
     context.repos = Some(RefCell::new(Vec::new()));
+    let graph_access = io.graph.clone();
 
-    Module::with_temp_heap(|env| -> anyhow::Result<()> {
+    let result = Module::with_temp_heap(|env| -> anyhow::Result<()> {
         let heap = env.heap();
         let (value, _) = module
             .module
@@ -123,8 +124,9 @@ fn run_extension(
         eval.extra = Some(&context);
         eval.eval_function(extension.implementation, &[ctx], &[]).map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(())
-    })?;
-    crate::repo_ctx::log_printed(&context);
+    });
+    graph_access.report_printed(&context.printed.take());
+    result?;
 
     let definitions = context.repos.take().map(RefCell::into_inner).unwrap_or_default();
     Ok(definitions

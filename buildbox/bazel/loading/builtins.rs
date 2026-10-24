@@ -198,7 +198,7 @@ impl Loader {
         };
         let mut eval_context = EvalContext::new(FileKind::Bzl, label);
         eval_context.mappings.insert(RepoName::new(BUILTINS_REPO), self.mapping.clone());
-        let (module, _) = bazel_starlark::eval_bzl(ast, &BZL_GLOBALS, &loads, eval_context, name)?;
+        let module = bazel_starlark::eval_bzl(ast, &BZL_GLOBALS, &loads, eval_context, name).0?;
         self.modules.borrow_mut().insert(label, module.clone());
         Ok(module)
     }

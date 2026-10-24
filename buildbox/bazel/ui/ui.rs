@@ -92,6 +92,8 @@ pub enum Kind {
     Info,
     Warning,
     Error,
+    /// What Starlark code printed.
+    Debug,
 }
 
 impl Kind {
@@ -100,6 +102,7 @@ impl Kind {
             Kind::Info => "INFO: ",
             Kind::Warning => "WARNING: ",
             Kind::Error => "ERROR: ",
+            Kind::Debug => "DEBUG: ",
         }
     }
 
@@ -108,12 +111,14 @@ impl Kind {
             Kind::Info => GREEN,
             Kind::Warning => MAGENTA,
             Kind::Error => RED_BOLD,
+            Kind::Debug => YELLOW,
         }
     }
 }
 
 const GREEN: &str = "\x1b[32m";
 const MAGENTA: &str = "\x1b[35m";
+const YELLOW: &str = "\x1b[33m";
 const RED_BOLD: &str = "\x1b[31m\x1b[1m";
 const RESET: &str = "\x1b[0m";
 

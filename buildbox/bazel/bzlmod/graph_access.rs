@@ -4,6 +4,7 @@
 use crate::fetch_repo::RepoFetchKey;
 use bazel_fs::{FileContentKey, Root, RootedPath, Workspace};
 use bazel_label::{Label, RepoName};
+use bazel_starlark::print::Printed;
 use intern::PathId;
 use skyframe::{Ctx, Key};
 use std::path::PathBuf;
@@ -29,6 +30,12 @@ impl GraphAccess {
     /// blocking thread.
     pub fn compute<K: Key>(&self, key: &K) -> anyhow::Result<Arc<K::Value>> {
         Ok(self.runtime.block_on(self.ctx.compute(key))?)
+    }
+
+    /// Show what Starlark code printed to the user, as Bazel's `DEBUG:`
+    /// messages. Must be called from a blocking thread.
+    pub fn report_printed(&self, printed: &[Printed]) {
+        self.runtime.block_on(bazel_loading::report_printed(&self.ctx, printed));
     }
 
     pub fn workspace_root(&self) -> anyhow::Result<PathBuf> {

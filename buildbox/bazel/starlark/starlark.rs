@@ -18,6 +18,7 @@ pub mod native_rules;
 pub mod opaque;
 pub mod package_builder;
 pub mod paging;
+pub mod print;
 pub mod provider;
 pub mod repo_api;
 pub mod rule_value;
@@ -56,7 +57,6 @@ pub fn dialect() -> Dialect {
 fn standard() -> GlobalsBuilder {
     let mut builder = GlobalsBuilder::extended_by(&[
         LibraryExtension::StructType,
-        LibraryExtension::Print,
         LibraryExtension::Map,
         LibraryExtension::Filter,
         LibraryExtension::Partial,
@@ -64,6 +64,7 @@ fn standard() -> GlobalsBuilder {
         LibraryExtension::SetType,
     ]);
     json_module::register(&mut builder);
+    print::print_function(&mut builder);
     hash::hash_function(&mut builder);
     builder
 }

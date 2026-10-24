@@ -21,7 +21,7 @@ use bazel_starlark::opaque::Opaque;
 use bazel_starlark::{EvalContext, FileKind};
 use intern::Symbol;
 use skycodec::Fingerprinter;
-use starlark::PrintHandler;
+use bazel_starlark::print::Printed;
 use starlark::collections::SmallMap;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
@@ -166,12 +166,14 @@ pub fn target_executable<'v>(target: Value<'v>) -> Option<(Artifact, &'v Runfile
     Some((executable, Runfiles::from_value(files_to_run.runfiles)?))
 }
 
-struct Printer;
-
-impl PrintHandler for Printer {
-    fn println(&self, text: &str) -> starlark::Result<()> {
-        tracing::info!("DEBUG: {text}");
-        Ok(())
+/// Call the rule's implementation with `ctx`, returning what it returns.
+fn implement<'v>(input: &RuleInput, prepared: &Prepared<'v>, ctx: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+    match &input.implementation {
+        Implementation::Starlark { implementation, .. } | Implementation::Builtin { implementation, .. } => {
+            let implementation = eval.heap().access_owned_frozen_value(implementation);
+            eval.eval_function(implementation, &[ctx], &[]).map_err(|error| anyhow::anyhow!("{error}"))
+        }
+        Implementation::Native(kind) => crate::native::analyze(*kind, input, prepared, eval),
     }
 }
 
@@ -186,8 +188,9 @@ pub fn rule_ctx<'v>(eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
 }
 
 /// Run the rule's implementation, leaving its `Target` in `module` and
-/// returning its actions.
-pub fn run<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Vec<Action>> {
+/// returning its actions. What it printed goes in `printed`, even if it
+/// fails.
+pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed>) -> anyhow::Result<Vec<Action>> {
     let heap = module.heap();
     let mut state = RuleState::new(input.label, input.class.kind, input.config.clone(), input.mapping.clone());
     state.target_constraints = input.target_constraints.clone();
@@ -214,16 +217,11 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Vec<Act
     let returned = {
         let mut eval = Evaluator::new(module);
         eval.extra = Some(&context);
-        eval.set_print_handler(&Printer);
-        match &input.implementation {
-            Implementation::Starlark { implementation, .. } | Implementation::Builtin { implementation, .. } => {
-                let implementation = heap.access_owned_frozen_value(implementation);
-                eval.eval_function(implementation, &[ctx], &[]).map_err(|error| anyhow::anyhow!("{error}"))?
-            }
-            Implementation::Native(kind) => crate::native::analyze(*kind, input, &prepared, &mut eval)?,
-        }
+        implement(input, &prepared, ctx, &mut eval)
     };
     module.set(RULE_CTX, Value::new_none());
+    printed.extend(context.printed.take());
+    let returned = returned?;
     let state = context.extension.take().and_then(|state| state.downcast::<RuleState>().ok()).ok_or_else(|| anyhow::anyhow!("lost the rule's state"))?;
     let defaults = defaults(&state, &prepared.outputs);
     check_outputs(&state, &prepared.outputs)?;

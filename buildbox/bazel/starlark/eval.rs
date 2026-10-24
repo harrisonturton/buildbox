@@ -10,7 +10,7 @@ use bazel_packages::Package;
 use starlark::environment::{FrozenModule, Module};
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::AstModule;
-use starlark::PrintHandler;
+use crate::print::Printed;
 use std::collections::HashMap;
 
 /// Why a file couldn't be parsed or evaluated, with the Starlark error's
@@ -97,15 +97,6 @@ impl FileLoader for Loads<'_> {
     }
 }
 
-struct Printer<'a>(&'a EvalContext);
-
-impl PrintHandler for Printer<'_> {
-    fn println(&self, text: &str) -> starlark::Result<()> {
-        self.0.printed.borrow_mut().push(text.to_string());
-        Ok(())
-    }
-}
-
 /// The name of a frozen heap: what it holds, and a fingerprint of what it
 /// was made from. Heaps are told apart by name when they're serialized, so
 /// heaps made from different things must have different names.
@@ -114,22 +105,20 @@ pub fn heap_name(what: &str, label: impl std::fmt::Display, fingerprint: impl st
 }
 
 /// Evaluate a `.bzl` file, returning its frozen module, its heap named
-/// `name`, and what it printed.
-pub fn eval_bzl(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: EvalContext, name: FrozenHeapName) -> Result<(FrozenModule, Vec<String>), EvalError> {
+/// `name`, and what it printed, even if it failed.
+pub fn eval_bzl(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: EvalContext, name: FrozenHeapName) -> (Result<FrozenModule, EvalError>, Vec<Printed>) {
     debug_assert_eq!(context.kind, FileKind::Bzl);
-    Module::with_temp_heap(|module| {
+    let module = Module::with_temp_heap(|module| {
         module.frozen_heap().add_reference(crate::provider::builtin_providers_heap());
         {
-            let printer = Printer(&context);
             let mut eval = Evaluator::new(&module);
             eval.extra = Some(&context);
             eval.set_loader(loads);
-            eval.set_print_handler(&printer);
             eval.eval_module(ast, globals).map_err(EvalError::new)?;
         }
-        let frozen = module.freeze_named(name).map_err(|error| EvalError::new(format!("{error:?}")))?;
-        Ok((frozen, context.printed.take()))
-    })
+        module.freeze_named(name).map_err(|error| EvalError::new(format!("{error:?}")))
+    });
+    (module, context.printed.take())
 }
 
 /// Evaluate a BUILD file into a package, and what it printed. An error
@@ -141,15 +130,13 @@ pub fn eval_build(
     loads: &Loads<'_>,
     mut context: EvalContext,
     builder: PackageBuilder,
-) -> (Package, Vec<String>) {
+) -> (Package, Vec<Printed>) {
     debug_assert_eq!(context.kind, FileKind::Build);
     context.package = Some(std::cell::RefCell::new(builder));
     let result = Module::with_temp_heap(|module| {
-        let printer = Printer(&context);
         let mut eval = Evaluator::new(&module);
         eval.extra = Some(&context);
         eval.set_loader(loads);
-        eval.set_print_handler(&printer);
         eval.eval_module(ast, globals).map(|_| ()).map_err(EvalError::starlark)
     });
     let printed = context.printed.take();

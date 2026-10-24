@@ -89,3 +89,14 @@ fn relative_target_patterns() {
     assert_eq!(pattern("bar/..."), "//foo/bar/...");
     assert_eq!(pattern("bar"), "//foo/bar:bar");
 }
+
+#[test]
+fn labels_display_as_the_main_repository_writes_them() {
+    let main = RepoMappingTable::new(RepoName::MAIN, vec![(Symbol::intern("dep"), RepoName::new("dep+"))]);
+    let display = |text: &str| Label::parse_canonical(text).unwrap().shorthand_display_form(Some(&main));
+    assert_eq!(display("@@//:x"), "//:x");
+    assert_eq!(display("@@//pkg/foo:foo"), "//pkg/foo");
+    assert_eq!(display("@@dep+//pkg:bar"), "@dep//pkg:bar");
+    assert_eq!(display("@@dep+//:dep"), "@dep");
+    assert_eq!(display("@@other+//pkg:bar"), "@@other+//pkg:bar");
+}

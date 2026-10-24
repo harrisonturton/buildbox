@@ -253,7 +253,8 @@ fn run_rule(
     let what = format!("{}%{}", spec.bzl, spec.rule);
     let mut context = EvalContext::new(FileKind::Bzl, spec.bzl);
     context.mappings = mappings.clone();
-    Module::with_temp_heap(|env| -> anyhow::Result<()> {
+    let graph = io.graph.clone();
+    let result = Module::with_temp_heap(|env| -> anyhow::Result<()> {
         let (value, _) = module
             .module
             .get_any_visibility(&spec.rule)
@@ -274,14 +275,7 @@ fn run_rule(
         let ctx_value = env.heap().alloc(ctx);
         eval.eval_function(rule.implementation, &[ctx_value], &[]).map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(())
-    })?;
-    log_printed(&context);
-    Ok(())
-}
-
-/// Log what Starlark code printed, as Bazel shows it.
-pub(crate) fn log_printed(context: &EvalContext) {
-    for line in context.printed.borrow().iter() {
-        tracing::info!("DEBUG: {}: {line}", context.file);
-    }
+    });
+    graph.report_printed(&context.printed.take());
+    result
 }

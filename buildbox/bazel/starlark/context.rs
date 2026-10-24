@@ -42,7 +42,7 @@ pub struct EvalContext {
     /// The repositories a module extension defines.
     pub repos: Option<RefCell<Vec<crate::repo_api::RepoDefinition>>>,
     /// What `print()` printed.
-    pub printed: RefCell<Vec<String>>,
+    pub printed: RefCell<Vec<crate::print::Printed>>,
     /// The state of a higher layer's evaluation, such as the rule being
     /// analyzed, for the builtins that layer adds.
     pub extension: Option<Box<dyn std::any::Any>>,

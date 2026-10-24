@@ -68,7 +68,7 @@ exports_files(["exported.txt"])
 fn load_package() -> Package {
     let defs_label = label("//pkg:defs.bzl");
     let defs = parse(defs_label, DEFS.to_string()).unwrap();
-    let (defs_module, _) = eval_bzl(defs, &BZL_GLOBALS, &Loads { modules: HashMap::new() }, EvalContext::new(FileKind::Bzl, defs_label), heap_name("test", defs_label, 0)).unwrap();
+    let defs_module = eval_bzl(defs, &BZL_GLOBALS, &Loads { modules: HashMap::new() }, EvalContext::new(FileKind::Bzl, defs_label), heap_name("test", defs_label, 0)).0.unwrap();
 
     let build_label = label("//pkg:BUILD");
     let build = parse(build_label, BUILD.to_string()).unwrap();
@@ -149,7 +149,7 @@ UNION = {"a": "1"} | select({"//conditions:default": {"b": "2"}})
 DEFAULT = {}.get("k", default = 3)
 "#;
     let ast = parse(file, source.to_string()).unwrap();
-    let (module, _) = eval_bzl(ast, &BZL_GLOBALS, &Loads { modules: HashMap::new() }, EvalContext::new(FileKind::Bzl, file), heap_name("test", file, 0)).unwrap();
+    let module = eval_bzl(ast, &BZL_GLOBALS, &Loads { modules: HashMap::new() }, EvalContext::new(FileKind::Bzl, file), heap_name("test", file, 0)).0.unwrap();
     assert_eq!(module.get("UNION").unwrap().value().get_type(), "select");
     assert_eq!(module.get("DEFAULT").unwrap().value().unpack_i32(), Some(3));
 }

@@ -1,5 +1,6 @@
 //! Configured targets: targets analyzed in a configuration.
 
+use bazel_starlark::print::Printed;
 use crate::action::{Action, StoredAction};
 use crate::paging::PagedValue;
 use crate::artifact::{self, Artifact};
@@ -229,7 +230,8 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         toolchains,
     };
     let name = bazel_starlark::heap_name("target", key.label, fingerprint);
-    let analyzed = bazel_loading::blocking(move || evaluate(input, name)).await?;
+    let (analyzed, printed) = bazel_loading::blocking(move || evaluate(input, name)).await?;
+    bazel_loading::report_printed(ctx, &printed).await;
     let analyzed = match analyzed {
         Ok(analyzed) => analyzed,
         Err(message) => return Err(located(ctx, label, message).await),
@@ -527,14 +529,17 @@ fn incompatible(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool
     Ok(target)
 }
 
-/// Run the rule's implementation, on a blocking thread.
-fn evaluate(input: RuleInput, name: FrozenHeapName) -> Result<Analyzed, String> {
-    Module::with_temp_heap(|module| {
+/// Run the rule's implementation, on a blocking thread, returning what
+/// it printed too.
+fn evaluate(input: RuleInput, name: FrozenHeapName) -> (Result<Analyzed, String>, Vec<Printed>) {
+    let mut printed = Vec::new();
+    let analyzed = Module::with_temp_heap(|module| {
         module.frozen_heap().add_reference(bazel_starlark::provider::builtin_providers_heap());
-        let actions = build_ctx::run(&module, &input).map_err(|error| format!("in {} rule {}: {error}", input.class.kind, input.label))?;
+        let actions = build_ctx::run(&module, &input, &mut printed).map_err(|error| format!("in {} rule {}: {error}", input.class.kind, input.label))?;
         let module = module.freeze_named(name).map_err(|error| format!("{}: {error:?}", input.label))?;
         Ok(Analyzed { module, actions })
-    })
+    });
+    (analyzed, printed)
 }
 
 /// The configured target of a file: it has no actions of its own.

@@ -8,6 +8,7 @@
 mod builtins;
 mod bzl;
 mod package;
+mod printed;
 mod recursive;
 mod rule_class;
 
@@ -15,6 +16,7 @@ pub use builtins::{BUILTINS_REPO, Builtins, BuiltinsDir, BuiltinsKey, builtins_m
 pub use bzl::{BzlLoadKey, BzlModule, mappings};
 
 pub use package::{LoadedPackage, PackageKey, PackageLookup, PackageLookupKey, build_file_path, display as display_package, no_such_target, target_location};
+pub use printed::report_printed;
 pub use recursive::{PackagesUnderDirectory, PackagesUnderDirectoryKey, packages_beneath};
 pub use rule_class::{RuleClassKey, RuleClassValue, rule_class};
 

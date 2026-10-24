@@ -9,6 +9,7 @@ rust_library(
         "bzl.rs",
         "loading.rs",
         "package.rs",
+        "printed.rs",
         "recursive.rs",
         "rule_class.rs",
     ],

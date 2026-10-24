@@ -119,6 +119,30 @@ impl Label {
         format!("@@{}//{}:{}", self.package.repo, self.package.path, self.name)
     }
 
+    /// The label as the main repository, seeing others as `main_mapping`
+    /// says, would write it: `//pkg:name`, `@apparent//pkg:name`, or
+    /// `@@canonical//pkg:name` for repositories it doesn't see.
+    pub fn display_form(self, main_mapping: Option<&RepoMappingTable>) -> String {
+        format!("{}//{}:{}", repo_display_form(self.package.repo, main_mapping), self.package.path, self.name)
+    }
+
+    /// [`Label::display_form`], with the name left out where it repeats the
+    /// package's last component, as in `//pkg/foo` and `@repo`.
+    pub fn shorthand_display_form(self, main_mapping: Option<&RepoMappingTable>) -> String {
+        let repo = repo_display_form(self.package.repo, main_mapping);
+        let last = self.package.path.name();
+        if self.package.path.is_root() {
+            if repo == format!("@{}", self.name) || repo == format!("@@{}", self.name) {
+                return repo;
+            }
+            return self.display_form(main_mapping);
+        }
+        if last.as_str() == self.name.as_str() {
+            return format!("{repo}//{}", self.package.path);
+        }
+        self.display_form(main_mapping)
+    }
+
     /// A label in the same package.
     pub fn sibling(self, name: Symbol) -> Label {
         self.package.label(name)
@@ -150,6 +174,19 @@ fn split_repo<'t>(text: &'t str, context: &LabelContext<'_>) -> Result<(Option<R
 }
 
 /// `@repo` alone means `@repo//:repo`, named as written.
+/// How the main repository, seeing others as `main_mapping` says, names
+/// `repo` in labels: not at all if it's itself, by an apparent name if it
+/// has one, and canonically otherwise.
+fn repo_display_form(repo: RepoName, main_mapping: Option<&RepoMappingTable>) -> String {
+    if repo.is_main() {
+        return String::new();
+    }
+    match main_mapping.and_then(|mapping| mapping.apparent_name(repo)) {
+        Some(apparent) => format!("@{apparent}"),
+        None => format!("@@{repo}"),
+    }
+}
+
 fn repo_shorthand(text: &str, repo: RepoName) -> Label {
     let name = text.trim_start_matches('@');
     PackageId::new(repo, PathId::ROOT).label(Symbol::intern(name))
