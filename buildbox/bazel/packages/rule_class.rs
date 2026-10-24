@@ -30,6 +30,9 @@ pub struct RuleClass {
     /// The toolchain types the rule's implementation resolves toolchains
     /// for, which `query` counts as dependencies.
     pub toolchain_types: Vec<Label>,
+    /// The toolchain types among those that may go unresolved, for which
+    /// the rule gets `None`.
+    pub optional_toolchain_types: Vec<Label>,
 }
 
 /// One attribute a rule class takes.

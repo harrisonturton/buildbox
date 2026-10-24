@@ -156,7 +156,7 @@ pub async fn run(context: &CommandContext<'_>, session: &Session, options: &Pars
         let (files, failed) = execute(session, &artifacts, out).await;
         errors |= failed;
         if let Some(backend) = &backend {
-            if let Err(error) = bazel_execution::materialize(backend, &exec_root, &files).await {
+            if let Err(error) = write_outputs(session, backend, &target, &files, &exec_root, &context.workspace_root).await {
                 out.error(error.message()).await;
                 errors = true;
             }
@@ -173,6 +173,23 @@ pub async fn run(context: &CommandContext<'_>, session: &Session, options: &Pars
         exec_root,
         errors,
     })
+}
+
+/// Write a target's files to the output tree, and its executable's
+/// runfiles tree.
+async fn write_outputs(
+    session: &Session,
+    backend: &bazel_execution::Backend,
+    target: &ConfiguredTarget,
+    files: &[OutputFile],
+    exec_root: &Path,
+    workspace: &Path,
+) -> Result<(), skyframe::SkyError> {
+    bazel_execution::materialize(backend, exec_root, files).await?;
+    if let Some(layout) = crate::runfiles::layout(session, target, exec_root, workspace).await? {
+        bazel_execution::write_runfiles(layout).await?;
+    }
+    Ok(())
 }
 
 fn plural(count: usize, word: &str) -> String {

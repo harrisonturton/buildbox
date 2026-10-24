@@ -4,7 +4,7 @@ use crate::fetch_repo::RepoFetchKey;
 use crate::resolve::DepGraphKey;
 use bazel_fs::Root;
 use bazel_label::{RepoMappingTable, RepoName};
-use bazel_loading::RepositoryResolver;
+use bazel_loading::{Registration, RepositoryResolver};
 use futures::future::BoxFuture;
 use intern::Symbol;
 use skyframe::{Ctx, SkyError};
@@ -13,6 +13,24 @@ use skyframe::{Ctx, SkyError};
 pub struct BzlmodRepositories;
 
 impl RepositoryResolver for BzlmodRepositories {
+    /// Each module's registrations: the root module's first, then the
+    /// others in the order resolution found them.
+    fn registrations<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Vec<Registration>, SkyError>> {
+        Box::pin(async move {
+            let graph = ctx.compute(&DepGraphKey).await?;
+            let registrations = graph
+                .modules
+                .iter()
+                .map(|module| Registration {
+                    repo: module.repo,
+                    toolchains: module.file.toolchains.clone(),
+                    execution_platforms: module.file.execution_platforms.clone(),
+                })
+                .collect();
+            Ok(registrations)
+        })
+    }
+
     fn root<'a>(&'a self, ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<Root, SkyError>> {
         Box::pin(async move {
             if repo.is_main() {

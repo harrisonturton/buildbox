@@ -27,6 +27,7 @@ rust_library(
         "memory.rs",
         "output.rs",
         "repos.rs",
+        "runfiles.rs",
         "server.rs",
         "service.rs",
         "workspace.rs",

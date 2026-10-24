@@ -221,7 +221,9 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     own.sort_by(|a, b| a.name.cmp(&b.name));
     let mut class = native_rules::rule_class(kind, own, rule.test, rule.executable);
     class.outputs = predeclared_outputs(rule)?;
-    class.toolchain_types = toolchain_types(rule, &parser)?;
+    let (toolchain_types, optional) = toolchain_types(rule, &parser)?;
+    class.toolchain_types = toolchain_types;
+    class.optional_toolchain_types = optional;
     Ok(class)
 }
 
@@ -298,20 +300,25 @@ fn is_computed(value: Value<'_>) -> bool {
     matches!(value.get_type(), "function" | "builtin_function_or_method")
 }
 
-/// The toolchain types `rule(toolchains = [...])` names.
-fn toolchain_types<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, parser: &LabelParser<'_>) -> anyhow::Result<Vec<Label>> {
+/// The toolchain types `rule(toolchains = [...])` names, and those of them
+/// that are optional.
+fn toolchain_types<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, parser: &LabelParser<'_>) -> anyhow::Result<(Vec<Label>, Vec<Label>)> {
     let Some(toolchains) = rule.option("toolchains").and_then(convert::items) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let mut labels = Vec::with_capacity(toolchains.len());
+    let mut optional = Vec::new();
     for toolchain in toolchains {
         if let Some(toolchain_type) = toolchain.downcast_ref::<crate::toolchain_type::ToolchainType>() {
             labels.push(toolchain_type.label);
+            if !toolchain_type.mandatory {
+                optional.push(toolchain_type.label);
+            }
         } else if toolchain.unpack_str().is_some() || toolchain.downcast_ref::<crate::label_value::LabelValue>().is_some() {
             labels.push(parser.label(toolchain)?);
         }
     }
-    Ok(labels)
+    Ok((labels, optional))
 }
 
 fn predeclared_outputs<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> anyhow::Result<Vec<(Symbol, String)>> {

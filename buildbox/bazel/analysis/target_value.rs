@@ -93,4 +93,16 @@ where
     fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
         Ok(self.providers.contains_key(&provider_key(other)?))
     }
+
+    /// Targets are equal when they have the same label, so they can be
+    /// keys of dicts, as `label_keyed_string_dict` attributes make them.
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(TargetValue::from_value(other).is_some_and(|other| other.label == self.label))
+    }
+
+    fn write_hash(&self, hasher: &mut starlark::collections::StarlarkHasher) -> starlark::Result<()> {
+        use std::hash::Hash;
+        self.label.hash(hasher);
+        Ok(())
+    }
 }

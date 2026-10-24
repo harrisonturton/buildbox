@@ -30,6 +30,16 @@ use std::fmt;
 /// runfiles of.
 const RUNFILES_ATTRS: &[&str] = &["srcs", "deps", "data"];
 
+/// Which runfiles of its dependencies `ctx.runfiles` collects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Collect {
+    /// `collect_default`: the default runfiles of `srcs` and `deps`, and
+    /// the data runfiles of `data`, as Bazel collects them.
+    Default,
+    /// `collect_data`: the data runfiles of all three.
+    Data,
+}
+
 /// A rule implementation's `ctx`: its fields, such as `attr` and `actions`,
 /// and methods that reach the rule's [`RuleState`].
 #[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
@@ -70,14 +80,17 @@ where
     }
 }
 
-/// The runfiles of the targets of `ctx.attr.srcs`, `deps` and `data`,
-/// from `field`, such as `default_runfiles`.
-fn dep_runfiles<'v>(ctx: Value<'v>, field: &str, heap: Heap<'v>) -> Vec<Value<'v>> {
+/// The runfiles of the targets of `ctx.attr.srcs`, `deps` and `data`.
+fn dep_runfiles<'v>(ctx: Value<'v>, collect: Collect, heap: Heap<'v>) -> Vec<Value<'v>> {
     let Some(attr) = ctx.get_attr("attr", heap).ok().flatten() else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for name in RUNFILES_ATTRS {
+        let field = match (collect, *name) {
+            (Collect::Default, "srcs" | "deps") => "default_runfiles",
+            _ => "data_runfiles",
+        };
         let Some(value) = attr.get_attr(name, heap).ok().flatten() else {
             continue;
         };
@@ -151,10 +164,10 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
         }
         let mut merged = Vec::new();
         if collect_default {
-            merged.extend(dep_runfiles(this, "default_runfiles", heap));
+            merged.extend(dep_runfiles(this, Collect::Default, heap));
         }
         if collect_data {
-            merged.extend(dep_runfiles(this, "data_runfiles", heap));
+            merged.extend(dep_runfiles(this, Collect::Data, heap));
         }
         let files = heap.alloc(Depset {
             direct,

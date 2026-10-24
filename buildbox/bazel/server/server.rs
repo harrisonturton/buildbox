@@ -12,6 +12,7 @@ mod commands;
 mod memory;
 mod output;
 mod repos;
+mod runfiles;
 mod service;
 mod workspace;
 

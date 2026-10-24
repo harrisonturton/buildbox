@@ -72,3 +72,60 @@ async fn write_tree(backend: &Backend, digest: &cas::Digest, dest: &Path) -> Res
 fn io_error(action: &str, path: &Path, error: std::io::Error) -> SkyError {
     SkyError::transient(format!("failed to {action} {}: {error}", path.display()))
 }
+
+/// A runfiles tree to write next to an executable: each file's path in the
+/// tree, and the file it links to.
+pub struct RunfilesLayout {
+    /// The executable, as an absolute path.
+    pub executable: PathBuf,
+    pub entries: Vec<(String, PathBuf)>,
+    /// The contents of the repository mapping manifest.
+    pub repo_mapping: String,
+}
+
+/// Write an executable's runfiles tree, as Bazel lays it out: the tree of
+/// symlinks in `<executable>.runfiles`, its `MANIFEST`, and the repository
+/// mapping manifest, `<executable>.repo_mapping`.
+pub async fn write_runfiles(layout: RunfilesLayout) -> Result<(), SkyError> {
+    let result = tokio::task::spawn_blocking(move || write_runfiles_blocking(&layout)).await;
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(SkyError::transient(format!("runfiles task failed: {error}"))),
+    }
+}
+
+fn write_runfiles_blocking(layout: &RunfilesLayout) -> Result<(), SkyError> {
+    let executable = layout.executable.display().to_string();
+    let dir = PathBuf::from(format!("{executable}.runfiles"));
+    let manifest = PathBuf::from(format!("{executable}.runfiles_manifest"));
+    let repo_mapping = PathBuf::from(format!("{executable}.repo_mapping"));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|error| io_error("remove", &dir, error))?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|error| io_error("create", &dir, error))?;
+    write_replacing(&repo_mapping, &layout.repo_mapping)?;
+
+    let mut entries = layout.entries.clone();
+    entries.push(("_repo_mapping".to_string(), repo_mapping.clone()));
+    entries.sort();
+    entries.dedup_by(|a, b| a.0 == b.0);
+    let mut lines = String::new();
+    for (path, target) in &entries {
+        lines.push_str(&format!("{path} {}\n", target.display()));
+        link(target, &dir.join(path))?;
+    }
+    write_replacing(&manifest, &lines)?;
+    link(&manifest, &dir.join("MANIFEST"))
+}
+
+fn write_replacing(path: &Path, contents: &str) -> Result<(), SkyError> {
+    let _ = std::fs::remove_file(path);
+    std::fs::write(path, contents).map_err(|error| io_error("write", path, error))
+}
+
+fn link(target: &Path, link: &Path) -> Result<(), SkyError> {
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| io_error("create", parent, error))?;
+    }
+    std::os::unix::fs::symlink(target, link).map_err(|error| io_error("link", link, error))
+}

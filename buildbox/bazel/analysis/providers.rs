@@ -134,13 +134,17 @@ fn with_executable<'v>(runfiles: Option<Value<'v>>, executable: Option<Artifact>
     Ok(heap.alloc(Runfiles::merge_all(&[own, runfiles], heap)))
 }
 
-/// The `Target` of a file: its `DefaultInfo` has just the file.
+/// The `Target` of a file: its `DefaultInfo` has just the file, as its
+/// files and its runfiles.
 pub fn file_target<'v>(label: Label, artifact: Artifact, heap: Heap<'v>) -> anyhow::Result<TargetValue<'v>> {
+    let files = file_depset(&[artifact], heap);
+    let runfiles = heap.alloc(Runfiles::new(files));
+    let given = instance(DEFAULT_INFO, vec![("files", files), ("runfiles", runfiles)], heap)?;
     let defaults = Defaults {
-        files: vec![artifact],
+        files: Vec::new(),
         executable: None,
     };
     let mut providers = SmallMap::new();
-    providers.insert(DEFAULT_INFO.to_string(), default_info(label, None, &defaults, heap)?);
+    providers.insert(DEFAULT_INFO.to_string(), default_info(label, Some(given), &defaults, heap)?);
     Ok(TargetValue { label, providers })
 }

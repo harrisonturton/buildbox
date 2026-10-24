@@ -13,6 +13,7 @@ mod rule_class;
 
 pub use builtins::{BUILTINS_REPO, Builtins, BuiltinsDir, BuiltinsKey, builtins_mapping};
 pub use bzl::{BzlLoadKey, BzlModule, mappings};
+
 pub use package::{LoadedPackage, PackageKey, PackageLookup, PackageLookupKey, display as display_package};
 pub use recursive::{PackagesUnderDirectory, PackagesUnderDirectoryKey, packages_beneath};
 pub use rule_class::{RuleClassKey, RuleClassValue, rule_class};
@@ -37,6 +38,40 @@ pub trait RepositoryResolver: Send + Sync + 'static {
     fn module<'a>(&'a self, ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<Option<(String, String)>, SkyError>> {
         let _ = (ctx, repo);
         Box::pin(async { Ok(None) })
+    }
+
+    /// The toolchains and execution platforms the build registers, in
+    /// order of precedence.
+    fn registrations<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Vec<Registration>, SkyError>> {
+        let _ = ctx;
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+/// What one repository registers, as target patterns relative to it.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Registration {
+    pub repo: RepoName,
+    pub toolchains: Vec<String>,
+    pub execution_platforms: Vec<String>,
+}
+
+/// The registrations of the whole build.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Registrations(pub Vec<Registration>);
+
+encoded_value!(Registrations);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct RegistrationsKey;
+
+impl Key for RegistrationsKey {
+    type Value = Registrations;
+    const KIND: &'static str = "REGISTRATIONS";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<Registrations, SkyError> {
+        let repositories = ctx.global::<Repositories>()?;
+        Ok(Registrations(repositories.0.registrations(ctx).await?))
     }
 }
 

@@ -182,7 +182,7 @@ async fn analyze_deps(
 ) -> Result<BTreeMap<(Label, ConfigId), Dep>, SkyError> {
     let mut wanted = Vec::new();
     for (schema, (_, value)) in class.attrs.iter().zip(attrs) {
-        if !schema.is_dependency || !schema.ty.has_labels() || schema.ty == AttrType::Output {
+        if !schema.is_dependency || !schema.ty.has_labels() || schema.ty == AttrType::Output || is_late_bound(schema.name) {
             continue;
         }
         let mut labels = Vec::new();
@@ -201,6 +201,13 @@ async fn analyze_deps(
     wanted.dedup();
     let deps = futures::future::try_join_all(wanted.iter().map(|(label, config)| dep(ctx, *label, *config))).await?;
     Ok(wanted.into_iter().zip(deps).collect())
+}
+
+/// Whether an attribute is late-bound, as native attributes named `:x`
+/// are: chosen by options such as `--collect_code_coverage`, which bb
+/// doesn't support, so they have no value.
+fn is_late_bound(name: Symbol) -> bool {
+    name.as_str().starts_with(':')
 }
 
 fn labels_of_unknown_repos(value: &AttrValue) -> Vec<Label> {
