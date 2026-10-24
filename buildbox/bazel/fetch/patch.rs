@@ -229,12 +229,25 @@ fn apply_change(dir: &Path, change: &FileChange, strip: usize, name: &str) -> Re
             let _ = std::fs::remove_file(dir.join(old));
         }
     }
+    make_writable(&target);
     std::fs::write(&target, patched).map_err(io(format!("{name}: failed to write {}", target.display())))?;
     if let Some(mode) = change.new_mode {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode & 0o777));
     }
     Ok(())
+}
+
+/// Let a file that archives extracted read-only be patched.
+fn make_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    let mode = metadata.permissions().mode();
+    if mode & 0o200 == 0 {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o200));
+    }
 }
 
 /// Apply hunks in order, each at its stated position or, if the file has
@@ -299,6 +312,18 @@ fn find(lines: &[String], needle: &[&str], expected: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patches_read_only_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("MODULE.bazel");
+        std::fs::write(&file, "old\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let patch = "--- a/MODULE.bazel\n+++ b/MODULE.bazel\n@@ -1 +1 @@\n-old\n+new\n";
+        apply_patch(dir.path(), patch, 1, "test.patch").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new\n");
+    }
 
     #[test]
     fn applies_modifications_creations_and_deletions() {
