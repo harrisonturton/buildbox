@@ -25,6 +25,10 @@ pub struct TargetValueGen<V: ValueLifetimeless> {
     #[allocative(skip)]
     pub label: Label,
     pub providers: SmallMap<String, V>,
+    /// Whether the target is a file rather than a rule. Files have no
+    /// runfiles of their own; see [`crate::providers::collected_runfiles`].
+    #[freeze(identity)]
+    pub is_file: bool,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<TargetValueGen<To>> for TargetValueGen<From> {}

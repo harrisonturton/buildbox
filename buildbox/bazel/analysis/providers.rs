@@ -74,7 +74,11 @@ pub fn collect<'v>(label: Label, returned: Value<'v>, defaults: &Defaults, heap:
     let given = providers.get(DEFAULT_INFO).copied();
     let default_info = default_info(label, given, defaults, heap)?;
     providers.insert(DEFAULT_INFO.to_string(), default_info);
-    Ok(TargetValue { label, providers })
+    Ok(TargetValue {
+        label,
+        providers,
+        is_file: false,
+    })
 }
 
 /// The provider an instance of a natively implemented provider, such as a
@@ -154,21 +158,41 @@ fn with_executable<'v>(runfiles: Option<Value<'v>>, executable: Option<Artifact>
 /// files and its runfiles.
 pub fn file_target<'v>(label: Label, artifact: Artifact, heap: Heap<'v>) -> anyhow::Result<TargetValue<'v>> {
     let files = file_depset(&[artifact], heap);
-    let runfiles = heap.alloc(Runfiles::new(files));
     // A file runs as itself, as an executable attribute's value, but isn't
     // an executable target: it has no runfiles tree of its own.
     let files_to_run = heap.alloc(FilesToRun {
         executable: heap.alloc(FileValue(artifact)),
-        runfiles,
+        runfiles: heap.alloc(Runfiles::new(files)),
     });
+    let no_runfiles = heap.alloc(Runfiles::empty(heap));
     let fields = vec![
         ("files", files),
-        ("default_runfiles", runfiles),
-        ("data_runfiles", runfiles),
+        ("default_runfiles", no_runfiles),
+        ("data_runfiles", no_runfiles),
         ("files_to_run", files_to_run),
         ("executable", Value::new_none()),
     ];
     let mut providers = SmallMap::new();
     providers.insert(DEFAULT_INFO.to_string(), instance(DEFAULT_INFO, fields, heap)?);
-    Ok(TargetValue { label, providers })
+    Ok(TargetValue {
+        label,
+        providers,
+        is_file: true,
+    })
+}
+
+/// The runfiles of a dependency that collecting its `field`, its
+/// `default_runfiles` or `data_runfiles`, gives. A file has none of its own,
+/// but collecting data runfiles gives the file itself, as in Bazel; so
+/// rules that merge their `srcs`' default runfiles don't get the sources.
+pub fn collected_runfiles<'v>(target: Value<'v>, field: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+    let target = TargetValue::from_value(target)?;
+    if !target.is_file {
+        return target.default_info(field);
+    }
+    if field != "data_runfiles" {
+        return None;
+    }
+    let files = target.default_info("files")?;
+    Some(heap.alloc(Runfiles::new(files)))
 }

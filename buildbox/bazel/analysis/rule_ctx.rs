@@ -4,6 +4,7 @@ use crate::actions;
 use crate::artifact::Artifact;
 use crate::expand::LocationStyle;
 use crate::file_value::FileValue;
+use crate::providers;
 use crate::runfiles::Runfiles;
 use crate::state::RuleState;
 use crate::target_value::TargetValue;
@@ -96,8 +97,7 @@ fn dep_runfiles<'v>(ctx: Value<'v>, collect: Collect, heap: Heap<'v>) -> Vec<Val
         };
         let targets = bazel_starlark::convert::items(value).unwrap_or_else(|| vec![value]);
         for target in targets {
-            let runfiles = TargetValue::from_value(target).and_then(|target| target.default_info(field));
-            out.extend(runfiles);
+            out.extend(providers::collected_runfiles(target, field, heap));
         }
     }
     out

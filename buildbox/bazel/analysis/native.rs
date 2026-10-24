@@ -251,8 +251,9 @@ fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, he
     }
     let data = prepared.targets(input, "data");
     let mut all = Vec::new();
-    for runfiles in default_info_fields(&data, "data_runfiles") {
-        all.extend(Runfiles::from_value(runfiles));
+    for target in &data {
+        let runfiles = providers::collected_runfiles(*target, "data_runfiles", heap);
+        all.extend(runfiles.and_then(Runfiles::from_value));
     }
     let own = heap.alloc(Runfiles::new(files));
     all.insert(0, Runfiles::from_value(own).ok_or_else(|| anyhow::anyhow!("runfiles"))?);
