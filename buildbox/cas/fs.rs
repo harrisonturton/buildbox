@@ -5,7 +5,7 @@ use cas::{BlobReader, BlobWriter, Cas, CasError, Digest, Hasher, Materialization
 use fsutil::run_blocking;
 use std::fs::{File, Permissions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempPath;
@@ -33,12 +33,14 @@ const MATERIALIZE_BATCH: usize = 256;
 /// - `blobs/<hash>`: committed blobs.
 /// - `exec/<hash>`: executable copies of blobs, made the first time a blob is
 ///   materialized as an executable. Hard links to a file share its mode, so
-///   executable and non-executable links need separate files.
+///   executable and non-executable links need separate files. An adopted
+///   executable is stored only here, until it's needed as a plain file.
 /// - `tmp/`: blobs being written. Anything here when the store is opened was
 ///   abandoned, and is deleted.
 ///
 /// Blobs are materialized as hard links when the destination is on the same
-/// filesystem, so populating a sandbox doesn't copy any data. Linked files are
+/// filesystem, so populating a sandbox doesn't copy any data; and adopted
+/// files are linked into the store, so storing an output doesn't either. Linked files are
 /// read-only, but anything that changes their permissions or contents in
 /// place changes the stored blob too.
 #[derive(Debug, Clone)]
@@ -70,6 +72,11 @@ impl FsCas {
 
     fn executable_path(&self, digest: &Digest) -> PathBuf {
         self.dirs.executables.join(digest.hash())
+    }
+
+    /// Whether the blob is stored, as a plain file or only as an executable.
+    fn is_stored(&self, digest: &Digest) -> bool {
+        self.blob_path(digest).exists() || self.executable_path(digest).exists()
     }
 }
 
@@ -122,7 +129,7 @@ impl Cas for FsCas {
         run_blocking(move || {
             let mut missing = vec![];
             for digest in digests {
-                if !cas.blob_path(&digest).exists() {
+                if !cas.is_stored(&digest) {
                     missing.push(digest);
                 }
             }
@@ -133,12 +140,14 @@ impl Cas for FsCas {
 
     #[tracing::instrument(level = "debug", name = "cas_open_blob", skip_all, fields(digest = %digest))]
     async fn read(&self, digest: &Digest) -> Result<BlobReader, CasError> {
-        let path = self.blob_path(digest);
-        match tokio::fs::File::open(&path).await {
-            Ok(file) => Ok(Box::pin(file)),
-            Err(error) if error.kind() == ErrorKind::NotFound => Err(CasError::NotFound(digest.clone())),
-            Err(error) => Err(io_error("failed to open", &path, error)),
+        for path in [self.blob_path(digest), self.executable_path(digest)] {
+            match tokio::fs::File::open(&path).await {
+                Ok(file) => return Ok(Box::pin(file)),
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error("failed to open", &path, error)),
+            }
         }
+        Err(CasError::NotFound(digest.clone()))
     }
 
     #[tracing::instrument(level = "debug", name = "cas_start_write", skip_all, fields(digest = %expected))]
@@ -161,6 +170,13 @@ impl Cas for FsCas {
         let cas = self.clone();
         let path = path.to_path_buf();
         run_blocking(move || put_file_blocking(&cas, &path)).await
+    }
+
+    #[tracing::instrument(level = "debug", name = "cas_adopt_file", skip_all)]
+    async fn adopt_file(&self, path: &Path, executable: bool) -> Result<Digest, CasError> {
+        let cas = self.clone();
+        let path = path.to_path_buf();
+        run_blocking(move || adopt_file_blocking(&cas, &path, executable)).await
     }
 
     #[tracing::instrument(level = "debug", name = "cas_materialize", skip_all, fields(digest = %digest))]
@@ -197,8 +213,8 @@ impl Cas for FsCas {
     }
 
     async fn usage(&self) -> Result<Usage, CasError> {
-        let blobs_dir = self.dirs.blobs.clone();
-        run_blocking(move || usage_blocking(&blobs_dir)).await
+        let cas = self.clone();
+        run_blocking(move || usage_blocking(&cas)).await
     }
 }
 
@@ -237,10 +253,10 @@ fn materialize_batch(cas: &FsCas, files: &[Materialization]) -> Result<(), CasEr
 
 fn put_bytes_blocking(cas: &FsCas, data: &[u8]) -> Result<Digest, CasError> {
     let digest = Digest::of_bytes(data);
-    let blob_path = cas.blob_path(&digest);
-    if blob_path.exists() {
+    if cas.is_stored(&digest) {
         return Ok(digest);
     }
+    let blob_path = cas.blob_path(&digest);
     let (mut temp_file, temp_path) = new_temp_file(&cas.dirs.tmp)?;
     temp_file
         .write_all(data)
@@ -254,19 +270,15 @@ fn put_bytes_blocking(cas: &FsCas, data: &[u8]) -> Result<Digest, CasError> {
 
 /// Hard link a blob into place, or copy it where hard links can't be used.
 fn materialize_blocking(cas: &FsCas, digest: &Digest, dest: &Path, executable: bool) -> Result<(), CasError> {
-    let source = if executable {
-        executable_blob(cas, digest)?
-    } else {
-        cas.blob_path(digest)
+    let source = match executable {
+        true => stored_copy(cas, digest, &cas.executable_path(digest), EXECUTABLE_BLOB_MODE)?,
+        false => stored_copy(cas, digest, &cas.blob_path(digest), BLOB_MODE)?,
     };
 
     let error = match std::fs::hard_link(&source, dest) {
         Ok(()) => return Ok(()),
         Err(error) => error,
     };
-    if error.kind() == ErrorKind::NotFound && !source.exists() {
-        return Err(CasError::NotFound(digest.clone()));
-    }
     if !can_copy_instead_of_linking(&error) {
         return Err(io_error("failed to link", dest, error));
     }
@@ -276,18 +288,20 @@ fn materialize_blocking(cas: &FsCas, digest: &Digest, dest: &Path, executable: b
     copy_file(&source, dest, mode)
 }
 
-/// The executable copy of a blob, made on first use.
-fn executable_blob(cas: &FsCas, digest: &Digest) -> Result<PathBuf, CasError> {
-    let path = cas.executable_path(digest);
+/// The blob's file at `path`, its executable or plain copy, made from the
+/// other on first use.
+fn stored_copy(cas: &FsCas, digest: &Digest, path: &Path, mode: u32) -> Result<PathBuf, CasError> {
     if path.exists() {
-        return Ok(path);
+        return Ok(path.to_path_buf());
     }
-
-    let blob_path = cas.blob_path(digest);
-    let mut source = match File::open(&blob_path) {
+    let other = match path.starts_with(&cas.dirs.executables) {
+        true => cas.blob_path(digest),
+        false => cas.executable_path(digest),
+    };
+    let mut source = match File::open(&other) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Err(CasError::NotFound(digest.clone())),
-        Err(error) => return Err(io_error("failed to open", &blob_path, error)),
+        Err(error) => return Err(io_error("failed to open", &other, error)),
     };
 
     let (mut temp_file, temp_path) = new_temp_file(&cas.dirs.tmp)?;
@@ -295,8 +309,50 @@ fn executable_blob(cas: &FsCas, digest: &Digest) -> Result<PathBuf, CasError> {
     // Close the file before it can be run: running a file that's open for
     // writing fails.
     drop(temp_file);
-    persist_with_mode(temp_path, &path, EXECUTABLE_BLOB_MODE)?;
-    Ok(path)
+    persist_with_mode(temp_path, path, mode)?;
+    Ok(path.to_path_buf())
+}
+
+/// Hash a file and, unless its blob is already stored, make it read-only,
+/// sync it and link it into the store as the blob. A file with other links,
+/// such as an input linked from this store, is copied instead, so they
+/// keep their modes.
+fn adopt_file_blocking(cas: &FsCas, path: &Path, executable: bool) -> Result<Digest, CasError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| io_error("failed to stat", path, error))?;
+    if !metadata.is_file() || metadata.nlink() > 1 {
+        return put_file_blocking(cas, path);
+    }
+    let mut file = File::open(path).map_err(|error| io_error("failed to open", path, error))?;
+    let digest = hash_reader(&mut file, path)?;
+    if cas.is_stored(&digest) {
+        return Ok(digest);
+    }
+    file.sync_data().map_err(|error| io_error("failed to sync", path, error))?;
+    drop(file);
+
+    let (blob_path, mode) = match executable {
+        true => (cas.executable_path(&digest), EXECUTABLE_BLOB_MODE),
+        false => (cas.blob_path(&digest), BLOB_MODE),
+    };
+    std::fs::set_permissions(path, Permissions::from_mode(mode)).map_err(|error| io_error("failed to set permissions on", path, error))?;
+    match std::fs::hard_link(path, &blob_path) {
+        Ok(()) => Ok(digest),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(digest),
+        Err(error) if can_copy_instead_of_linking(&error) => put_file_blocking(cas, path),
+        Err(error) => Err(io_error("failed to link", &blob_path, error)),
+    }
+}
+
+fn hash_reader(file: &mut File, path: &Path) -> Result<Digest, CasError> {
+    let mut hasher = Hasher::new();
+    let mut buf = vec![0; COPY_CHUNK_SIZE];
+    loop {
+        let read = file.read(&mut buf).map_err(|error| io_error("failed to read", path, error))?;
+        if read == 0 {
+            return Ok(hasher.finish());
+        }
+        hasher.update(&buf[..read]);
+    }
 }
 
 /// Hard links fail across filesystems, and when a file has the most links
@@ -313,19 +369,28 @@ fn copy_file(source: &Path, dest: &Path, mode: u32) -> Result<(), CasError> {
         .map_err(|error| io_error("failed to set permissions on", dest, error))
 }
 
-fn usage_blocking(blobs_dir: &Path) -> Result<Usage, CasError> {
-    let entries = std::fs::read_dir(blobs_dir).map_err(|error| io_error("failed to list", blobs_dir, error))?;
-
+/// The blobs in `blobs/`, and those stored only as executables.
+fn usage_blocking(cas: &FsCas) -> Result<Usage, CasError> {
     let mut usage = Usage::default();
+    count_files(&cas.dirs.blobs, &mut usage, |_| true)?;
+    count_files(&cas.dirs.executables, &mut usage, |name| !cas.dirs.blobs.join(name).exists())?;
+    Ok(usage)
+}
+
+fn count_files(dir: &Path, usage: &mut Usage, counted: impl Fn(&std::ffi::OsStr) -> bool) -> Result<(), CasError> {
+    let entries = std::fs::read_dir(dir).map_err(|error| io_error("failed to list", dir, error))?;
     for entry in entries {
-        let entry = entry.map_err(|error| io_error("failed to list", blobs_dir, error))?;
+        let entry = entry.map_err(|error| io_error("failed to list", dir, error))?;
+        if !counted(&entry.file_name()) {
+            continue;
+        }
         let metadata = entry
             .metadata()
             .map_err(|error| io_error("failed to stat", &entry.path(), error))?;
         usage.blobs += 1;
         usage.bytes += metadata.len();
     }
-    Ok(usage)
+    Ok(())
 }
 
 struct FsBlobWriter {

@@ -38,6 +38,16 @@ pub trait Cas: Send + Sync + 'static {
     /// Store the contents of a local file, returning its digest.
     async fn put_file(&self, path: &Path) -> Result<Digest, CasError>;
 
+    /// Store the contents of a local file that nothing else will use, such
+    /// as an action's output, returning its digest. Stores may take the
+    /// file itself rather than copy it, so it must not be used afterwards,
+    /// and must not be written to by anything still running. `executable`
+    /// says whether it is mostly materialized as an executable.
+    async fn adopt_file(&self, path: &Path, executable: bool) -> Result<Digest, CasError> {
+        let _ = executable;
+        self.put_file(path).await
+    }
+
     /// Create a file at `dest` with the contents of a stored blob.
     ///
     /// The file must not be modified afterwards, so implementations are free

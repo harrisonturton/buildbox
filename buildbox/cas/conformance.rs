@@ -26,6 +26,7 @@ where
     check("rewriting_a_blob_succeeds", &new_cas, rewriting_a_blob_succeeds).await;
     check("put_file_stores_contents", &new_cas, put_file_stores_contents).await;
     check("materialize_creates_file", &new_cas, materialize_creates_file).await;
+    check("adopted_files_are_stored", &new_cas, adopted_files_are_stored).await;
     check("materializing_absent_blob_is_not_found", &new_cas, materializing_absent_blob_is_not_found).await;
     check("materialize_all_creates_files", &new_cas, materialize_all_creates_files).await;
     check("materialize_all_of_absent_blob_is_not_found", &new_cas, materialize_all_of_absent_blob_is_not_found).await;
@@ -158,6 +159,33 @@ async fn materialize_creates_file(cas: Box<dyn Cas>, scratch: PathBuf) {
     assert!(is_executable(&executable), "executable file isn't executable");
 }
 
+async fn adopted_files_are_stored(cas: Box<dyn Cas>, scratch: PathBuf) {
+    let plain = scratch.join("plain");
+    let executable = scratch.join("executable");
+    std::fs::write(&plain, b"plain output").unwrap();
+    std::fs::write(&executable, b"executable output").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let plain_digest = cas.adopt_file(&plain, false).await.unwrap();
+    let executable_digest = cas.adopt_file(&executable, true).await.unwrap();
+
+    assert_eq!(plain_digest, Digest::of_bytes(b"plain output"));
+    assert_eq!(executable_digest, Digest::of_bytes(b"executable output"));
+    let digests = [plain_digest.clone(), executable_digest.clone()];
+    assert_eq!(cas.find_missing(&digests).await.unwrap(), vec![]);
+    assert_eq!(cas.read_bytes(&executable_digest).await.unwrap(), b"executable output");
+    // Each can be materialized either way.
+    for (index, digest) in digests.iter().enumerate() {
+        let as_plain = scratch.join(format!("as-plain-{index}"));
+        let as_executable = scratch.join(format!("as-executable-{index}"));
+        cas.materialize(digest, &as_plain, false).await.unwrap();
+        cas.materialize(digest, &as_executable, true).await.unwrap();
+        assert!(!is_executable(&as_plain), "{}", as_plain.display());
+        assert!(is_executable(&as_executable), "{}", as_executable.display());
+        assert_eq!(std::fs::read(&as_plain).unwrap(), std::fs::read(&as_executable).unwrap());
+    }
+}
+
 async fn materializing_absent_blob_is_not_found(cas: Box<dyn Cas>, scratch: PathBuf) {
     let absent = Digest::of_bytes(b"absent");
     let dest = scratch.join("dest");
@@ -211,16 +239,21 @@ async fn materialize_all_of_absent_blob_is_not_found(cas: Box<dyn Cas>, scratch:
     assert!(!scratch.join("absent").exists());
 }
 
-async fn usage_counts_blobs(cas: Box<dyn Cas>, _scratch: PathBuf) {
+async fn usage_counts_blobs(cas: Box<dyn Cas>, scratch: PathBuf) {
     let before = cas.usage().await.unwrap();
 
     cas.put_bytes(b"hello").await.unwrap();
     cas.put_bytes(b"hello").await.unwrap();
     cas.put_bytes(b"world!").await.unwrap();
+    // An executable, which is counted once however it's materialized.
+    let tool = scratch.join("tool");
+    std::fs::write(&tool, b"tool").unwrap();
+    let tool = cas.adopt_file(&tool, true).await.unwrap();
+    cas.materialize(&tool, &scratch.join("plain-tool"), false).await.unwrap();
 
     let after = cas.usage().await.unwrap();
-    assert_eq!(after.blobs - before.blobs, 2);
-    assert_eq!(after.bytes - before.bytes, 11);
+    assert_eq!(after.blobs - before.blobs, 3);
+    assert_eq!(after.bytes - before.bytes, 15);
 }
 
 fn is_executable(path: &Path) -> bool {

@@ -42,8 +42,8 @@ pub async fn create_output_parents(command: &Command, working_dir: &Path) -> Res
     Ok(())
 }
 
-/// Store the outputs the command produced in the CAS. Outputs that weren't
-/// produced are left out.
+/// Store the outputs the command produced in the CAS, which may take the
+/// files themselves. Outputs that weren't produced are left out.
 #[tracing::instrument(skip_all, fields(files = Empty, directories = Empty))]
 pub async fn collect_outputs(cas: &dyn Cas, command: &Command, working_dir: &Path) -> Result<Outputs, ExecuteError> {
     let mut outputs = Outputs::default();
@@ -75,7 +75,7 @@ async fn collect_file(cas: &dyn Cas, output: &str, working_dir: &Path) -> Result
         return Err(ExecuteError::InvalidOutput(format!("output file {output:?} is a directory")));
     }
 
-    let digest = cas.put_file(&path).await?;
+    let digest = cas.adopt_file(&path, is_executable(&metadata)).await?;
     Ok(Some(OutputFile {
         path: output.to_string(),
         digest: digest.to_proto().into(),
@@ -148,7 +148,7 @@ fn build_directory<'a>(
                     ..Default::default()
                 });
             } else {
-                let digest = cas.put_file(&entry_path).await?;
+                let digest = cas.adopt_file(&entry_path, is_executable(&metadata)).await?;
                 directory.files.push(FileNode {
                     name,
                     digest: digest.to_proto().into(),
