@@ -2,7 +2,6 @@
 //! files use while packages are loaded.
 
 pub mod attr_module;
-pub mod autoload;
 pub mod build_api;
 pub mod bzl_api;
 pub mod context;
@@ -27,7 +26,7 @@ pub mod symbolic_macro;
 pub mod toolchain_type;
 
 pub use context::{EvalContext, FileKind, Globber};
-pub use eval::{EvalError, Loads, eval_bzl, eval_build, heap_name, loaded_names, loads, parse};
+pub use eval::{EvalError, Loads, eval_bzl, eval_build, heap_name, loads, parse};
 pub use package_builder::PackageBuilder;
 
 use starlark::environment::{GlobalFrozenHeapName, Globals, GlobalsBuilder, LibraryExtension};
@@ -35,9 +34,9 @@ use starlark::values::{FrozenHeapRef, FrozenValue};
 use starlark::syntax::{Dialect, DialectTypes};
 use std::sync::LazyLock;
 
-/// The Bazel version these builtins behave like, which `native.bazel_version`
-/// and `bb version` report.
-pub const BAZEL_VERSION: &str = "8.8.1";
+/// The Bazel version bb behaves like: which `native.bazel_version`
+/// reports, and whose `@bazel_tools` and `@_builtins` it uses.
+pub const BAZEL_VERSION: &str = "9.3.1";
 
 /// The dialect BUILD and `.bzl` files are parsed with.
 pub fn dialect() -> Dialect {
@@ -80,12 +79,41 @@ pub struct StarlarkBuiltins<'a> {
     pub id: String,
 }
 
-/// Add `native.bazel_version` and `native.legacy_globals`.
-fn native_values(native: &mut GlobalsBuilder) {
+/// The values `native.legacy_globals` holds: those of the globals it's
+/// named after, from globals built without it.
+struct LegacyGlobals<'a> {
+    values: Vec<(String, FrozenValue)>,
+    heap: &'a FrozenHeapRef,
+}
+
+/// Add `native.bazel_version`, and `native.legacy_globals` once its values
+/// are known.
+fn native_values(native: &mut GlobalsBuilder, legacy: Option<&LegacyGlobals<'_>>) {
     native.set("bazel_version", BAZEL_VERSION);
-    let legacy: Vec<(&str, opaque::Opaque)> = opaque::LEGACY_GLOBALS.iter().map(|name| (*name, opaque::Opaque::new(name))).collect();
-    let legacy = native.alloc(starlark::values::structs::AllocStruct(legacy));
+    let Some(legacy) = legacy else {
+        return;
+    };
+    native.frozen_heap().add_reference(legacy.heap);
+    let fields: Vec<(&str, FrozenValue)> = legacy.values.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+    let legacy = native.alloc(starlark::values::structs::AllocStruct(fields));
     native.set("legacy_globals", legacy);
+}
+
+/// Globals that `build` makes, with `native.legacy_globals` holding the
+/// values of the globals it names, as they are when built without it. Those
+/// bb doesn't have are left out.
+fn with_legacy_globals(build: impl Fn(Option<&LegacyGlobals<'_>>) -> Globals) -> Globals {
+    let without = build(None);
+    let values = without
+        .iter()
+        .filter(|(name, _)| opaque::LEGACY_GLOBALS.contains(name))
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+    let legacy = LegacyGlobals {
+        values,
+        heap: without.heap(),
+    };
+    build(Some(&legacy))
 }
 
 fn build_globals_builder() -> GlobalsBuilder {
@@ -149,16 +177,18 @@ pub static BUILD_GLOBALS: LazyLock<Globals> = LazyLock::new(|| build_globals_bui
 /// The globals of `.bzl` files, before builtins. `@_builtins` itself is
 /// evaluated with these and a stand-in `_builtins` object.
 pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
-    let mut builder = bzl_globals_builder();
-    builder.namespace("native", |native| {
-        build_api::build_functions(native);
-        native_rules::register(native);
-        native_values(native);
-    });
-    let value = builder.alloc(opaque::Opaque::new("_builtins"));
-    builder.set("_builtins", value);
-    add_extensions(&mut builder);
-    builder.build_named(GlobalFrozenHeapName { name: "bb bzl" })
+    with_legacy_globals(|legacy| {
+        let mut builder = bzl_globals_builder();
+        builder.namespace("native", |native| {
+            build_api::build_functions(native);
+            native_rules::register(native);
+            native_values(native, legacy);
+        });
+        let value = builder.alloc(opaque::Opaque::new("_builtins"));
+        builder.set("_builtins", value);
+        add_extensions(&mut builder);
+        builder.build_named(GlobalFrozenHeapName { name: "bb bzl" })
+    })
 });
 
 /// The globals of BUILD files, with builtin rules.
@@ -182,20 +212,22 @@ fn globals_name(what: &str, builtins: &StarlarkBuiltins<'_>) -> GlobalFrozenHeap
 /// The globals of `.bzl` files, with builtin rules and values.
 pub fn bzl_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
     let name = globals_name("bb bzl", builtins);
-    let mut builder = bzl_globals_builder();
-    builder.frozen_heap().add_reference(builtins.heap);
-    for (name, value) in &builtins.toplevels {
-        builder.set(name, *value);
-    }
-    add_extensions(&mut builder);
-    builder.namespace("native", |native| {
-        build_api::build_functions(native);
-        native_rules::register(native);
-        native_values(native);
-        native.frozen_heap().add_reference(builtins.heap);
-        for (name, value) in &builtins.rules {
-            native.set(name, *value);
+    with_legacy_globals(|legacy| {
+        let mut builder = bzl_globals_builder();
+        builder.frozen_heap().add_reference(builtins.heap);
+        for (name, value) in &builtins.toplevels {
+            builder.set(name, *value);
         }
-    });
-    builder.build_named(name)
+        add_extensions(&mut builder);
+        builder.namespace("native", |native| {
+            build_api::build_functions(native);
+            native_rules::register(native);
+            native_values(native, legacy);
+            native.frozen_heap().add_reference(builtins.heap);
+            for (name, value) in &builtins.rules {
+                native.set(name, *value);
+            }
+        });
+        builder.build_named(name)
+    })
 }

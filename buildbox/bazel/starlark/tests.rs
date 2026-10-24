@@ -78,7 +78,7 @@ fn load_package() -> Package {
     let mut context = EvalContext::new(FileKind::Build, build_label);
     context.globber = Some(Box::new(FakeGlobber(vec!["x.c", "y.c", "z.h"])));
     let builder = PackageBuilder::new(PackageId::main("pkg").unwrap(), Symbol::intern("BUILD"));
-    let (package, _) = eval_build(build, &BUILD_GLOBALS, &loads, &[], context, builder);
+    let (package, _) = eval_build(build, &BUILD_GLOBALS, &loads, context, builder);
     package
 }
 
@@ -135,7 +135,7 @@ fn errors_keep_earlier_targets() {
     let build = parse(build_label, "filegroup(name = 'ok')\nfilegroup(name = 'bad', nope = 1)\n".to_string()).unwrap();
     let context = EvalContext::new(FileKind::Build, build_label);
     let builder = PackageBuilder::new(PackageId::main("pkg").unwrap(), Symbol::intern("BUILD"));
-    let (package, _) = eval_build(build, &BUILD_GLOBALS, &Loads { modules: HashMap::new() }, &[], context, builder);
+    let (package, _) = eval_build(build, &BUILD_GLOBALS, &Loads { modules: HashMap::new() }, context, builder);
     assert!(package.target(Symbol::intern("ok")).is_some());
     assert_eq!(package.errors.len(), 1);
     assert!(package.errors[0].contains("no such attribute 'nope'"), "{}", package.errors[0]);

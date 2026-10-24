@@ -113,7 +113,8 @@ pub async fn fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec) -> Result<Fet
     let env_inputs = crate::repo_env::declared(ctx, &rule_environ(&module, spec)).await?;
     let environment = ctx.global::<ClientEnv>()?.current();
     let stable_spec = format!("{spec:?}");
-    let dest = repo_dir(&config, repo, &[stable_spec.as_bytes(), definer.as_bytes(), &inputs, env_inputs.as_bytes()].concat());
+    let local = local_inputs(&module, spec);
+    let dest = repo_dir(&config, repo, &[stable_spec.as_bytes(), definer.as_bytes(), &inputs, env_inputs.as_bytes(), local.as_bytes()].concat());
     let access = GraphAccess::new(ctx.clone());
     let downloads = config.downloads.clone();
     let spec = spec.clone();
@@ -159,6 +160,20 @@ async fn mappings(ctx: &Ctx, module: &BzlModule, base: RepoName) -> Result<HashM
 /// client's environment, such as `PATH`, varies between clients that should
 /// share repositories.
 /// The variables a repository rule declares, with `environ`, that it reads.
+/// What a `local` rule's repository depends on besides its spec: the Bazel
+/// version bb behaves like, which such rules read, as rules_cc's does to
+/// choose between Bazel's C++ rules and its own. Bazel runs local rules
+/// again when its server restarts; bb, when what they read changes.
+fn local_inputs(module: &BzlModule, spec: &RepoRuleSpec) -> String {
+    let Ok((value, _)) = module.module.get_any_visibility(&spec.rule) else {
+        return String::new();
+    };
+    match RepositoryRule::from_value(value.value()).is_some_and(|rule| rule.local) {
+        true => format!("local, Bazel {}", bazel_starlark::BAZEL_VERSION),
+        false => String::new(),
+    }
+}
+
 fn rule_environ(module: &BzlModule, spec: &RepoRuleSpec) -> Vec<String> {
     let Ok((value, _)) = module.module.get_any_visibility(&spec.rule) else {
         return Vec::new();

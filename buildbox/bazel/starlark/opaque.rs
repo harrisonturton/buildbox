@@ -164,8 +164,8 @@ fn builtins_toolchain_type<'v>(args: &Arguments<'v, '_>, eval: &mut Evaluator<'v
     Ok(eval.heap().alloc(toolchain_type))
 }
 
-/// The builtin namespaces and providers Bazel 8 gives `.bzl` files, stood
-/// in for by opaque values while loading. Those Bazel 8 moved out to rule
+/// The builtin namespaces and providers Bazel gives `.bzl` files, stood
+/// in for by opaque values while loading. Those Bazel moved out to rule
 /// sets, such as `JavaInfo` and `PyInfo`, are deliberately missing, since
 /// rule sets check for them to decide whether to define their own.
 pub const BUILTIN_NAMESPACES: &[&str] = &[
@@ -187,16 +187,16 @@ pub const BUILTIN_NAMESPACES: &[&str] = &[
     "Actions",
 ];
 
-/// What `native.legacy_globals` holds in Bazel 8: the symbols Bazel moved
-/// to rule sets, for rule sets that still need the originals. Not
-/// `ProtoInfo`: protobuf constructs its own when the original is missing,
-/// as in Bazel 9, and a placeholder can't be constructed.
+/// The globals `native.legacy_globals` holds in Bazel 9, for rule sets that
+/// want Bazel's own: the C++ providers and the namespaces of rule APIs.
 pub const LEGACY_GLOBALS: &[&str] = &[
-    "JavaInfo",
-    "JavaPluginInfo",
-    "PyInfo",
-    "PyRuntimeInfo",
-    "PyCcLinkParamsProvider",
-    "CcSharedLibraryInfo",
+    "CcInfo",
     "CcSharedLibraryHintInfo",
+    "CcSharedLibraryInfo",
+    "CcToolchainConfigInfo",
+    "DebugPackageInfo",
+    "apple_common",
+    "cc_common",
+    "java_common",
+    "proto_common_do_not_use",
 ];

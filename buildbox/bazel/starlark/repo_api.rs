@@ -82,6 +82,9 @@ pub struct RepositoryRuleGen<V: ValueLifetimeless> {
     pub attrs: Vec<(String, V)>,
     /// The environment variables the rule reads.
     pub environ: Vec<String>,
+    /// Whether the rule depends on the machine and Bazel it runs on, so
+    /// that Bazel runs it again when its server restarts.
+    pub local: bool,
     #[freeze(identity)]
     #[allocative(skip)]
     #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
@@ -233,6 +236,7 @@ pub(crate) fn repo_functions(builder: &mut GlobalsBuilder) {
         implementation: Value<'v>,
         #[starlark(require = named)] attrs: Option<Value<'v>>,
         #[starlark(require = named)] environ: Option<Value<'v>>,
+        #[starlark(require = named, default = false)] local: bool,
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<RepositoryRule<'v>> {
@@ -242,6 +246,7 @@ pub(crate) fn repo_functions(builder: &mut GlobalsBuilder) {
             implementation,
             attrs: attr_entries(attrs, "repository_rule(): attrs")?,
             environ: environ.and_then(crate::convert::strings).unwrap_or_default(),
+            local,
             definition: context.caller_file(eval),
             name: OnceLock::new(),
         })
