@@ -37,6 +37,7 @@ pub async fn run(args: UpArgs) -> Result<(), Box<dyn Error>> {
     if let Some(path) = &config.trace_file {
         tracing::info!("writing traces to {}", path.display());
     }
+    raise_open_file_limit();
 
     let result = server::run(&config).await;
     telemetry.shutdown().await;
@@ -61,4 +62,24 @@ fn write_profile_on_signal(profiler: dhat::Profiler) -> std::sync::Arc<std::sync
         eprintln!("dhat: wrote the profile");
     });
     profiler
+}
+
+/// Raise the soft limit on open files to the hard limit, as Bazel does: a
+/// build runs many actions at once, each reading and writing many files,
+/// and the usual soft limit of 1024 is soon reached.
+fn raise_open_file_limit() {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit only writes to `limit`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        tracing::warn!("couldn't read the open file limit: {}", std::io::Error::last_os_error());
+        return;
+    }
+    if limit.rlim_cur >= limit.rlim_max {
+        return;
+    }
+    let raised = libc::rlimit { rlim_cur: limit.rlim_max, rlim_max: limit.rlim_max };
+    // SAFETY: setrlimit only reads `raised`.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } != 0 {
+        tracing::warn!("couldn't raise the open file limit from {}: {}", limit.rlim_cur, std::io::Error::last_os_error());
+    }
 }
