@@ -3,7 +3,7 @@
 
 use actioncache::{ActionCache, ActionCacheError, Usage as CacheUsage};
 use async_trait::async_trait;
-use cas::{BlobReader, BlobWriter, Cas, CasError, Digest, Usage};
+use cas::{BlobReader, BlobWriter, Cas, CasError, Digest, Materialization, Usage};
 use remote_execution_rust_connect::build::bazel::remote::execution::v2::ActionResult;
 use std::path::Path;
 use std::sync::Arc;
@@ -68,6 +68,14 @@ impl Cas for TieredCas {
     async fn materialize(&self, digest: &Digest, dest: &Path, executable: bool) -> Result<(), CasError> {
         self.fetch(digest).await?;
         self.local.materialize(digest, dest, executable).await
+    }
+
+    async fn materialize_all(&self, files: Vec<Materialization>) -> Result<(), CasError> {
+        let digests: Vec<Digest> = files.iter().map(|file| file.digest.clone()).collect();
+        for digest in self.local.find_missing(&digests).await? {
+            self.fetch(&digest).await?;
+        }
+        self.local.materialize_all(files).await
     }
 
     async fn usage(&self) -> Result<Usage, CasError> {

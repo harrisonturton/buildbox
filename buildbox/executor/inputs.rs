@@ -2,11 +2,13 @@
 
 use crate::paths;
 use buffa::Message;
-use cas::{Cas, CasError, Digest};
+use cas::{Cas, CasError, Digest, Materialization};
 use executor::ExecuteError;
+use fsutil::run_blocking;
 use remote_execution_rust_connect::build::bazel::remote::execution::v2::Directory;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::field::Empty;
 use tracing::Span;
 
@@ -38,29 +40,71 @@ struct InputSymlink {
 /// Fails with [`ExecuteError::MissingInputs`], listing every missing blob, if
 /// any part of the tree isn't in the CAS.
 #[tracing::instrument(skip_all, fields(dirs = Empty, files = Empty, symlinks = Empty))]
-pub async fn stage_inputs(cas: &dyn Cas, input_root: &Digest, sandbox: &Path) -> Result<(), ExecuteError> {
-    let tree = resolve_tree(cas, input_root).await?;
+pub async fn stage_inputs(cas: &dyn Cas, directories: &DirectoryCache, input_root: &Digest, sandbox: &Path) -> Result<(), ExecuteError> {
+    let tree = resolve_tree(cas, directories, input_root).await?;
     let span = Span::current();
     span.record("dirs", tree.dirs.len());
     span.record("files", tree.files.len());
     span.record("symlinks", tree.symlinks.len());
 
     check_files_present(cas, &tree).await?;
-    create_entries(cas, &tree, sandbox).await
+    create_entries(cas, tree, sandbox).await
 }
 
 /// Fetch every `Directory` in the tree and flatten it into a list of entries.
+/// The directories of each level are fetched together.
 #[tracing::instrument(skip_all)]
-async fn resolve_tree(cas: &dyn Cas, input_root: &Digest) -> Result<InputTree, ExecuteError> {
+async fn resolve_tree(cas: &dyn Cas, directories: &DirectoryCache, input_root: &Digest) -> Result<InputTree, ExecuteError> {
     let mut tree = InputTree::default();
-    let mut pending = vec![(PathBuf::new(), input_root.clone())];
+    let mut level = vec![(PathBuf::new(), input_root.clone())];
 
-    while let Some((path, digest)) = pending.pop() {
-        let directory = read_directory(cas, &digest).await?;
-        tree.dirs.push(path.clone());
-        add_entries(&mut tree, &mut pending, &path, &directory)?;
+    while !level.is_empty() {
+        let fetched = futures::future::try_join_all(level.iter().map(|(_, digest)| directories.get(cas, digest))).await?;
+        let mut next = Vec::new();
+        for ((path, _), directory) in level.into_iter().zip(fetched) {
+            add_entries(&mut tree, &mut next, &path, &directory)?;
+            tree.dirs.push(path);
+        }
+        level = next;
     }
     Ok(tree)
+}
+
+/// The `Directory` messages input trees are made of, which actions share
+/// many of, such as a toolchain's, kept so they're read from the CAS once.
+#[derive(Default)]
+pub struct DirectoryCache {
+    directories: Mutex<CachedDirectories>,
+}
+
+#[derive(Default)]
+struct CachedDirectories {
+    by_digest: HashMap<Digest, Arc<Directory>>,
+    bytes: u64,
+}
+
+/// How many bytes of encoded directories the cache holds before it's
+/// emptied and starts again.
+const MAX_CACHED_DIRECTORY_BYTES: u64 = 64 << 20;
+
+impl DirectoryCache {
+    async fn get(&self, cas: &dyn Cas, digest: &Digest) -> Result<Arc<Directory>, ExecuteError> {
+        if let Some(directory) = self.lock().by_digest.get(digest) {
+            return Ok(directory.clone());
+        }
+        let directory = Arc::new(read_directory(cas, digest).await?);
+        let mut cached = self.lock();
+        if cached.bytes + digest.size_bytes() > MAX_CACHED_DIRECTORY_BYTES {
+            *cached = CachedDirectories::default();
+        }
+        cached.bytes += digest.size_bytes();
+        cached.by_digest.insert(digest.clone(), directory.clone());
+        Ok(directory)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, CachedDirectories> {
+        self.directories.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 async fn read_directory(cas: &dyn Cas, digest: &Digest) -> Result<Directory, ExecuteError> {
@@ -129,26 +173,40 @@ async fn check_files_present(cas: &dyn Cas, tree: &InputTree) -> Result<(), Exec
     Ok(())
 }
 
+/// Create the directories, then the files, then the symlinks, each with a
+/// few blocking calls rather than one for each entry.
 #[tracing::instrument(skip_all)]
-async fn create_entries(cas: &dyn Cas, tree: &InputTree, sandbox: &Path) -> Result<(), ExecuteError> {
-    for dir in &tree.dirs {
-        let path = sandbox.join(dir);
-        // The sandbox itself, at the empty path, already exists.
-        tokio::fs::create_dir_all(&path)
-            .await
-            .map_err(|error| internal_error("failed to create", &path, error))?;
-    }
+async fn create_entries(cas: &dyn Cas, tree: InputTree, sandbox: &Path) -> Result<(), ExecuteError> {
+    let dirs: Vec<PathBuf> = tree.dirs.iter().map(|dir| sandbox.join(dir)).collect();
+    run_blocking(move || create_dirs(&dirs)).await?;
 
-    for file in &tree.files {
-        let path = sandbox.join(&file.path);
-        cas.materialize(&file.digest, &path, file.executable).await?;
-    }
+    let files = tree
+        .files
+        .into_iter()
+        .map(|file| Materialization {
+            dest: sandbox.join(&file.path),
+            digest: file.digest,
+            executable: file.executable,
+        })
+        .collect();
+    cas.materialize_all(files).await?;
 
-    for symlink in &tree.symlinks {
-        let path = sandbox.join(&symlink.path);
-        tokio::fs::symlink(&symlink.target, &path)
-            .await
-            .map_err(|error| internal_error("failed to create symlink", &path, error))?;
+    let symlinks: Vec<(PathBuf, String)> = tree.symlinks.into_iter().map(|symlink| (sandbox.join(&symlink.path), symlink.target)).collect();
+    run_blocking(move || create_symlinks(&symlinks)).await
+}
+
+/// Create directories, which are listed each after its parent. The first
+/// is the sandbox itself, which already exists.
+fn create_dirs(dirs: &[PathBuf]) -> Result<(), ExecuteError> {
+    for path in dirs.iter().skip(1) {
+        std::fs::create_dir(path).map_err(|error| internal_error("failed to create", path, error))?;
+    }
+    Ok(())
+}
+
+fn create_symlinks(symlinks: &[(PathBuf, String)]) -> Result<(), ExecuteError> {
+    for (path, target) in symlinks {
+        std::os::unix::fs::symlink(target, path).map_err(|error| internal_error("failed to create symlink", path, error))?;
     }
     Ok(())
 }
@@ -213,7 +271,7 @@ mod tests {
         .await;
         let sandbox = tempfile::tempdir().unwrap();
 
-        stage_inputs(&cas, &root, sandbox.path()).await.unwrap();
+        stage_inputs(&cas, &DirectoryCache::default(), &root, sandbox.path()).await.unwrap();
 
         assert_eq!(std::fs::read(sandbox.path().join("run.sh")).unwrap(), b"#!/bin/sh\n");
         assert_eq!(std::fs::read(sandbox.path().join("sub/data.txt")).unwrap(), b"data");
@@ -237,7 +295,7 @@ mod tests {
         .await;
         let sandbox = tempfile::tempdir().unwrap();
 
-        let err = stage_inputs(&cas, &root, sandbox.path()).await.unwrap_err();
+        let err = stage_inputs(&cas, &DirectoryCache::default(), &root, sandbox.path()).await.unwrap_err();
 
         let ExecuteError::MissingInputs(mut missing) = err else {
             panic!("unexpected error: {err}");
@@ -254,7 +312,7 @@ mod tests {
         let missing = Digest::of_bytes(b"not a directory");
         let sandbox = tempfile::tempdir().unwrap();
 
-        let err = stage_inputs(&cas, &missing, sandbox.path()).await.unwrap_err();
+        let err = stage_inputs(&cas, &DirectoryCache::default(), &missing, sandbox.path()).await.unwrap_err();
 
         assert!(matches!(err, ExecuteError::MissingInputs(digests) if digests == vec![missing]));
     }
@@ -273,7 +331,7 @@ mod tests {
         .await;
         let sandbox = tempfile::tempdir().unwrap();
 
-        let err = stage_inputs(&cas, &root, sandbox.path()).await.unwrap_err();
+        let err = stage_inputs(&cas, &DirectoryCache::default(), &root, sandbox.path()).await.unwrap_err();
 
         assert!(matches!(err, ExecuteError::InvalidAction(_)), "{err}");
     }

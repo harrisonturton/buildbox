@@ -34,6 +34,7 @@ rust_library(
     deps = [
         ":cas",
         "//buildbox/fsutil",
+        "@crates//:futures",
         "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:tracing",

@@ -3,7 +3,7 @@
 //! Each implementation's tests call [`run_all`] with a function that creates
 //! an empty store.
 
-use cas::{Cas, CasError, Digest};
+use cas::{Cas, CasError, Digest, Materialization};
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -27,6 +27,8 @@ where
     check("put_file_stores_contents", &new_cas, put_file_stores_contents).await;
     check("materialize_creates_file", &new_cas, materialize_creates_file).await;
     check("materializing_absent_blob_is_not_found", &new_cas, materializing_absent_blob_is_not_found).await;
+    check("materialize_all_creates_files", &new_cas, materialize_all_creates_files).await;
+    check("materialize_all_of_absent_blob_is_not_found", &new_cas, materialize_all_of_absent_blob_is_not_found).await;
     check("usage_counts_blobs", &new_cas, usage_counts_blobs).await;
 }
 
@@ -164,6 +166,49 @@ async fn materializing_absent_blob_is_not_found(cas: Box<dyn Cas>, scratch: Path
 
     assert!(matches!(result, Err(CasError::NotFound(digest)) if digest == absent));
     assert!(!dest.exists());
+}
+
+async fn materialize_all_creates_files(cas: Box<dyn Cas>, scratch: PathBuf) {
+    let mut files = Vec::new();
+    // More files than a store might create at once.
+    for index in 0..600 {
+        let contents = format!("file {index}");
+        let digest = cas.put_bytes(contents.as_bytes()).await.unwrap();
+        files.push(Materialization {
+            digest,
+            dest: scratch.join(format!("file-{index}")),
+            executable: index % 2 == 0,
+        });
+    }
+
+    cas.materialize_all(files.clone()).await.unwrap();
+
+    for (index, file) in files.iter().enumerate() {
+        assert_eq!(std::fs::read(&file.dest).unwrap(), format!("file {index}").as_bytes());
+        assert_eq!(is_executable(&file.dest), file.executable, "{}", file.dest.display());
+    }
+}
+
+async fn materialize_all_of_absent_blob_is_not_found(cas: Box<dyn Cas>, scratch: PathBuf) {
+    let present = cas.put_bytes(b"present").await.unwrap();
+    let absent = Digest::of_bytes(b"absent");
+    let files = vec![
+        Materialization {
+            digest: present,
+            dest: scratch.join("present"),
+            executable: false,
+        },
+        Materialization {
+            digest: absent.clone(),
+            dest: scratch.join("absent"),
+            executable: false,
+        },
+    ];
+
+    let result = cas.materialize_all(files).await;
+
+    assert!(matches!(result, Err(CasError::NotFound(digest)) if digest == absent));
+    assert!(!scratch.join("absent").exists());
 }
 
 async fn usage_counts_blobs(cas: Box<dyn Cas>, _scratch: PathBuf) {

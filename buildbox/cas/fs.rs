@@ -1,7 +1,7 @@
 //! A [`Cas`] that stores each blob as a file on the local filesystem.
 
 use async_trait::async_trait;
-use cas::{BlobReader, BlobWriter, Cas, CasError, Digest, Hasher, Usage};
+use cas::{BlobReader, BlobWriter, Cas, CasError, Digest, Hasher, Materialization, Usage};
 use fsutil::run_blocking;
 use std::fs::{File, Permissions};
 use std::io::{ErrorKind, Read, Write};
@@ -21,6 +21,9 @@ const FILE_MODE: u32 = 0o644;
 const EXECUTABLE_MODE: u32 = 0o755;
 
 const COPY_CHUNK_SIZE: usize = 64 * 1024;
+
+/// How many files [`Cas::materialize_all`] links on each blocking thread.
+const MATERIALIZE_BATCH: usize = 256;
 
 /// Stores blobs as files named after their hash.
 ///
@@ -168,6 +171,31 @@ impl Cas for FsCas {
         run_blocking(move || materialize_blocking(&cas, &digest, &dest, executable)).await
     }
 
+    /// Links the files on a few blocking threads, rather than going to one
+    /// for each file.
+    #[tracing::instrument(level = "debug", name = "cas_materialize_all", skip_all, fields(files = files.len()))]
+    async fn materialize_all(&self, files: Vec<Materialization>) -> Result<(), CasError> {
+        let mut batches = Vec::new();
+        let mut files = files.into_iter().peekable();
+        while files.peek().is_some() {
+            let cas = self.clone();
+            let batch: Vec<Materialization> = files.by_ref().take(MATERIALIZE_BATCH).collect();
+            batches.push(run_blocking(move || materialize_batch(&cas, &batch)));
+        }
+        for result in futures::future::join_all(batches).await {
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Writes the blob in one blocking call, and not at all if it's
+    /// already stored.
+    async fn put_bytes(&self, data: &[u8]) -> Result<Digest, CasError> {
+        let cas = self.clone();
+        let data = data.to_vec();
+        run_blocking(move || put_bytes_blocking(&cas, &data)).await
+    }
+
     async fn usage(&self) -> Result<Usage, CasError> {
         let blobs_dir = self.dirs.blobs.clone();
         run_blocking(move || usage_blocking(&blobs_dir)).await
@@ -197,6 +225,30 @@ fn put_file_blocking(cas: &FsCas, path: &Path) -> Result<Digest, CasError> {
 
     let digest = hasher.finish();
     persist_blob(temp_path, &cas.blob_path(&digest))?;
+    Ok(digest)
+}
+
+fn materialize_batch(cas: &FsCas, files: &[Materialization]) -> Result<(), CasError> {
+    for file in files {
+        materialize_blocking(cas, &file.digest, &file.dest, file.executable)?;
+    }
+    Ok(())
+}
+
+fn put_bytes_blocking(cas: &FsCas, data: &[u8]) -> Result<Digest, CasError> {
+    let digest = Digest::of_bytes(data);
+    let blob_path = cas.blob_path(&digest);
+    if blob_path.exists() {
+        return Ok(digest);
+    }
+    let (mut temp_file, temp_path) = new_temp_file(&cas.dirs.tmp)?;
+    temp_file
+        .write_all(data)
+        .map_err(|error| io_error("failed to write", &temp_path, error))?;
+    temp_file
+        .sync_data()
+        .map_err(|error| io_error("failed to sync", &temp_path, error))?;
+    persist_blob(temp_path, &blob_path)?;
     Ok(digest)
 }
 

@@ -4,7 +4,7 @@ mod digest;
 pub use digest::{Digest, DigestError, Hasher};
 
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -44,6 +44,15 @@ pub trait Cas: Send + Sync + 'static {
     /// to share storage with the blob (for example, with a hard link).
     async fn materialize(&self, digest: &Digest, dest: &Path, executable: bool) -> Result<(), CasError>;
 
+    /// Create many files, as [`Cas::materialize`] does. Stores that can
+    /// create them more cheaply together than one at a time override this.
+    async fn materialize_all(&self, files: Vec<Materialization>) -> Result<(), CasError> {
+        for file in files {
+            self.materialize(&file.digest, &file.dest, file.executable).await?;
+        }
+        Ok(())
+    }
+
     /// Report how much data is stored.
     async fn usage(&self) -> Result<Usage, CasError>;
 
@@ -67,6 +76,15 @@ pub trait Cas: Send + Sync + 'static {
             .map_err(|error| CasError::io(format!("failed to read blob {digest}"), error))?;
         Ok(data)
     }
+}
+
+/// A file to create with the contents of a stored blob. See
+/// [`Cas::materialize_all`].
+#[derive(Clone, Debug)]
+pub struct Materialization {
+    pub digest: Digest,
+    pub dest: PathBuf,
+    pub executable: bool,
 }
 
 /// Writes a blob to a [`Cas`]. See [`Cas::write`].

@@ -55,6 +55,7 @@ pub struct SandboxedExecutor {
     keep_sandboxes: bool,
     runner: Arc<dyn Runner>,
     worker_name: String,
+    directories: inputs::DirectoryCache,
 }
 
 impl SandboxedExecutor {
@@ -74,6 +75,7 @@ impl SandboxedExecutor {
             keep_sandboxes,
             runner,
             worker_name,
+            directories: inputs::DirectoryCache::default(),
         }
     }
 
@@ -112,7 +114,7 @@ impl Executor for SandboxedExecutor {
         let sandbox = Sandbox::create(&self.sandbox_root, self.keep_sandboxes).await?;
         tracing::info!("running action {} in {}", action.digest, sandbox.path().display());
 
-        inputs::stage_inputs(&*self.cas, &action.input_root, sandbox.path()).await?;
+        inputs::stage_inputs(&*self.cas, &self.directories, &action.input_root, sandbox.path()).await?;
         let host_working_dir = sandbox.path().join(&working_dir);
         tokio::fs::create_dir_all(&host_working_dir).await.map_err(|error| {
             ExecuteError::Internal(format!("failed to create {}: {error}", host_working_dir.display()))
