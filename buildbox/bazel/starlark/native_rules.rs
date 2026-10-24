@@ -212,6 +212,7 @@ fn native_classes() -> Vec<RuleClass> {
             false,
             false,
         ),
+        rule_class("cc_toolchain_suite", vec![a("toolchains", StringKeyedLabelDict).mandatory()], false, false),
         rule_class("java_plugins_flag_alias", vec![], false, false),
         rule_class("cc_libc_top_alias", vec![], false, false),
         rule_class(

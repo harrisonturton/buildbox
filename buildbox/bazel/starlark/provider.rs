@@ -105,9 +105,23 @@ where
             let fields: SmallMap<String, Value<'v>> = fields.iter().filter_map(|(k, v)| Some((k.unpack_str()?.to_string(), v))).collect();
             return Ok(eval.heap().alloc(ProviderInstance { provider: me, fields }));
         }
-        args.no_positional_args(eval.heap())?;
+        let positional: Vec<Value<'v>> = args.positions(eval.heap())?.collect();
         let names = args.names_map()?;
-        let mut fields = SmallMap::with_capacity(names.len());
+        let mut fields = SmallMap::with_capacity(names.len() + positional.len());
+        if !positional.is_empty() {
+            // Builtin providers, such as `TemplateVariableInfo(variables)`,
+            // take their fields by position too.
+            let declared = match (self.definition, &self.fields) {
+                (None, Some(declared)) => declared,
+                _ => return Err(starlark::Error::new_other(anyhow::anyhow!("{}: unexpected positional arguments", self.name()))),
+            };
+            if positional.len() > declared.len() {
+                return Err(starlark::Error::new_other(anyhow::anyhow!("{}: too many positional arguments", self.name())));
+            }
+            for (name, value) in declared.iter().zip(positional) {
+                fields.insert(name.clone(), value);
+            }
+        }
         for (name, value) in names.iter() {
             if let Some(allowed) = &self.fields {
                 if !allowed.iter().any(|field| field == name.as_str()) {
@@ -172,6 +186,38 @@ where
         self.fields.contains_key(attribute)
     }
 
+    /// Instances are equal when they're of the same provider and their
+    /// fields are equal, as structs are.
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        let Some(other) = ProviderInstance::from_value(other) else {
+            return Ok(false);
+        };
+        let same_provider = Provider::from_value(self.provider.to_value()).map(|provider| provider.key()) == other.provider_key();
+        if !same_provider || other.fields.len() != self.fields.len() {
+            return Ok(false);
+        }
+        for (name, value) in self.fields.iter() {
+            let Some(other_value) = other.fields.get(name) else {
+                return Ok(false);
+            };
+            if !value.to_value().equals(*other_value)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Instances hash by their fields, which must all be hashable.
+    fn write_hash(&self, hasher: &mut starlark::collections::StarlarkHasher) -> starlark::Result<()> {
+        use std::hash::Hash;
+        self.provider_name().hash(hasher);
+        for (name, value) in self.fields.iter() {
+            name.hash(hasher);
+            value.to_value().write_hash(hasher)?;
+        }
+        Ok(())
+    }
+
     /// Whether the instance has a field, as `"group" in OutputGroupInfo`
     /// asks.
     fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
@@ -203,6 +249,8 @@ const BUILTIN_PROVIDERS: &[(&str, Option<&[&str]>)] = &[
     ("OutputGroupInfo", None),
     ("RunEnvironmentInfo", Some(&["environment", "inherited_environment"])),
     ("InstrumentedFilesInfo", None),
+    ("CcToolchainInfo", None),
+    ("CcToolchainConfigInfo", None),
 ];
 
 /// The providers of `platform_common`.

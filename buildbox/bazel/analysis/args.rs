@@ -286,3 +286,74 @@ fn shell_quote(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "'\\''"))
 }
 
+
+/// `TemplateDict`: substitutions for `expand_template`, computed as
+/// they're added.
+#[derive(Debug, Default, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+pub struct TemplateDict {
+    #[allocative(skip)]
+    substitutions: Mutex<Vec<(String, String)>>,
+}
+
+starlark_simple_value!(TemplateDict);
+
+impl fmt::Display for TemplateDict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<TemplateDict>")
+    }
+}
+
+impl TemplateDict {
+    pub fn substitutions(&self) -> Vec<(String, String)> {
+        self.substitutions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    fn insert(&self, key: &str, value: String) {
+        let mut substitutions = self.substitutions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        substitutions.retain(|(existing, _)| existing != key);
+        substitutions.push((key.to_string(), value));
+    }
+}
+
+#[starlark_value(type = "TemplateDict")]
+impl<'v> StarlarkValue<'v> for TemplateDict {
+    fn get_methods() -> Option<&'static Methods> {
+        static METHODS: MethodsStatic = MethodsStatic::new("TemplateDict", template_dict_methods);
+        Some(METHODS.methods())
+    }
+}
+
+#[starlark_module]
+fn template_dict_methods(builder: &mut MethodsBuilder) {
+    /// `add(key, value)`.
+    fn add<'v>(this: Value<'v>, key: &str, value: &str) -> anyhow::Result<Value<'v>> {
+        let dict = this.downcast_ref::<TemplateDict>().ok_or_else(|| anyhow::anyhow!("expected TemplateDict"))?;
+        dict.insert(key, value.to_string());
+        Ok(this)
+    }
+
+    /// `add_joined(key, values, *, join_with, map_each, uniquify = False,
+    /// format_joined = None, allow_closure = False)`.
+    fn add_joined<'v>(
+        this: Value<'v>,
+        key: &str,
+        values: Value<'v>,
+        #[starlark(require = named)] join_with: &str,
+        #[starlark(require = named)] map_each: Value<'v>,
+        #[starlark(require = named, default = false)] uniquify: bool,
+        #[starlark(require = named)] format_joined: Option<&str>,
+        #[starlark(require = named, default = false)] allow_closure: bool,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let _ = allow_closure;
+        let dict = this.downcast_ref::<TemplateDict>().ok_or_else(|| anyhow::anyhow!("expected TemplateDict"))?;
+        let expansion = Expansion {
+            map_each: Some(map_each).filter(|value| !value.is_none()),
+            format_each: None,
+            uniquify,
+        };
+        let expanded = expansion.expand(values, eval)?;
+        dict.insert(key, format(format_joined, &expanded.join(join_with))?);
+        Ok(this)
+    }
+}

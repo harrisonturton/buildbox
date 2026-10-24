@@ -29,13 +29,12 @@ const MARKER_RULES: &[&str] = &[
     "environment_group",
     "java_plugins_flag_alias",
     "cc_libc_top_alias",
+    "cc_toolchain_suite",
 ];
 
 /// Rules Bazel's builtins implement that bb stands in for with rules that
-/// provide nothing: C++ toolchains, which have no `CcToolchainInfo` until
-/// bb implements `cc_common`. Rules that can do without a C++ toolchain,
-/// such as rules_rust's, then do.
-pub const STUBBED_BUILTINS: &[&str] = &["cc_toolchain", "cc_toolchain_alias", "cc_toolchain_suite"];
+/// provide nothing, since nothing uses them any more.
+pub const STUBBED_BUILTINS: &[&str] = &[];
 
 /// Run a native rule's implementation, returning its providers.
 pub fn analyze<'v>(kind: Symbol, input: &RuleInput, prepared: &Prepared<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
@@ -45,6 +44,10 @@ pub fn analyze<'v>(kind: Symbol, input: &RuleInput, prepared: &Prepared<'v>, eva
         "genrule" => genrule(input, prepared, RuleState::get(eval)?, heap),
         "constraint_value" => constraint_value(input, heap),
         "label_flag" | "label_setting" => forward(input, prepared, "build_setting_default", heap),
+        "cc_toolchain" => crate::cc::rules::cc_toolchain(input, prepared, heap),
+        "cc_toolchain_alias" => crate::cc::rules::cc_toolchain_alias(input, heap),
+        "cc_library" => crate::cc::rules::cc_library(input, prepared, RuleState::get(eval)?, heap),
+        "cc_binary" | "cc_test" => crate::cc::rules::cc_binary(input, prepared, RuleState::get(eval)?, heap),
         kind if MARKER_RULES.contains(&kind) || STUBBED_BUILTINS.contains(&kind) => Ok(Value::new_none()),
         kind => anyhow::bail!("the native rule '{kind}' isn't supported by bb yet"),
     }

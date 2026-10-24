@@ -9,6 +9,7 @@ rust_library(
         "autoload.rs",
         "build_api.rs",
         "bzl_api.rs",
+        "compat.rs",
         "context.rs",
         "convert.rs",
         "depset.rs",

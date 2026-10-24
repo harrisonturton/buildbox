@@ -125,15 +125,24 @@ impl<'v, V: ValueLike<'v>> DepsetGen<V> {
     }
 }
 
-/// The elements already listed, by hash, compared by Starlark equality.
+/// The elements already listed: hashable ones by hash, compared by
+/// Starlark equality; others, such as structs with list fields, by
+/// identity.
 #[derive(Default)]
 struct Seen<'v> {
     by_hash: HashMap<u32, Vec<Value<'v>>>,
+    by_identity: std::collections::HashSet<starlark::values::ValueIdentity<'v>>,
 }
 
 impl<'v> Seen<'v> {
     fn add(&mut self, value: Value<'v>, out: &mut Vec<Value<'v>>) {
-        let hash = value.get_hashed().map(|hashed| hashed.hash().get()).unwrap_or(0);
+        let Ok(hashed) = value.get_hashed() else {
+            if self.by_identity.insert(value.identity()) {
+                out.push(value);
+            }
+            return;
+        };
+        let hash = hashed.hash().get();
         let bucket = self.by_hash.entry(hash).or_default();
         if bucket.iter().any(|existing| existing.equals(value).unwrap_or(false)) {
             return;

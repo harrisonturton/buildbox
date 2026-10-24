@@ -1,6 +1,6 @@
 //! What builtins know about the rule being analyzed.
 
-use crate::action::{Action, RunfilesTree};
+use crate::action::{Action, ActionKind, RunfilesTree};
 use crate::artifact::{self, Artifact};
 use crate::expand::LocationStyle;
 use crate::runfiles::Runfiles;
@@ -74,8 +74,12 @@ impl RuleState {
     }
 
     /// Register an action. Its outputs must be files this rule declared, and
-    /// no other action may generate them.
+    /// no other action may generate them, unless it's the same action, which
+    /// Bazel shares.
     pub fn register(&self, action: Action) -> anyhow::Result<()> {
+        if self.share(&action) {
+            return Ok(());
+        }
         let mut declared = self.declared.borrow_mut();
         for output in &action.outputs {
             let Some(entry) = declared.iter_mut().find(|(artifact, _)| artifact == output) else {
@@ -88,6 +92,21 @@ impl RuleState {
         }
         self.actions.borrow_mut().push(action);
         Ok(())
+    }
+
+    /// Whether an action is the same as one registered already, which then
+    /// stands for both. Symlinks to the same file are the same action
+    /// whether or not they say the file is executable, as in Bazel; the
+    /// shared one is executable if either is.
+    fn share(&self, action: &Action) -> bool {
+        let mut actions = self.actions.borrow_mut();
+        let Some(existing) = actions.iter_mut().find(|existing| same_action(existing, action)) else {
+            return false;
+        };
+        if let (ActionKind::Symlink { executable, .. }, ActionKind::Symlink { executable: new, .. }) = (&mut existing.kind, &action.kind) {
+            *executable |= *new;
+        }
+        true
     }
 
     /// Parse a label relative to the rule's package.
@@ -147,6 +166,13 @@ impl RuleState {
     pub fn make_variable(&self, name: &str) -> Option<&str> {
         self.make_variables.iter().find(|(variable, _)| variable == name).map(|(_, value)| value.as_str())
     }
+}
+
+fn same_action(a: &Action, b: &Action) -> bool {
+    if let (ActionKind::Symlink { target: a_target, .. }, ActionKind::Symlink { target: b_target, .. }) = (&a.kind, &b.kind) {
+        return a_target == b_target && a.outputs == b.outputs;
+    }
+    a == b
 }
 
 /// The runfiles tree of an executable, in the directory next to it.

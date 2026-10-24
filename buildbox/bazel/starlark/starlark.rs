@@ -5,6 +5,7 @@ pub mod attr_module;
 pub mod autoload;
 pub mod build_api;
 pub mod bzl_api;
+mod compat;
 pub mod context;
 pub mod convert;
 pub mod depset;
@@ -91,6 +92,20 @@ fn build_globals_builder() -> GlobalsBuilder {
     builder
 }
 
+/// Globals a higher layer adds to `.bzl` files, such as the real `cc_common`
+/// analysis provides. They must be registered before any file is evaluated.
+static EXTENSIONS: std::sync::Mutex<Vec<fn(&mut GlobalsBuilder)>> = std::sync::Mutex::new(Vec::new());
+
+/// Add globals to every `.bzl` file, replacing builtins of the same names.
+/// Call this before evaluating anything: files evaluated before don't see
+/// them.
+pub fn register_bzl_extension(extension: fn(&mut GlobalsBuilder)) {
+    let mut extensions = EXTENSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !extensions.contains(&extension) {
+        extensions.push(extension);
+    }
+}
+
 fn bzl_globals_builder() -> GlobalsBuilder {
     let mut builder = standard()
         .with(select::select_function)
@@ -111,6 +126,15 @@ fn bzl_globals_builder() -> GlobalsBuilder {
     builder
 }
 
+/// Add the registered extensions' globals, which replace any of the same
+/// names.
+fn add_extensions(builder: &mut GlobalsBuilder) {
+    let extensions = EXTENSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    for extension in extensions {
+        extension(builder);
+    }
+}
+
 /// The globals of BUILD files, before builtins.
 pub static BUILD_GLOBALS: LazyLock<Globals> = LazyLock::new(|| build_globals_builder().build());
 
@@ -125,6 +149,7 @@ pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
     });
     let value = builder.alloc(opaque::Opaque::new("_builtins"));
     builder.set("_builtins", value);
+    add_extensions(&mut builder);
     builder.build()
 });
 
@@ -145,6 +170,7 @@ pub fn bzl_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
     for (name, value) in &builtins.toplevels {
         builder.set(name, *value);
     }
+    add_extensions(&mut builder);
     builder.namespace("native", |native| {
         build_api::build_functions(native);
         native_rules::register(native);

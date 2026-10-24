@@ -66,6 +66,10 @@ impl<'v> StarlarkValue<'v> for Opaque {
         Ok(eval.heap().alloc(Opaque::new(&format!("{}()", self.type_name))))
     }
 
+    fn at(&self, index: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        Ok(heap.alloc(Opaque::new(&format!("{}[{}]", self.type_name, index.to_repr()))))
+    }
+
     fn iterate_collect(&self, _heap: Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
         Ok(Vec::new())
     }

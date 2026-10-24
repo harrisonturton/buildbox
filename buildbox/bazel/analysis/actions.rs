@@ -235,6 +235,37 @@ impl<'v> SpawnArgs<'v> {
     }
 }
 
+/// Expand a template with the substitutions `transform_func` makes from
+/// build status values.
+fn transform_status_file<'v>(
+    transform_func: Value<'v>,
+    template: Value<'v>,
+    output_file_name: &str,
+    status: &[(&str, &str)],
+    eval: &mut Evaluator<'v, '_, '_>,
+) -> anyhow::Result<FileValue> {
+    let heap = eval.heap();
+    let status = heap.alloc(starlark::values::dict::AllocDict(status.iter().copied()));
+    let substitutions = eval.eval_function(transform_func, &[status], &[]).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let substitutions = string_dict(Some(substitutions), "the substitutions transform_func returns")?;
+    let state = RuleState::get(eval)?;
+    let template = FileValue::artifact(template).ok_or_else(|| anyhow::anyhow!("template must be a File"))?;
+    let output = state.declare(output_file_name, false)?;
+    state.register(Action {
+        mnemonic: Symbol::intern("TemplateExpand"),
+        progress_message: String::new(),
+        inputs: Vec::new(),
+        runfiles: Vec::new(),
+        outputs: vec![output],
+        kind: ActionKind::Template {
+            template,
+            substitutions,
+            executable: false,
+        },
+    })?;
+    Ok(FileValue(output))
+}
+
 /// The path of an output declared relative to a sibling file's directory,
 /// or the rule's package.
 fn sibling_name(state: &RuleState, filename: &str, sibling: Option<Value<'_>>) -> anyhow::Result<String> {
@@ -293,6 +324,11 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         Ok(Args::default())
     }
 
+    /// `template_dict()`.
+    fn template_dict(#[starlark(this)] _this: Value<'_>) -> anyhow::Result<args::TemplateDict> {
+        Ok(args::TemplateDict::default())
+    }
+
     /// `write(output, content, is_executable = False, *, mnemonic = None)`.
     fn write<'v>(
         #[starlark(this)] _this: Value<'v>,
@@ -333,11 +369,13 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named)] computed_substitutions: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let _ = computed_substitutions;
         let state = RuleState::get(eval)?;
         let template = FileValue::artifact(template).ok_or_else(|| anyhow::anyhow!("expand_template: template must be a File"))?;
         let output = FileValue::artifact(output).ok_or_else(|| anyhow::anyhow!("expand_template: output must be a File"))?;
-        let substitutions = string_dict(substitutions, "substitutions")?;
+        let mut substitutions = string_dict(substitutions, "substitutions")?;
+        if let Some(computed) = computed_substitutions.and_then(|value| value.downcast_ref::<args::TemplateDict>()) {
+            substitutions.extend(computed.substitutions());
+        }
         state.register(Action {
             mnemonic: Symbol::intern("TemplateExpand"),
             progress_message: String::new(),
@@ -477,6 +515,33 @@ fn actions_methods(builder: &mut MethodsBuilder) {
             execution_requirements,
         };
         spawn.register(state, command, Tools::default())
+    }
+
+    /// `transform_version_file(*, transform_func, template,
+    /// output_file_name)`: a file from the volatile build status. bb
+    /// doesn't stamp, so the status has fixed values.
+    fn transform_version_file<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = named)] transform_func: Value<'v>,
+        #[starlark(require = named)] template: Value<'v>,
+        #[starlark(require = named)] output_file_name: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<FileValue> {
+        let status = [("BUILD_TIMESTAMP", "0"), ("BUILD_SCM_REVISION", "0"), ("BUILD_SCM_STATUS", "")];
+        transform_status_file(transform_func, template, output_file_name, &status, eval)
+    }
+
+    /// `transform_info_file(*, transform_func, template, output_file_name)`:
+    /// a file from the stable build status.
+    fn transform_info_file<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = named)] transform_func: Value<'v>,
+        #[starlark(require = named)] template: Value<'v>,
+        #[starlark(require = named)] output_file_name: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<FileValue> {
+        let status = [("BUILD_EMBED_LABEL", ""), ("BUILD_HOST", "bb"), ("BUILD_USER", "bb")];
+        transform_status_file(transform_func, template, output_file_name, &status, eval)
     }
 
     /// `do_nothing(*, mnemonic, inputs = [])`.

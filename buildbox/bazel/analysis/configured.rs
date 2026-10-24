@@ -248,7 +248,8 @@ async fn implementation(ctx: &Ctx, class: &RuleClassRef) -> Result<Implementatio
     let Some((bzl, name)) = class.definition else {
         return Ok(Implementation::Native(class.kind));
     };
-    if bzl.repo().as_str() == bazel_loading::BUILTINS_REPO && crate::native::STUBBED_BUILTINS.contains(&class.kind.as_str()) {
+    let native = crate::native::STUBBED_BUILTINS.contains(&class.kind.as_str()) || crate::cc::NATIVE_RULES.contains(&class.kind.as_str());
+    if bzl.repo().as_str() == bazel_loading::BUILTINS_REPO && native {
         return Ok(Implementation::Native(class.kind));
     }
     if bzl.repo().as_str() == bazel_loading::BUILTINS_REPO {

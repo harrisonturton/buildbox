@@ -58,6 +58,7 @@ fn engine_config() -> EngineConfig {
 
 impl BazelServer {
     pub fn new(config: ServerConfig) -> BazelServer {
+        bazel_analysis::cc::register();
         let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), Some(BAZEL_VERSION));
         match &bazel_tools {
             Some(dir) => tracing::info!("using @bazel_tools from {}", dir.display()),

@@ -48,7 +48,7 @@ pub struct Defaults {
 pub fn collect<'v>(label: Label, returned: Value<'v>, defaults: &Defaults, heap: Heap<'v>) -> anyhow::Result<TargetValue<'v>> {
     let items = if returned.is_none() {
         Vec::new()
-    } else if ProviderInstance::from_value(returned).is_some() {
+    } else if ProviderInstance::from_value(returned).is_some() || native_provider_key(returned).is_some() {
         vec![returned]
     } else {
         bazel_starlark::convert::items(returned).ok_or_else(|| {
@@ -60,10 +60,13 @@ pub fn collect<'v>(label: Label, returned: Value<'v>, defaults: &Defaults, heap:
         if item.downcast_ref::<Opaque>().is_some() {
             continue;
         }
-        let Some(instance) = ProviderInstance::from_value(item) else {
-            anyhow::bail!("{label}: a rule implementation must return providers, not {}", item.get_type());
+        let key = match ProviderInstance::from_value(item) {
+            Some(instance) => instance.provider_key().unwrap_or_default(),
+            None => match native_provider_key(item) {
+                Some(key) => key.to_string(),
+                None => anyhow::bail!("{label}: a rule implementation must return providers, not {}", item.get_type()),
+            },
         };
-        let key = instance.provider_key().unwrap_or_default();
         if providers.insert(key.clone(), item).is_some() {
             anyhow::bail!("{label}: the rule returned more than one {key}");
         }
@@ -72,6 +75,19 @@ pub fn collect<'v>(label: Label, returned: Value<'v>, defaults: &Defaults, heap:
     let default_info = default_info(label, given, defaults, heap)?;
     providers.insert(DEFAULT_INFO.to_string(), default_info);
     Ok(TargetValue { label, providers })
+}
+
+/// The provider an instance of a natively implemented provider, such as a
+/// `CcInfo`, is of.
+fn native_provider_key(value: Value<'_>) -> Option<&'static str> {
+    use crate::cc::values::{CcStruct, CcToolchain, ToolchainConfigValue};
+    if let Some(value) = CcStruct::from_value(value) {
+        return (value.kind == "CcInfo").then_some("CcInfo");
+    }
+    if CcToolchain::from_value(value).is_some() {
+        return Some("CcToolchainInfo");
+    }
+    value.downcast_ref::<ToolchainConfigValue>().map(|_| "CcToolchainConfigInfo")
 }
 
 /// A complete `DefaultInfo`, from one a rule returned, with what it left

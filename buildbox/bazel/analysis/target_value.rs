@@ -50,6 +50,9 @@ impl<'v, V: ValueLike<'v>> TargetValueGen<V> {
 }
 
 fn provider_key(value: Value<'_>) -> starlark::Result<String> {
+    if let Some(provider) = value.downcast_ref::<crate::cc::values::NativeProvider>() {
+        return Ok(provider.name.to_string());
+    }
     match Provider::from_value(value) {
         Some(provider) => Ok(provider.key()),
         None => Err(starlark::Error::new_other(anyhow::anyhow!(
@@ -85,7 +88,7 @@ where
                 "<target {}> (rule '{}') doesn't contain declared provider '{}'",
                 self.label,
                 self.label.name,
-                Provider::from_value(index).map(|provider| provider.name().to_string()).unwrap_or_default()
+                provider_key(index).unwrap_or_default()
             ))),
         }
     }

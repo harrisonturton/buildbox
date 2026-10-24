@@ -347,26 +347,22 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     let build_file_path = artifact::package_dir(input.label.package).join(input.build_file.name);
     set("build_file_path", heap.alloc(build_file_path.to_string()));
     set("var", heap.alloc(AllocDict(state.make_variables.iter().map(|(name, value)| (name.as_str(), value.as_str())))));
-    set("configuration", configuration_struct(config, heap));
+    let options = crate::fragments::Options {
+        compilation_mode: config.options.compilation_mode.clone(),
+        action_env: config.options.action_env.clone(),
+        values: config.options.values.clone(),
+        is_exec: config.options.is_exec,
+    };
+    set("configuration", heap.alloc(crate::fragments::Configuration(options.clone())));
     set("features", heap.alloc(AllocList::EMPTY));
     set("disabled_features", heap.alloc(AllocList::EMPTY));
     set("toolchains", heap.alloc(ToolchainContext::new(&input.toolchains, heap)));
-    set("fragments", heap.alloc(Opaque::new("ctx.fragments")));
+    set("fragments", heap.alloc(crate::fragments::Fragments(options)));
     set("exec_groups", heap.alloc(Opaque::new("ctx.exec_groups")));
     set("split_attr", heap.alloc(AllocStruct(Vec::<(&str, Value<'v>)>::new())));
     set("aspect_ids", heap.alloc(AllocList::EMPTY));
     set("build_setting_value", build_setting_value(input, heap));
     Ok(fields)
-}
-
-fn configuration_struct<'v>(config: &BuildConfiguration, heap: Heap<'v>) -> Value<'v> {
-    let env = heap.alloc(AllocDict(config.options.action_env.iter().map(|(name, value)| (name.as_str(), value.as_str()))));
-    heap.alloc(AllocStruct([
-        ("coverage_enabled", Value::new_bool(false)),
-        ("host_path_separator", heap.alloc(":")),
-        ("default_shell_env", env),
-        ("test_env", heap.alloc(AllocDict(Vec::<(&str, &str)>::new()))),
-    ]))
 }
 
 /// The value of a build setting: from the command line, or its default.
@@ -401,7 +397,15 @@ fn attr_struct<'v>(input: &RuleInput, prepared: &Prepared<'v>, heap: Heap<'v>) -
     heap.alloc(AllocStruct(fields))
 }
 
+/// Late-bound attributes for Apple platforms, which rules read
+/// unconditionally but only use when building for them. They stand in for
+/// targets bb doesn't analyze.
+const APPLE_LATE_BOUND_ATTRS: &[&str] = &["_xcode_config"];
+
 fn attr_value<'v>(input: &RuleInput, prepared: &Prepared<'v>, schema: &AttrSchema, value: &AttrValue, heap: Heap<'v>) -> Value<'v> {
+    if APPLE_LATE_BOUND_ATTRS.contains(&schema.name.as_str()) && matches!(value, AttrValue::None) {
+        return heap.alloc(Opaque::new(schema.name.as_str()));
+    }
     let config = dep_config(schema.cfg, input.config.id);
     let target = |label: &Label| prepared.deps.get(&(*label, config)).copied().unwrap_or_else(Value::new_none);
     match (schema.ty, value) {
