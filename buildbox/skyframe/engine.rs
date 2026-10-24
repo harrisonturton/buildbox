@@ -311,6 +311,13 @@ impl EngineInner {
                 traces: store_kind(kind.trace_store_kind()),
             });
         }
+        for (name, kind) in kinds::part_kinds() {
+            stats.kinds.push(KindRow {
+                name,
+                values: store.kinds.get(kind.0 as usize).copied().unwrap_or_default(),
+                ..KindRow::default()
+            });
+        }
         stats.store = store;
         stats
     }

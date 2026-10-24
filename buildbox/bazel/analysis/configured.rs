@@ -1,6 +1,6 @@
 //! Configured targets: targets analyzed in a configuration.
 
-use crate::action::Action;
+use crate::action::{Action, StoredAction};
 use crate::artifact::{self, Artifact};
 use crate::attrs::resolve_attrs;
 use crate::build_ctx::{self, Dep, RuleInput};
@@ -40,7 +40,7 @@ pub struct ConfiguredTarget {
     pub is_test: bool,
     /// The [`TargetValue`](crate::TargetValue) dependents see.
     pub value: OwnedFrozenValue,
-    pub actions: Vec<Action>,
+    pub actions: Vec<StoredAction>,
     /// Which action generates each output, by exec path, sorted.
     pub generating: Vec<(PathId, u32)>,
     /// Identifies what the target was analyzed from.
@@ -80,7 +80,7 @@ impl Value for ConfiguredTarget {
 
 impl ConfiguredTarget {
     /// The action that generates an output, if this target has one.
-    pub fn generating_action(&self, output: PathId) -> Option<(u32, &Action)> {
+    pub fn generating_action(&self, output: PathId) -> Option<(u32, &StoredAction)> {
         let index = self.generating.binary_search_by(|(path, _)| path.cmp(&output)).ok()?;
         let action = self.generating[index].1;
         Some((action, &self.actions[action as usize]))
@@ -98,7 +98,7 @@ impl Key for ConfiguredTargetKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<ConfiguredTarget, SkyError> {
         if self.label == *crate::workspace_status::OWNER {
-            return workspace_status(*self);
+            return workspace_status(ctx, *self);
         }
         let package = ctx.compute(&PackageKey(self.label.package)).await?;
         let Some(target) = package.0.target(self.label.name) else {
@@ -106,7 +106,7 @@ impl Key for ConfiguredTargetKey {
         };
         match target {
             Target::Rule(rule) => analyze_rule(ctx, *self, &package.0, rule).await,
-            Target::SourceFile(_) => file(*self, "source file", Artifact::source(self.label)),
+            Target::SourceFile(_) => file(ctx, *self, "source file", Artifact::source(self.label)),
             Target::OutputFile { rule, .. } => {
                 let owner = ConfiguredTargetKey {
                     label: self.label.sibling(*rule),
@@ -114,9 +114,9 @@ impl Key for ConfiguredTargetKey {
                 };
                 ctx.compute(&owner).await?;
                 let artifact = Artifact::derived(owner.label, &self.config.get(), artifact::name_path(self.label), false);
-                file(*self, "generated file", artifact)
+                file(ctx, *self, "generated file", artifact)
             }
-            Target::PackageGroup(_) => file_less(*self, "package group"),
+            Target::PackageGroup(_) => file_less(ctx, *self, "package group"),
         }
     }
 }
@@ -156,7 +156,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     let attrs = resolve_attrs(ctx, rule, &class, key.config).await?;
     if let Some(constraint) = unsatisfied_constraint(ctx, &attrs, key.config).await? {
         let reason = Incompatibility { chain: vec![key], constraint };
-        return incompatible(key, class_ref.kind, class.test, reason);
+        return incompatible(ctx, key, class_ref.kind, class.test, reason);
     }
     let implementation = implementation(ctx, &class_ref)
         .await
@@ -166,7 +166,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         false => analyze_deps(ctx, &class, &attrs, key.config).await?,
     };
     if let Some(reason) = incompatible_dep(key, &deps) {
-        return incompatible(key, class_ref.kind, class.test, reason);
+        return incompatible(ctx, key, class_ref.kind, class.test, reason);
     }
     let config = key.config.get();
     let platform = ctx.compute(&PlatformKey(config.options.platform)).await?;
@@ -193,7 +193,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     };
     let analyzed = bazel_loading::blocking(move || evaluate(input)).await?;
     let analyzed = analyzed.map_err(SkyError::new)?;
-    Ok(configured(key, class_ref.kind, class.test, analyzed, fingerprint))
+    Ok(configured(ctx, key, class_ref.kind, class.test, analyzed, fingerprint))
 }
 
 /// The first constraint of the rule's `target_compatible_with` that the
@@ -397,21 +397,22 @@ pub struct Analyzed {
 /// The name the target value is kept under in its frozen module.
 const TARGET: &str = "target";
 
-fn configured(key: ConfiguredTargetKey, kind: Symbol, is_test: bool, analyzed: Analyzed, fingerprint: Fingerprint) -> ConfiguredTarget {
+fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool, analyzed: Analyzed, fingerprint: Fingerprint) -> ConfiguredTarget {
     let mut generating: Vec<(PathId, u32)> = Vec::new();
     for (index, action) in analyzed.actions.iter().enumerate() {
         generating.extend(action.outputs.iter().map(|output| (output.exec_path, index as u32)));
     }
     generating.sort();
     let value = analyzed.module.get(TARGET).expect("analysis sets the target");
-    let size = analyzed.module.frozen_heap().allocated_bytes() + analyzed.actions.len() * 256;
+    let size = analyzed.module.frozen_heap().allocated_bytes() + analyzed.actions.len() * size_of::<StoredAction>();
+    let actions = analyzed.actions.into_iter().map(|action| StoredAction::new(ctx, action)).collect();
     ConfiguredTarget {
         label: key.label,
         config: key.config,
         kind,
         is_test,
         value,
-        actions: analyzed.actions,
+        actions,
         generating,
         fingerprint,
         incompatible: None,
@@ -421,7 +422,7 @@ fn configured(key: ConfiguredTargetKey, kind: Symbol, is_test: bool, analyzed: A
 
 /// The configured target of a target that can't be built for the target
 /// platform: it provides nothing.
-fn incompatible(key: ConfiguredTargetKey, kind: Symbol, is_test: bool, reason: Incompatibility) -> Result<ConfiguredTarget, SkyError> {
+fn incompatible(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool, reason: Incompatibility) -> Result<ConfiguredTarget, SkyError> {
     let mut fingerprinter = Fingerprinter::new();
     fingerprinter.bytes(b"incompatible").bytes(key.label.to_string().as_bytes());
     fingerprinter.bytes(key.config.get().output_directory.as_bytes());
@@ -429,7 +430,7 @@ fn incompatible(key: ConfiguredTargetKey, kind: Symbol, is_test: bool, reason: I
         fingerprinter.bytes(link.label.to_string().as_bytes());
     }
     fingerprinter.bytes(reason.constraint.to_string().as_bytes());
-    let mut target = empty_target(key, kind.as_str(), is_test, fingerprinter.finish())?;
+    let mut target = empty_target(ctx, key, kind.as_str(), is_test, fingerprinter.finish())?;
     target.incompatible = Some(Arc::new(reason));
     Ok(target)
 }
@@ -444,7 +445,7 @@ fn evaluate(input: RuleInput) -> Result<Analyzed, String> {
 }
 
 /// The configured target of a file: it has no actions of its own.
-fn file(key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> Result<ConfiguredTarget, SkyError> {
+fn file(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> Result<ConfiguredTarget, SkyError> {
     let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<Analyzed> {
         let target = providers::file_target(key.label, artifact, module.heap())?;
         module.set(TARGET, module.heap().alloc(target));
@@ -455,32 +456,32 @@ fn file(key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> Result<Conf
     let mut fingerprinter = Fingerprinter::new();
     fingerprinter.bytes(kind.as_bytes()).bytes(artifact.exec_path.to_string().as_bytes());
     fingerprinter.bytes(format!("{:?}", artifact.config.map(|config| config.get().options.clone())).as_bytes());
-    Ok(configured(key, Symbol::intern(kind), false, analyzed, fingerprinter.finish()))
+    Ok(configured(ctx, key, Symbol::intern(kind), false, analyzed, fingerprinter.finish()))
 }
 
 /// The target that writes the status files.
-fn workspace_status(key: ConfiguredTargetKey) -> Result<ConfiguredTarget, SkyError> {
+fn workspace_status(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarget, SkyError> {
     let fingerprint = Fingerprint::of(format!("workspace status {}", key.config.get().output_directory).as_bytes());
-    let mut target = empty_target(key, "workspace status", false, fingerprint)?;
-    target.actions = crate::workspace_status::actions(&key.config.get());
-    target.generating = target
-        .actions
+    let actions = crate::workspace_status::actions(&key.config.get());
+    let mut target = empty_target(ctx, key, "workspace status", false, fingerprint)?;
+    target.generating = actions
         .iter()
         .enumerate()
         .flat_map(|(index, action)| action.outputs.iter().map(move |output| (output.exec_path, index as u32)))
         .collect();
     target.generating.sort();
+    target.actions = actions.into_iter().map(|action| StoredAction::new(ctx, action)).collect();
     Ok(target)
 }
 
 /// The configured target of something with no files, such as a package
 /// group.
-fn file_less(key: ConfiguredTargetKey, kind: &str) -> Result<ConfiguredTarget, SkyError> {
-    empty_target(key, kind, false, Fingerprint::of(key.label.to_string().as_bytes()))
+fn file_less(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str) -> Result<ConfiguredTarget, SkyError> {
+    empty_target(ctx, key, kind, false, Fingerprint::of(key.label.to_string().as_bytes()))
 }
 
 /// A configured target with only an empty `DefaultInfo`.
-fn empty_target(key: ConfiguredTargetKey, kind: &str, is_test: bool, fingerprint: Fingerprint) -> Result<ConfiguredTarget, SkyError> {
+fn empty_target(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, is_test: bool, fingerprint: Fingerprint) -> Result<ConfiguredTarget, SkyError> {
     let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<Analyzed> {
         let defaults = providers::Defaults {
             files: Vec::new(),
@@ -492,5 +493,5 @@ fn empty_target(key: ConfiguredTargetKey, kind: &str, is_test: bool, fingerprint
         Ok(Analyzed { module, actions: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
-    Ok(configured(key, Symbol::intern(kind), is_test, analyzed, fingerprint))
+    Ok(configured(ctx, key, Symbol::intern(kind), is_test, analyzed, fingerprint))
 }

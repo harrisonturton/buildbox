@@ -30,7 +30,7 @@ mod target_value;
 mod toolchains;
 mod workspace_status;
 
-pub use action::{Action, ActionKind, RunfilesTree, Spawn};
+pub use action::{Action, ActionKind, RunfilesTree, Spawn, StoredAction};
 pub use inputs::InputSet;
 pub use artifact::{Artifact, name_path, package_dir, repo_dir, runfiles_repo_name};
 pub use configured::{ConfiguredTarget, ConfiguredTargetKey, Incompatibility};

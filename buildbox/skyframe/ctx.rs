@@ -1,5 +1,6 @@
 //! What a key's function uses to read other keys.
 
+use crate::part::{Part, Stored};
 use crate::graph::GraphInner;
 use crate::key::Key;
 use crate::keys::KeyId;
@@ -47,6 +48,11 @@ impl Ctx {
     /// The dependencies recorded so far, leaving none.
     pub(crate) fn finish(&self) -> Recorded {
         std::mem::take(&mut *self.lock())
+    }
+
+    /// Keep `part` of the value being computed in the engine's store.
+    pub fn store<T: Part>(&self, part: &T) -> Stored<T> {
+        Stored::new(self.0.graph.engine.0.clone(), part)
     }
 
     /// The value of `key`, or the error computing it.

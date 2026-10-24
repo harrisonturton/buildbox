@@ -4,6 +4,7 @@ use crate::artifact::Artifact;
 use crate::inputs::InputSet;
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
+use skyframe::{Ctx, Part, SkyError, Stored};
 use std::sync::Arc;
 
 /// An action a rule registers: its inputs and outputs, and how it turns one
@@ -73,5 +74,58 @@ impl Action {
         all.sort();
         all.dedup();
         all
+    }
+}
+
+/// What an action is besides its inputs and tools' runfiles: kept in the
+/// engine's store, compressed with the other actions'.
+#[derive(Encode, Decode)]
+struct ActionBody {
+    mnemonic: Symbol,
+    progress_message: String,
+    outputs: Vec<Artifact>,
+    kind: ActionKind,
+}
+
+impl Part for ActionBody {
+    const KIND: &'static str = "ACTION";
+}
+
+/// An action as an analyzed target keeps it: its inputs and runfiles
+/// trees, which it shares with other actions, and the rest stored
+/// compressed, read when the action runs.
+#[derive(Clone, Debug)]
+pub struct StoredAction {
+    inputs: InputSet,
+    runfiles: Vec<Arc<RunfilesTree>>,
+    body: Stored<ActionBody>,
+}
+
+impl StoredAction {
+    pub fn new(ctx: &Ctx, action: Action) -> StoredAction {
+        let body = ActionBody {
+            mnemonic: action.mnemonic,
+            progress_message: action.progress_message,
+            outputs: action.outputs,
+            kind: action.kind,
+        };
+        StoredAction {
+            inputs: action.inputs,
+            runfiles: action.runfiles,
+            body: ctx.store(&body),
+        }
+    }
+
+    /// The action, read from the store.
+    pub fn load(&self) -> Result<Action, SkyError> {
+        let body = self.body.get()?;
+        Ok(Action {
+            mnemonic: body.mnemonic,
+            progress_message: body.progress_message,
+            inputs: self.inputs.clone(),
+            runfiles: self.runfiles.clone(),
+            outputs: body.outputs,
+            kind: body.kind,
+        })
     }
 }

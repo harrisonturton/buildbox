@@ -89,6 +89,35 @@ pub(crate) fn info(kind: KindId) -> &'static KindInfo {
     registry.infos[kind.0 as usize]
 }
 
+/// The first store kind of parts, above every key kind's.
+const FIRST_PART_STORE_KIND: u16 = 2 + 2 * MAX_KINDS as u16;
+
+static PARTS: LazyLock<RwLock<Vec<(TypeId, &'static str)>>> = LazyLock::new(Default::default);
+
+/// The store kind of part type `T`, registering it if needed.
+pub(crate) fn part_store_kind<T: crate::Part>() -> Kind {
+    let type_id = TypeId::of::<T>();
+    let index = |parts: &[(TypeId, &'static str)]| parts.iter().position(|(id, _)| *id == type_id);
+    if let Some(index) = index(&PARTS.read().unwrap_or_else(|poisoned| poisoned.into_inner())) {
+        return Kind(FIRST_PART_STORE_KIND + index as u16);
+    }
+    let mut parts = PARTS.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let index = match index(&parts) {
+        Some(index) => index,
+        None => {
+            parts.push((type_id, T::KIND));
+            parts.len() - 1
+        }
+    };
+    Kind(FIRST_PART_STORE_KIND + index as u16)
+}
+
+/// Every registered part type's name and store kind.
+pub(crate) fn part_kinds() -> Vec<(&'static str, Kind)> {
+    let parts = PARTS.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    parts.iter().enumerate().map(|(index, (_, name))| (*name, Kind(FIRST_PART_STORE_KIND + index as u16))).collect()
+}
+
 /// Every registered kind's name, indexed by kind.
 pub(crate) fn names() -> Vec<&'static str> {
     let registry = REGISTRY.read().unwrap_or_else(|poisoned| poisoned.into_inner());

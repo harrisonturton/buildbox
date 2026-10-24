@@ -21,6 +21,7 @@ mod graph;
 mod key;
 mod keys;
 mod kinds;
+mod part;
 mod trace;
 
 pub use cache::CacheStats;
@@ -31,5 +32,6 @@ pub use error::{ErrorKind, SkyError};
 pub use graph::{Globals, Graph, GraphStats, Session};
 pub use key::{Key, Storage, Value};
 pub use keys::KeyId;
+pub use part::{Part, Stored};
 
 pub use skycodec;

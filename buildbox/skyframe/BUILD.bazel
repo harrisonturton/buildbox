@@ -14,6 +14,7 @@ rust_library(
         "key.rs",
         "keys.rs",
         "kinds.rs",
+        "part.rs",
         "skyframe.rs",
         "trace.rs",
     ],

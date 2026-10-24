@@ -58,9 +58,10 @@ impl Key for ActionKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<ActionOutputs, SkyError> {
         let target = ctx.compute(&self.owner).await?;
-        let Some(action) = target.actions.get(self.index as usize) else {
+        let Some(stored) = target.actions.get(self.index as usize) else {
             return Err(SkyError::new(format!("{} has no action {}", self.owner.label, self.index)));
         };
+        let action = &stored.load()?;
         let backend = ctx.global::<Backend>()?;
         let span = tracing::info_span!("action", mnemonic = action.mnemonic.as_str(), label = %self.owner.label);
         run(ctx, &backend, self.owner, action).instrument(span).await
