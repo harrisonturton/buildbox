@@ -75,6 +75,7 @@ fn io_error(action: &str, path: &Path, error: std::io::Error) -> SkyError {
 
 /// A runfiles tree to write next to an executable: each file's path in the
 /// tree, and the file it links to.
+#[derive(Clone)]
 pub struct RunfilesLayout {
     /// The executable, as an absolute path.
     pub executable: PathBuf,

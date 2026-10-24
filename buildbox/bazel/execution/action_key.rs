@@ -5,10 +5,12 @@ use crate::digest::BlobDigest;
 use crate::source::SourceDigestKey;
 use bazel_analysis::{Action, ActionKind, Artifact, ConfiguredTargetKey};
 use bazel_fs::RootedPath;
+use futures::StreamExt;
 use bazel_loading::RepoRootKey;
 use intern::PathId;
 use skycodec::{Decode, Encode};
 use skyframe::{Ctx, Key, SkyError, encoded_value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::Instrument;
@@ -133,19 +135,28 @@ async fn source_input(ctx: &Ctx, artifact: Artifact) -> Result<Input, SkyError> 
 
 /// Make sure an input is in the CAS, uploading it if it's a source file.
 pub async fn upload(backend: &Backend, inputs: &[&Input]) -> Result<(), SkyError> {
-    let digests: Vec<cas::Digest> = inputs.iter().map(|input| input.digest.to_cas()).collect();
+    let by_digest: HashMap<cas::Digest, &Input> = inputs.iter().map(|input| (input.digest.to_cas(), *input)).collect();
+    let digests: Vec<cas::Digest> = by_digest.keys().cloned().collect();
     let missing = backend.cas.find_missing(&digests).await.map_err(cas_error)?;
+    let mut uploads = Vec::with_capacity(missing.len());
     for digest in missing {
-        let Some(input) = inputs.iter().find(|input| input.digest.to_cas() == digest) else {
+        let Some(input) = by_digest.get(&digest) else {
             continue;
         };
         let Some(source) = &input.source else {
             return Err(SkyError::transient(format!("an action's output {digest} is no longer in the CAS")));
         };
-        backend.cas.put_file(source).await.map_err(cas_error)?;
+        uploads.push(backend.cas.put_file(source));
+    }
+    let results: Vec<_> = futures::stream::iter(uploads).buffer_unordered(UPLOADS).collect().await;
+    for result in results {
+        result.map_err(cas_error)?;
     }
     Ok(())
 }
+
+/// How many source files an action uploads at once.
+const UPLOADS: usize = 16;
 
 pub fn cas_error(error: cas::CasError) -> SkyError {
     SkyError::transient(format!("CAS: {error}"))

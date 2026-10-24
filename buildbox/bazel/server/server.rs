@@ -16,7 +16,9 @@ mod run;
 mod runfiles;
 mod service;
 mod test;
+mod top_level;
 mod workspace;
+mod written;
 
 pub use command::{BAZEL_VERSION, Invocation, exit};
 pub use memory::configure_allocator;

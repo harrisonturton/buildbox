@@ -3,7 +3,9 @@
 
 use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
-use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Incompatibility, Runfiles, TargetValue};
+use crate::top_level::{TopLevel, TopLevelKey};
+use crate::written::Written;
+use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Incompatibility};
 use bazel_config::{BuildOptions, ConfigId};
 use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
@@ -12,12 +14,15 @@ use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
 use bazel_packages::{AttrValue, Target};
 use bazel_query::{QueryOptions, TargetSet, Universe};
 use bazel_starlark::depset::Depset;
+use futures::StreamExt;
 use intern::{PathId, Symbol};
+use skycodec::Fingerprint;
 use skyframe::Session;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::Instrument;
 
 /// The options `build` and the commands built on it take.
 pub fn build_spec() -> OptionSpec {
@@ -30,6 +35,7 @@ pub fn build_spec() -> OptionSpec {
         ("define", Multi),
         ("action_env", Multi),
         ("repo_env", Multi),
+        ("build", Bool),
         ("protocopt", Multi),
         ("strict_proto_deps", Value),
         ("strict_public_imports", Value),
@@ -180,27 +186,34 @@ pub async fn run_command(
 
     let exec_root = crate::commands::output_base_for(context.server, &context.workspace_root).join("execroot/_main");
     let backend = context.server.backend();
-    let wanted: Vec<Vec<Artifact>> = analyzed
-        .iter()
-        .map(|(_, target)| match target.incompatible {
-            Some(_) => Vec::new(),
-            None => top_level_artifacts(target),
-        })
-        .collect();
-    let all: Vec<Artifact> = wanted.iter().flatten().copied().collect::<BTreeSet<_>>().into_iter().collect();
+    // --nobuild stops after analysis.
+    let execute_actions = options.flag("build", true);
+    let (top_levels, failed) = top_levels(session, &analyzed, execute_actions, out).await;
+    errors |= failed;
+    let all: Vec<Artifact> = top_levels.iter().flatten().flat_map(|top| top.artifacts.iter().copied()).collect::<BTreeSet<_>>().into_iter().collect();
     let (built, failed) = execute(session, &all, out).await;
     errors |= failed;
-    let built: HashMap<PathId, OutputFile> = built.into_iter().map(|file| (file.path, file)).collect();
+    let built_by_path: HashMap<PathId, OutputFile> = built.iter().map(|file| (file.path, *file)).collect();
     let mut targets = Vec::new();
-    for ((label, target), artifacts) in analyzed.into_iter().zip(wanted) {
-        let files: Vec<OutputFile> = artifacts.iter().filter_map(|artifact| built.get(&artifact.exec_path).copied()).collect();
-        if let Some(backend) = &backend {
-            if let Err(error) = write_outputs(session, backend, &target, &files, &exec_root, &context.workspace_root).await {
-                out.error(error.message()).await;
-                errors = true;
-            }
-        }
+    for ((label, target), top) in analyzed.into_iter().zip(&top_levels) {
+        let artifacts = top.as_ref().map(|top| top.artifacts.as_slice()).unwrap_or_default();
+        let files: Vec<OutputFile> = artifacts.iter().filter_map(|artifact| built_by_path.get(&artifact.exec_path).copied()).collect();
         targets.push((label, target, files));
+    }
+    if let Some(backend) = &backend {
+        let written = context.server.workspaces().get(&context.workspace_root).written.clone();
+        let mut results = vec![write_files(backend, &written, &exec_root, built).await];
+        let trees: Vec<_> = targets
+            .iter()
+            .zip(&top_levels)
+            .filter_map(|((_, target, files), top)| Some((target, files, top.as_ref()?.runfiles?)))
+            .map(|(target, files, runfiles)| Box::pin(write_runfiles_tree(session, &written, target, files, runfiles, &exec_root, &context.workspace_root)))
+            .collect();
+        results.extend(futures::stream::iter(trees).buffer_unordered(OUTPUT_WRITERS).collect::<Vec<_>>().await);
+        for error in results.into_iter().filter_map(Result::err) {
+            out.error(error.message()).await;
+            errors = true;
+        }
     }
     Ok(Built {
         main_mapping,
@@ -267,21 +280,107 @@ async fn report_analysis(analyzed: &[(Label, Arc<ConfiguredTarget>)], mapping: &
     }
 }
 
-/// Write a target's files to the output tree, and its executable's
-/// runfiles tree.
-async fn write_outputs(
+/// What each analyzed target builds at the top level, and whether working
+/// it out failed. Incompatible targets, and every target under --nobuild,
+/// build nothing.
+async fn top_levels(
     session: &Session,
-    backend: &bazel_execution::Backend,
+    analyzed: &[(Label, Arc<ConfiguredTarget>)],
+    execute_actions: bool,
+    out: &Output,
+) -> (Vec<Option<Arc<TopLevel>>>, bool) {
+    let keys: Vec<TopLevelKey> = analyzed.iter().map(|(_, target)| TopLevelKey(ConfiguredTargetKey { label: target.label, config: target.config })).collect();
+    let wanted: Vec<bool> = analyzed.iter().map(|(_, target)| execute_actions && target.incompatible.is_none()).collect();
+    let to_compute: Vec<TopLevelKey> = keys.iter().zip(&wanted).filter(|(_, wanted)| **wanted).map(|(key, _)| key.clone()).collect();
+    let mut computed = session.evaluate_many(&to_compute).await.into_iter();
+    let mut failed = false;
+    let mut top_levels = Vec::with_capacity(keys.len());
+    for wanted in wanted {
+        let top = match wanted {
+            false => None,
+            true => computed.next(),
+        };
+        let top = match top {
+            Some(Ok(top)) => Some(top),
+            Some(Err(error)) => {
+                out.error(error.message()).await;
+                failed = true;
+                None
+            }
+            None => None,
+        };
+        top_levels.push(top);
+    }
+    (top_levels, failed)
+}
+
+/// Write the built files to the output tree, but those already there as
+/// they were written.
+async fn write_files(backend: &bazel_execution::Backend, written: &Arc<Written>, exec_root: &Path, files: Vec<OutputFile>) -> Result<(), skyframe::SkyError> {
+    let span = tracing::info_span!("write_files", files = files.len());
+    async {
+        let changed = blocking({
+            let (written, exec_root) = (written.clone(), exec_root.to_path_buf());
+            move || written.changed_outputs(&exec_root, &files)
+        })
+        .await?;
+        bazel_execution::materialize(backend, exec_root, &changed).await?;
+        blocking({
+            let (written, exec_root) = (written.clone(), exec_root.to_path_buf());
+            move || written.record_outputs(&exec_root, &changed)
+        })
+        .await
+    }
+    .instrument(span)
+    .await
+}
+
+/// Run blocking filesystem work off the async runtime.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, skyframe::SkyError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| skyframe::SkyError::transient(format!("output tree task failed: {error}")))
+}
+
+/// How many targets' outputs are written to the output tree at once.
+const OUTPUT_WRITERS: usize = 16;
+
+/// Write a target's runfiles tree, once its executable is built, unless
+/// it's already in place.
+async fn write_runfiles_tree(
+    session: &Session,
+    written: &Arc<Written>,
     target: &ConfiguredTarget,
     files: &[OutputFile],
+    fingerprint: Fingerprint,
     exec_root: &Path,
     workspace: &Path,
 ) -> Result<(), skyframe::SkyError> {
-    bazel_execution::materialize(backend, exec_root, files).await?;
-    if let Some(layout) = crate::runfiles::layout(session, target, exec_root, workspace).await? {
-        bazel_execution::write_runfiles(layout).await?;
+    let Some(executable) = crate::runfiles::executable(target) else {
+        return Ok(());
+    };
+    if !files.iter().any(|file| file.path == executable.exec_path) {
+        return Ok(());
     }
-    Ok(())
+    let executable_path = exec_root.join(executable.exec_path.to_string());
+    let unchanged = blocking({
+        let (written, executable_path) = (written.clone(), executable_path.clone());
+        move || written.runfiles_unchanged(&executable_path, fingerprint)
+    })
+    .await?;
+    if unchanged {
+        return Ok(());
+    }
+    let Some(layout) = crate::runfiles::layout(session, target, exec_root, workspace).await? else {
+        return Ok(());
+    };
+    let span = tracing::info_span!("write_runfiles", label = %target.label, entries = layout.entries.len());
+    bazel_execution::write_runfiles(layout).instrument(span).await?;
+    blocking({
+        let written = written.clone();
+        move || written.record_runfiles(&executable_path, fingerprint)
+    })
+    .await
 }
 
 fn plural(count: usize, word: &str) -> String {
@@ -522,27 +621,8 @@ async fn analyze(
     (analyzed, errors)
 }
 
-/// The files building a target builds: its default outputs, and if it's
-/// executable, its runfiles.
-pub fn top_level_artifacts(target: &ConfiguredTarget) -> Vec<Artifact> {
-    let Some(value) = target.target_value() else {
-        return Vec::new();
-    };
-    let mut artifacts = depset_files(value.default_info("files"));
-    let runfiles = value.default_info("default_runfiles").and_then(Runfiles::from_value);
-    if let Some(runfiles) = runfiles.filter(|_| has_executable(value)) {
-        artifacts.extend(runfiles.entries("_main").into_iter().map(|(_, artifact)| artifact));
-    }
-    let mut seen = BTreeSet::new();
-    artifacts.retain(|artifact| seen.insert(*artifact));
-    artifacts
-}
-
-fn has_executable(value: &TargetValue<'_>) -> bool {
-    value.default_info("executable").is_some()
-}
-
-fn depset_files(value: Option<starlark::values::Value<'_>>) -> Vec<Artifact> {
+/// The files of a depset of files.
+pub(crate) fn depset_files(value: Option<starlark::values::Value<'_>>) -> Vec<Artifact> {
     let Some(depset) = value.and_then(Depset::from_value) else {
         return Vec::new();
     };
@@ -552,14 +632,13 @@ fn depset_files(value: Option<starlark::values::Value<'_>>) -> Vec<Artifact> {
 /// Run the actions that generate artifacts, returning their outputs and
 /// whether any failed.
 pub async fn execute(session: &Session, artifacts: &[Artifact], out: &Output) -> (Vec<OutputFile>, bool) {
-    let mut keys = Vec::new();
-    for artifact in artifacts {
-        let Some(key) = generating_action(session, *artifact).await else {
-            continue;
-        };
-        keys.push((key, *artifact));
+    let span = tracing::info_span!("generating_actions", artifacts = artifacts.len());
+    let keys = generating_actions(session, artifacts).instrument(span).await;
+    let mut wanted: BTreeMap<ActionKey, BTreeSet<PathId>> = BTreeMap::new();
+    for (key, artifact) in &keys {
+        wanted.entry(*key).or_default().insert(artifact.exec_path);
     }
-    let unique: Vec<ActionKey> = keys.iter().map(|(key, _)| *key).collect::<BTreeSet<_>>().into_iter().collect();
+    let unique: Vec<ActionKey> = wanted.keys().copied().collect();
     let results = session.evaluate_many(&unique).await;
     let mut files = Vec::new();
     let mut errors = false;
@@ -568,9 +647,8 @@ pub async fn execute(session: &Session, artifacts: &[Artifact], out: &Output) ->
     for (key, result) in unique.iter().zip(results) {
         match result {
             Ok(outputs) => {
-                let wanted = keys.iter().filter(|(candidate, _)| candidate == key).map(|(_, artifact)| artifact.exec_path);
-                let wanted: BTreeSet<_> = wanted.collect();
-                files.extend(outputs.files.iter().filter(|file| wanted.contains(&file.path)).copied());
+                let paths = &wanted[key];
+                files.extend(outputs.files.iter().filter(|file| paths.contains(&file.path)).copied());
             }
             Err(error) => {
                 errors = true;
@@ -583,15 +661,29 @@ pub async fn execute(session: &Session, artifacts: &[Artifact], out: &Output) ->
     (files, errors)
 }
 
-async fn generating_action(session: &Session, artifact: Artifact) -> Option<ActionKey> {
-    let config = artifact.config?;
-    let owner = ConfiguredTargetKey {
-        label: artifact.owner,
-        config,
+/// The actions that generate derived artifacts, with each artifact.
+async fn generating_actions(session: &Session, artifacts: &[Artifact]) -> Vec<(ActionKey, Artifact)> {
+    let owner = |artifact: &Artifact| {
+        artifact.config.map(|config| ConfiguredTargetKey {
+            label: artifact.owner,
+            config,
+        })
     };
-    let target = session.evaluate(&owner).await.ok()?;
-    let (index, _) = target.generating_action(artifact.exec_path)?;
-    Some(ActionKey { owner, index })
+    let owners: Vec<ConfiguredTargetKey> = artifacts.iter().filter_map(owner).collect::<BTreeSet<_>>().into_iter().collect();
+    let targets = session.evaluate_many(&owners).await;
+    let targets: HashMap<ConfiguredTargetKey, Arc<ConfiguredTarget>> =
+        owners.into_iter().zip(targets).filter_map(|(key, target)| Some((key, target.ok()?))).collect();
+    let mut keys = Vec::with_capacity(artifacts.len());
+    for artifact in artifacts {
+        let Some(owner) = owner(artifact) else {
+            continue;
+        };
+        let Some((index, _)) = targets.get(&owner).and_then(|target| target.generating_action(artifact.exec_path)) else {
+            continue;
+        };
+        keys.push((ActionKey { owner, index }, *artifact));
+    }
+    keys
 }
 
 /// Print what each target built, and make the convenience symlinks.

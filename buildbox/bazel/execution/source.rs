@@ -1,5 +1,7 @@
 //! The digests of source files.
 
+use crate::action_key::cas_error;
+use crate::backend::Backend;
 use crate::digest::BlobDigest;
 use bazel_fs::{FileChanges, RootedPath};
 use skycodec::{Decode, Encode};
@@ -17,7 +19,9 @@ pub struct SourceDigest {
 
 encoded_value!(SourceDigest);
 
-/// Hashes a source file, as actions that read it need.
+/// Hashes a source file, as actions that read it need, and stores it in
+/// the CAS actions read their inputs from. Every action that reads the file
+/// shares the one upload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct SourceDigestKey(pub RootedPath);
 
@@ -30,18 +34,37 @@ impl Key for SourceDigestKey {
         let path = self.0.resolve(ctx)?;
         let changes = ctx.global::<FileChanges>().ok();
         let rooted = self.0;
+        let hashed_path = path.clone();
         let result = tokio::task::spawn_blocking(move || {
             if let Some(changes) = changes {
-                changes.record(rooted, &path);
+                changes.record(rooted, &hashed_path);
             }
-            hash_file(&path)
+            hash_file(&hashed_path)
         })
         .await;
-        match result {
-            Ok(result) => result,
-            Err(error) => Err(SkyError::transient(format!("hashing task failed: {error}"))),
+        let digest = match result {
+            Ok(result) => result?,
+            Err(error) => return Err(SkyError::transient(format!("hashing task failed: {error}"))),
+        };
+        if let (Some(blob), Ok(backend)) = (digest.digest, ctx.global::<Backend>()) {
+            store(&backend, blob, &path).await?;
         }
+        Ok(digest)
     }
+}
+
+/// Put a source file in the CAS, unless it's there already.
+async fn store(backend: &Backend, blob: BlobDigest, path: &Path) -> Result<(), SkyError> {
+    let digest = blob.to_cas();
+    let missing = backend.cas.find_missing(std::slice::from_ref(&digest)).await.map_err(cas_error)?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let stored = backend.cas.put_file(path).await.map_err(cas_error)?;
+    if stored != digest {
+        return Err(SkyError::transient(format!("{} changed while it was read", path.display())));
+    }
+    Ok(())
 }
 
 fn hash_file(path: &Path) -> Result<SourceDigest, SkyError> {

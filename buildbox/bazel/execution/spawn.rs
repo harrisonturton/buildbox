@@ -11,6 +11,7 @@ use remote_execution_rust_connect::build::bazel::remote::execution::v2 as reapi;
 use skyframe::{Ctx, SkyError};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tracing::Instrument;
 
 /// How much of an action's output an error message shows.
 const MAX_OUTPUT_IN_ERROR: usize = 64 * 1024;
@@ -42,7 +43,8 @@ pub struct SpawnResult {
 /// Run a command, or reuse a cached successful result. A command that runs
 /// and exits with a non-zero code still has a result.
 pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnResult, SkyError> {
-    let tree = input_tree(backend, &request.inputs, &request.output_directories).await?;
+    let span = tracing::info_span!("input_tree", inputs = request.inputs.len());
+    let tree = input_tree(backend, &request.inputs, &request.output_directories).instrument(span).await?;
     let command = command_proto(&request);
     let command_bytes = command.encode_to_vec();
     let command_digest = cas::Digest::of_bytes(&command_bytes);
@@ -62,12 +64,18 @@ pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnRe
     let mut blobs = tree.blobs;
     blobs.push((command_digest, command_bytes));
     blobs.push((action_digest.clone(), action_bytes));
-    upload_blobs(backend, blobs).await?;
     let sources: Vec<&Input> = request.inputs.values().collect();
-    upload(backend, &sources).await?;
+    let span = tracing::info_span!("upload_inputs", blobs = blobs.len(), inputs = sources.len());
+    async {
+        upload_blobs(backend, blobs).await?;
+        upload(backend, &sources).await
+    }
+    .instrument(span)
+    .await?;
 
     if request.cacheable {
-        if let Some(result) = cached(backend, &action_digest).await? {
+        let span = tracing::info_span!("action_cache_lookup");
+        if let Some(result) = cached(backend, &action_digest).instrument(span).await? {
             return Ok(SpawnResult { result, cached: true });
         }
     }
@@ -98,8 +106,9 @@ pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnRe
 /// Run a spawn action, or reuse its cached result.
 pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, owner: ConfiguredTargetKey, action: &Action, spawn: &Spawn) -> Result<ActionOutputs, SkyError> {
     let (output_files, output_directories) = output_paths(action);
+    let span = tracing::info_span!("action_inputs", inputs = action.inputs.len(), runfiles = action.runfiles.len());
     let request = SpawnRequest {
-        inputs: inputs(ctx, action).await?,
+        inputs: inputs(ctx, action).instrument(span).await?,
         arguments: spawn.arguments.clone(),
         env: spawn.env.clone(),
         output_files,

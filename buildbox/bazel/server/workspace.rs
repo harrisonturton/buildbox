@@ -1,5 +1,6 @@
 //! The workspaces the server knows, each with its own graph.
 
+use crate::written::Written;
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvironment};
 use bazel_execution::SourceDigestKey;
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
@@ -31,6 +32,8 @@ pub struct Workspace {
     pub changes: Arc<FileChanges>,
     /// The environment repository rules see.
     pub client_env: Arc<ClientEnv>,
+    /// What builds wrote to the output tree.
+    pub written: Arc<Written>,
 }
 
 impl Workspace {
@@ -94,6 +97,7 @@ impl Workspaces {
             graph: self.engine.graph(globals),
             changes,
             client_env,
+            written: Arc::default(),
         });
         workspaces.insert(root.to_path_buf(), workspace.clone());
         workspace
