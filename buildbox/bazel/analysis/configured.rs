@@ -135,8 +135,13 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     }
     let class = bazel_loading::rule_class(ctx, &class_ref).await?;
     let attrs = resolve_attrs(ctx, rule, &class, key.config).await?;
-    let deps = analyze_deps(ctx, &class, &attrs, key.config).await?;
-    let implementation = implementation(ctx, &class_ref).await?;
+    let implementation = implementation(ctx, &class_ref)
+        .await
+        .map_err(|error| SkyError::new(format!("in {} rule {label}: {}", class_ref.kind, error.message())))?;
+    let deps = match is_stub(&implementation) {
+        true => BTreeMap::new(),
+        false => analyze_deps(ctx, &class, &attrs, key.config).await?,
+    };
     let config = key.config.get();
     let platform = ctx.compute(&PlatformKey(config.options.platform)).await?;
     let toolchains = toolchains::resolve(ctx, &class, &config).await?;
@@ -163,6 +168,12 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     let analyzed = bazel_loading::blocking(move || evaluate(input)).await?;
     let analyzed = analyzed.map_err(SkyError::new)?;
     Ok(configured(key, class_ref.kind, class.test, analyzed, fingerprint))
+}
+
+/// Whether a rule is one bb stands in for with a rule that provides
+/// nothing, whose dependencies needn't be analyzed.
+fn is_stub(implementation: &Implementation) -> bool {
+    matches!(implementation, Implementation::Native(kind) if crate::native::STUBBED_BUILTINS.contains(&kind.as_str()))
 }
 
 /// The configuration a dependency through an attribute is analyzed in.
@@ -237,6 +248,9 @@ async fn implementation(ctx: &Ctx, class: &RuleClassRef) -> Result<Implementatio
     let Some((bzl, name)) = class.definition else {
         return Ok(Implementation::Native(class.kind));
     };
+    if bzl.repo().as_str() == bazel_loading::BUILTINS_REPO && crate::native::STUBBED_BUILTINS.contains(&class.kind.as_str()) {
+        return Ok(Implementation::Native(class.kind));
+    }
     if bzl.repo().as_str() == bazel_loading::BUILTINS_REPO {
         return Err(SkyError::new(format!(
             "'{}' is implemented by Bazel's builtins, which bb can't analyze yet",

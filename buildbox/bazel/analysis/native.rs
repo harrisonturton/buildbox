@@ -31,6 +31,12 @@ const MARKER_RULES: &[&str] = &[
     "cc_libc_top_alias",
 ];
 
+/// Rules Bazel's builtins implement that bb stands in for with rules that
+/// provide nothing: C++ toolchains, which have no `CcToolchainInfo` until
+/// bb implements `cc_common`. Rules that can do without a C++ toolchain,
+/// such as rules_rust's, then do.
+pub const STUBBED_BUILTINS: &[&str] = &["cc_toolchain", "cc_toolchain_alias", "cc_toolchain_suite"];
+
 /// Run a native rule's implementation, returning its providers.
 pub fn analyze<'v>(kind: Symbol, input: &RuleInput, prepared: &Prepared<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
     let heap = eval.heap();
@@ -39,7 +45,7 @@ pub fn analyze<'v>(kind: Symbol, input: &RuleInput, prepared: &Prepared<'v>, eva
         "genrule" => genrule(input, prepared, RuleState::get(eval)?, heap),
         "constraint_value" => constraint_value(input, heap),
         "label_flag" | "label_setting" => forward(input, prepared, "build_setting_default", heap),
-        kind if MARKER_RULES.contains(&kind) => Ok(Value::new_none()),
+        kind if MARKER_RULES.contains(&kind) || STUBBED_BUILTINS.contains(&kind) => Ok(Value::new_none()),
         kind => anyhow::bail!("the native rule '{kind}' isn't supported by bb yet"),
     }
 }
