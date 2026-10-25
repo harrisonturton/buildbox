@@ -12,6 +12,7 @@ use starlark::values::structs::AllocStruct;
 use starlark::values::tuple::AllocTuple;
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Value, ValueLike, starlark_value};
 use starlark::{StarlarkPagablePanic, starlark_simple_value};
+use starlark::values::StarlarkPagable;
 use super::config::{CcToolchainConfig, Reader};
 use super::features::{ToolchainFeatures, Variables};
 use super::values::{FeatureConfigurationValue, VariablesValue};
@@ -611,8 +612,12 @@ fn toolchain_config<'v>(info: Value<'v>, tools_directory: &str, heap: Heap<'v>) 
 
 /// A toolchain's `CcToolchainFeatures`: its configuration, from which rules
 /// configure the features they build with.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
-pub struct CcToolchainFeaturesValue(#[allocative(skip)] pub Arc<CcToolchainConfig>);
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
+pub struct CcToolchainFeaturesValue(
+    #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
+    #[allocative(skip)]
+    pub Arc<CcToolchainConfig>,
+);
 
 starlark_simple_value!(CcToolchainFeaturesValue);
 

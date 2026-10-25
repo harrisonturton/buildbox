@@ -7,15 +7,16 @@ use bazel_starlark::label_value::LabelValue;
 use intern::PathId;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
-use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkValue, Value, ValueLike, starlark_value};
-use starlark::{StarlarkPagablePanic, starlark_simple_value};
+use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, ValueLike, starlark_value};
+use skycodec::{Decode, Encode};
+use starlark::starlark_simple_value;
 use std::fmt;
 
 /// The name of the provider, as targets are indexed by it.
 pub const PROVIDER: &str = "PackageSpecificationInfo";
 
 /// Which packages one entry of `packages` names.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 enum Spec {
     /// `public`: every package.
     Everything,
@@ -40,10 +41,12 @@ impl Spec {
 
 /// A package group's packages: those an included spec names and no
 /// excluded one does.
-#[derive(Clone, Debug, Default, PartialEq, Eq, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct PackageSpecification {
+    #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
     #[allocative(skip)]
     included: Vec<Spec>,
+    #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
     #[allocative(skip)]
     excluded: Vec<Spec>,
 }

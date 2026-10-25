@@ -3,16 +3,17 @@
 
 use allocative::Allocative;
 use bazel_starlark::opaque::Opaque;
+use skycodec::{Decode, Encode};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::dict::AllocDict;
 use starlark::values::list::AllocList;
-use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
+use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, ValueLike, starlark_value};
 use std::fmt;
 
 /// What rules read of the configuration, by option.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Encode, Decode)]
 pub struct Options {
     pub compilation_mode: String,
     pub action_env: Vec<(String, String)>,
@@ -29,8 +30,12 @@ impl Options {
 }
 
 /// `ctx.fragments`.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
-pub struct Fragments(#[allocative(skip)] pub Options);
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
+pub struct Fragments(
+    #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
+    #[allocative(skip)]
+    pub Options,
+);
 
 starlark_simple_value!(Fragments);
 
@@ -56,9 +61,10 @@ impl<'v> StarlarkValue<'v> for Fragments {
 
 /// A configuration fragment, such as `cpp`. Members bb doesn't know are
 /// opaque.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct Fragment {
     pub name: String,
+    #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
     #[allocative(skip)]
     pub options: Options,
 }
@@ -311,8 +317,12 @@ fn fragment_methods(builder: &mut MethodsBuilder) {
 }
 
 /// `ctx.configuration`.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
-pub struct Configuration(#[allocative(skip)] pub Options);
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
+pub struct Configuration(
+    #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
+    #[allocative(skip)]
+    pub Options,
+);
 
 starlark_simple_value!(Configuration);
 
