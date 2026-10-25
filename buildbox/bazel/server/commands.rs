@@ -115,23 +115,29 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
             return exit::ANALYSIS_FAILURE;
         }
     };
-    for error in &result.errors {
-        out.error(&format!("Skipping: {error}")).await;
+    for error in result.errors.iter().chain(&result.failure) {
+        out.error(error).await;
     }
+    let Some(output) = result.output else {
+        return exit::ANALYSIS_FAILURE;
+    };
     let output = if options.flag("null", false) || options.flag("line_terminator_null", false) {
-        result.output.replace('\n', "\0")
+        output.replace('\n', "\0")
     } else {
-        result.output
+        output
     };
     out.stdout(&output).await;
-    if !result.errors.is_empty() {
+    let partial = result.kept_going || result.failure.is_some();
+    if partial {
         out.warning("--keep_going specified, ignoring errors. Results may be inaccurate").await;
-        return exit::PARTIAL_ANALYSIS_FAILURE;
     }
     if result.targets == 0 {
         out.info("Empty results").await;
     }
-    exit::SUCCESS
+    match partial {
+        true => exit::PARTIAL_ANALYSIS_FAILURE,
+        false => exit::SUCCESS,
+    }
 }
 
 fn query_expression(options: &bazel_options::ParsedOptions) -> Result<String, String> {

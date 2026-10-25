@@ -4,11 +4,12 @@
 use bazel_label::{Label, PackageId, RepoMappingTable, TargetPattern, LabelContext};
 use bazel_fs::RootedPath;
 use bazel_loading::{BzlLoadKey, LoadedPackage, PackageKey, RepoRootKey, packages_beneath, rule_class};
-use bazel_packages::{AttrDefault, AttrSchema, AttrValue, Cfg, Package, Rule, RuleClass, RuleClassRef, Target};
+use bazel_packages::{AttrDefault, AttrSchema, AttrValue, Cfg, Package, PackageError, Rule, RuleClass, RuleClassRef, Target};
 use futures::future::BoxFuture;
 use skyframe::{Compute, SkyError};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// A set of targets, in the order queries print them.
@@ -77,7 +78,23 @@ pub struct Universe<C> {
     pub workspace_root: PathBuf,
     packages: Mutex<HashMap<PackageId, Result<Arc<LoadedPackage>, String>>>,
     classes: Mutex<HashMap<RuleClassRef, Arc<RuleClass>>>,
-    errors: Mutex<Vec<String>>,
+    /// Errors to report, in the order they were found.
+    reports: Mutex<Vec<String>>,
+    /// Whether there were errors that keeping going went past.
+    kept_going: AtomicBool,
+    /// Whether a pattern named targets of a package with errors, which
+    /// fails the query once it's evaluated, unless keeping going.
+    in_error: AtomicBool,
+    /// The error of the first pattern naming targets of a package with
+    /// errors, which fails a build.
+    pattern_failure: Mutex<Option<String>>,
+    /// The packages whose errors have been reported.
+    reported: Mutex<HashSet<PackageId>>,
+    /// Whether the transitive closure being computed met errors.
+    closure_failed: AtomicBool,
+    /// Why evaluating the query failed, if it failed as Bazel puts it:
+    /// "Evaluation of query failed", with the detail after a colon.
+    evaluation_failure: Mutex<Option<Option<String>>>,
 }
 
 impl<C: Compute> Universe<C> {
@@ -96,7 +113,13 @@ impl<C: Compute> Universe<C> {
             workspace_root,
             packages: Mutex::new(HashMap::new()),
             classes: Mutex::new(HashMap::new()),
-            errors: Mutex::new(Vec::new()),
+            reports: Mutex::new(Vec::new()),
+            kept_going: AtomicBool::new(false),
+            in_error: AtomicBool::new(false),
+            pattern_failure: Mutex::new(None),
+            reported: Mutex::new(HashSet::new()),
+            closure_failed: AtomicBool::new(false),
+            evaluation_failure: Mutex::new(None),
         }
     }
 
@@ -104,18 +127,69 @@ impl<C: Compute> Universe<C> {
         &self.compute
     }
 
-    /// The errors skipped while keeping going.
-    pub fn errors(&self) -> Vec<String> {
-        self.errors.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    /// The errors found, other than the packages' own, in the order they
+    /// were found.
+    pub fn reports(&self) -> Vec<String> {
+        self.reports.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    /// Record an error, failing unless keeping going.
-    pub fn error(&self, message: String) -> Result<(), QueryError> {
+    /// Whether keeping going went past errors.
+    pub fn kept_going(&self) -> bool {
+        self.kept_going.load(Ordering::Relaxed)
+    }
+
+    /// Why evaluating the query failed, if it failed as "Evaluation of
+    /// query failed", and the detail Bazel gives after it, if any: a
+    /// pattern naming targets of a package with errors fails it, unless
+    /// keeping going, once the query has been evaluated.
+    pub fn evaluation_failure(&self) -> Option<Option<String>> {
+        let failure = self.evaluation_failure.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        match failure {
+            Some(failure) => Some(failure),
+            None => self.in_error.load(Ordering::Relaxed).then_some(None),
+        }
+    }
+
+    /// The error of the first pattern resolved that named targets of a
+    /// package with errors, as a build fails with it.
+    pub fn pattern_failure(&self) -> Option<String> {
+        self.pattern_failure.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn report(&self, message: String) {
+        self.reports.lock().unwrap_or_else(|p| p.into_inner()).push(message);
+    }
+
+    /// Note that evaluating the query failed, with `detail`. The first
+    /// failure is the one reported.
+    fn fail_evaluation(&self, detail: Option<String>) {
+        let mut failure = self.evaluation_failure.lock().unwrap_or_else(|p| p.into_inner());
+        if failure.is_none() {
+            *failure = Some(detail);
+        }
+    }
+
+    /// Fail with `message`, unless keeping going, in which case it's
+    /// reported as skipped.
+    pub fn error(&self, pattern: &str, message: String) -> Result<(), QueryError> {
         if !self.options.keep_going {
             return Err(QueryError(message));
         }
-        self.errors.lock().unwrap_or_else(|p| p.into_inner()).push(message);
+        self.report(format!("Skipping '{pattern}': {message}"));
+        self.kept_going.store(true, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Note an error that doesn't fail the query when keeping going, which
+    /// has been reported.
+    fn kept_going_past(&self) -> Result<(), ()> {
+        match self.options.keep_going {
+            true => {
+                self.kept_going.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            false => Err(()),
+        }
     }
 
     /// Load packages, in parallel, skipping those already loaded.
@@ -148,21 +222,14 @@ impl<C: Compute> Universe<C> {
         }
     }
 
-    /// The target a label names. Unless keeping going, its package must
-    /// have loaded without errors.
+    /// The target a label names, which may be in a package with errors.
     pub async fn target(&self, label: Label) -> Result<TargetRef, QueryError> {
         let package = self.package(label.package).await?;
+        self.report_package(&package.0).await;
         let Ok(index) = package.0.targets.binary_search_by(|target| target.name().cmp(&label.name)) else {
             let build_file = self.build_file(&package.0).await?;
             return Err(QueryError(bazel_loading::no_such_target(label, &build_file)));
         };
-        if !package.0.errors.is_empty() && !self.options.keep_going {
-            return Err(QueryError(format!(
-                "package contains errors: {}: {}",
-                bazel_loading::display_package(label.package),
-                package.0.errors[0]
-            )));
-        }
         Ok(TargetRef { package, index })
     }
 
@@ -179,26 +246,99 @@ impl<C: Compute> Universe<C> {
         Ok(dir.join(package.build_file.name.as_str()))
     }
 
-    /// The errors of the packages loaded that had them, each as Bazel
-    /// reports it: `/path/to/BUILD:line:column: message`.
-    pub async fn package_errors(&self) -> Vec<String> {
-        let failed: Vec<Arc<LoadedPackage>> = {
+    /// The errors to report, in order: those of packages loaded that no
+    /// pattern or dependency led to, then those found.
+    pub async fn errors(&self) -> Vec<String> {
+        let loaded: Vec<Arc<LoadedPackage>> = {
             let packages = self.packages.lock().unwrap_or_else(|p| p.into_inner());
             let mut failed: Vec<Arc<LoadedPackage>> = packages.values().filter_map(|package| package.as_ref().ok()).filter(|package| !package.0.errors.is_empty()).cloned().collect();
             failed.sort_by_key(|package| package.0.id);
             failed
         };
         let mut errors = Vec::new();
-        for package in failed {
-            let Ok(build_file) = self.build_file(&package.0).await else {
-                continue;
-            };
-            for error in &package.0.errors {
-                let path = build_file.display().to_string();
-                errors.push(error.report(&|_| path.clone()));
+        for package in loaded {
+            if self.reported.lock().unwrap_or_else(|p| p.into_inner()).insert(package.0.id) {
+                errors.extend(self.package_errors(&package.0).await);
             }
         }
+        errors.extend(self.reports());
         errors
+    }
+
+    /// Report the errors of `package` as Bazel does when it's loaded, the
+    /// first time it's used.
+    async fn report_package(&self, package: &Package) {
+        if package.errors.is_empty() || !self.reported.lock().unwrap_or_else(|p| p.into_inner()).insert(package.id) {
+            return;
+        }
+        for error in self.package_errors(package).await {
+            self.report(error);
+        }
+    }
+
+    /// The errors of `package`, with files named by paths.
+    async fn package_errors(&self, package: &Package) -> Vec<String> {
+        let mut errors = Vec::with_capacity(package.errors.len());
+        for error in &package.errors {
+            let paths = self.paths(error).await;
+            errors.push(error.report(&|file| paths.get(file).cloned().unwrap_or_else(|| file.to_string())));
+        }
+        errors
+    }
+
+    /// The paths of the files `error` names, by their labels.
+    async fn paths(&self, error: &PackageError) -> HashMap<String, String> {
+        let mut paths = HashMap::new();
+        for file in error.files() {
+            let Ok(label) = Label::parse_canonical(file) else {
+                continue;
+            };
+            let Ok(dir) = self.package_dir(label.package).await else {
+                continue;
+            };
+            paths.insert(file.to_string(), dir.join(label.name.as_str()).display().to_string());
+        }
+        paths
+    }
+
+    /// Report that `package` contains errors, quoting its first, as
+    /// Bazel does when a pattern names its targets.
+    async fn report_package_contains_errors(&self, package: &Package) {
+        let Some(error) = package.errors.first() else {
+            return;
+        };
+        let paths = self.paths(error).await;
+        let described = error.describe(&|file| paths.get(file).cloned().unwrap_or_else(|| file.to_string()));
+        self.report(format!("package contains errors: {}: {described}", bazel_loading::display_package(package.id)));
+    }
+
+    /// Report that a package a recursive pattern reached contains errors,
+    /// as Bazel does without saying which when keeping going, or when the
+    /// package defines targets despite its errors.
+    fn report_package_in_recursion(&self, package: &Package) {
+        let defines_targets = package.targets.iter().any(|target| target.name() != package.build_file.name);
+        if self.options.keep_going || defines_targets {
+            self.report(format!("package contains errors: {}", bazel_loading::display_package(package.id)));
+        }
+    }
+
+    /// The error of a pattern naming targets of a package with errors.
+    fn pattern_in_error(pattern: &str, package: PackageId) -> QueryError {
+        let package = bazel_loading::display_package(package);
+        QueryError(format!("Error evaluating '{pattern}': error loading package '{package}': Package '{package}' contains errors"))
+    }
+
+    /// Note a pattern naming targets of `package`, which has errors: a
+    /// query fails once evaluated, unless keeping going, and a build fails.
+    fn package_in_error(&self, pattern: &str, package: PackageId) {
+        let mut failure = self.pattern_failure.lock().unwrap_or_else(|p| p.into_inner());
+        if failure.is_none() {
+            *failure = Some(Self::pattern_in_error(pattern, package).0);
+        }
+        drop(failure);
+        if self.kept_going_past().is_err() {
+            self.in_error.store(true, Ordering::Relaxed);
+        }
     }
 
     /// The targets of `labels` that exist, recording the others as errors.
@@ -208,10 +348,84 @@ impl<C: Compute> Universe<C> {
         for label in labels {
             match self.target(*label).await {
                 Ok(target) => found.push(target),
-                Err(error) => self.error(error.0)?,
+                Err(error) => self.error(&label.to_string(), error.0)?,
             }
         }
         Ok(found)
+    }
+
+    /// The targets of `labels` that exist, as a step of a transitive
+    /// closure, in which each label but the roots was reached from the
+    /// rule `referrers` gives. Errors are reported as Bazel reports them:
+    /// at the rule referring to the target, and failing the closure.
+    pub async fn closure_targets(&self, labels: &TargetSet, referrers: &HashMap<Label, TargetRef>) -> Result<Vec<TargetRef>, QueryError> {
+        self.load(labels.iter().map(|label| label.package)).await;
+        let mut found = Vec::with_capacity(labels.len());
+        for label in labels {
+            let referrer = referrers.get(label);
+            match self.target(*label).await {
+                Ok(target) => {
+                    if !target.package().errors.is_empty() {
+                        self.closure_target_in_error(*label, referrer).await;
+                    }
+                    found.push(target);
+                }
+                Err(error) => self.closure_target_missing(*label, referrer, error).await?,
+            }
+        }
+        Ok(found)
+    }
+
+    async fn closure_target_in_error(&self, label: Label, referrer: Option<&TargetRef>) {
+        if let Some(referrer) = referrer {
+            let at = self.referrer_position(referrer).await;
+            self.report(format!(
+                "{at}Target '{label}' contains an error and its package is in error and referenced by '{}'",
+                referrer.label()
+            ));
+        }
+        self.closure_failed.store(true, Ordering::Relaxed);
+    }
+
+    async fn closure_target_missing(&self, label: Label, referrer: Option<&TargetRef>, error: QueryError) -> Result<(), QueryError> {
+        let Some(referrer) = referrer else {
+            return self.error(&label.to_string(), error.0);
+        };
+        let at = self.referrer_position(referrer).await;
+        self.report(format!("{at}{} and referenced by '{}'", error.0, referrer.label()));
+        if self.kept_going_past().is_ok() {
+            self.closure_failed.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+        self.fail_evaluation(Some(format!("preloading transitive closure failed: {}", error.0)));
+        Err(error)
+    }
+
+    /// Fail a transitive closure in which there were errors: when keeping
+    /// going, the evaluation fails but its result is still printed.
+    pub fn finish_closure(&self) -> Result<(), QueryError> {
+        if !self.closure_failed.swap(false, Ordering::Relaxed) {
+            return Ok(());
+        }
+        let detail = "errors were encountered while computing transitive closure";
+        self.fail_evaluation(Some(detail.to_string()));
+        match self.kept_going_past() {
+            Ok(()) => Ok(()),
+            Err(()) => Err(QueryError(detail.to_string())),
+        }
+    }
+
+    /// `path:line:column: ` for where a rule referring to a target is,
+    /// or `path: ` for another kind of target.
+    async fn referrer_position(&self, referrer: &TargetRef) -> String {
+        let path = match self.build_file(referrer.package()).await {
+            Ok(path) => path.display().to_string(),
+            Err(_) => referrer.package().build_file.to_string(),
+        };
+        match referrer.target() {
+            Target::Rule(rule) if rule.location.line > 0 => format!("{path}:{}:{}: ", rule.location.line, rule.location.column),
+            _ => format!("{path}: "),
+        }
     }
 
     pub async fn rule_class(&self, class: &RuleClassRef) -> Result<Arc<RuleClass>, QueryError> {
@@ -250,12 +464,25 @@ impl<C: Compute> Universe<C> {
         let pattern = TargetPattern::parse(text, &context).map_err(|error| QueryError(error.to_string()))?;
         match pattern {
             TargetPattern::Target(label) => {
-                self.target(label).await?;
+                let target = match self.target(label).await {
+                    Ok(target) => target,
+                    Err(error) => {
+                        self.error(text, error.0)?;
+                        return Ok(TargetSet::new());
+                    }
+                };
+                if !target.package().errors.is_empty() {
+                    self.package_in_error(text, label.package);
+                }
                 Ok(TargetSet::from([label]))
             }
             TargetPattern::Package { package, rules_only } => {
                 let loaded = self.package(package).await?;
-                self.check_errors(&loaded)?;
+                if !loaded.0.errors.is_empty() {
+                    self.report_package(&loaded.0).await;
+                    self.report_package_contains_errors(&loaded.0).await;
+                    self.package_in_error(text, package);
+                }
                 Ok(package_targets(&loaded.0, rules_only))
             }
             TargetPattern::Recursive { repo, prefix, rules_only } => {
@@ -265,25 +492,32 @@ impl<C: Compute> Universe<C> {
                 }
                 self.load(ids.iter().copied()).await;
                 let mut targets = TargetSet::new();
+                let mut in_error = Vec::new();
                 for id in ids {
                     match self.package(id).await {
                         Ok(loaded) => {
-                            self.check_errors(&loaded)?;
                             targets.extend(package_targets(&loaded.0, rules_only));
+                            if !loaded.0.errors.is_empty() {
+                                self.report_package(&loaded.0).await;
+                                self.report_package_in_recursion(&loaded.0);
+                                in_error.push(loaded);
+                            }
                         }
-                        Err(error) => self.error(error.0)?,
+                        Err(error) => self.error(text, error.0)?,
                     }
                 }
-                Ok(targets)
+                for loaded in &in_error {
+                    self.report_package_contains_errors(&loaded.0).await;
+                }
+                let Some(first) = in_error.first().map(|loaded| loaded.0.id) else {
+                    return Ok(targets);
+                };
+                match self.kept_going_past() {
+                    Ok(()) => Ok(targets),
+                    Err(()) => Err(Self::pattern_in_error(text, first)),
+                }
             }
         }
-    }
-
-    fn check_errors(&self, loaded: &LoadedPackage) -> Result<(), QueryError> {
-        let Some(error) = loaded.0.errors.first() else {
-            return Ok(());
-        };
-        self.error(error.to_string())
     }
 
     /// The `.bzl` files a package loads, directly and through other `.bzl`

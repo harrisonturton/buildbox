@@ -162,24 +162,28 @@ fn int_arg(args: &[Arg], index: usize) -> Option<i64> {
 pub async fn deps<C: Compute>(universe: &Universe<C>, roots: TargetSet, depth: Option<i64>) -> Result<TargetSet, QueryError> {
     let mut result = TargetSet::new();
     let mut frontier = roots;
+    let mut referrers: HashMap<Label, TargetRef> = HashMap::new();
+    let mut visited = frontier.clone();
     let mut level = 0;
     while !frontier.is_empty() {
-        let targets = universe.targets(&frontier).await?;
-        result.extend(frontier.iter().copied());
+        let targets = universe.closure_targets(&frontier, &referrers).await?;
+        result.extend(targets.iter().map(TargetRef::label));
         if depth.is_some_and(|depth| level >= depth) {
             break;
         }
         let mut next = TargetSet::new();
         for target in &targets {
             for dep in universe.deps_of(target).await? {
-                if !result.contains(&dep) {
+                if visited.insert(dep) {
                     next.insert(dep);
+                    referrers.insert(dep, target.clone());
                 }
             }
         }
         frontier = next;
         level += 1;
     }
+    universe.finish_closure()?;
     Ok(result)
 }
 

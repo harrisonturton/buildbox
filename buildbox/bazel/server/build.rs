@@ -495,9 +495,10 @@ fn plural(count: usize, word: &str) -> String {
 }
 
 /// Report a target pattern that couldn't be resolved, as Bazel does: the
-/// errors of the packages it loaded, then the pattern's.
+/// errors of the packages it loaded and those resolving found, then the
+/// pattern's.
 async fn pattern_failed(universe: &Universe<&Session>, pattern: &str, message: &str, out: &Output) -> i32 {
-    for error in universe.package_errors().await {
+    for error in universe.errors().await {
         out.error(&error).await;
     }
     out.warning("Target pattern parsing failed.").await;
@@ -535,6 +536,9 @@ async fn targets(
             Ok(labels) => labels,
             Err(error) => return Err(pattern_failed(&universe, pattern, &error.0, out).await),
         };
+        if let Some(message) = universe.pattern_failure() {
+            return Err(pattern_failed(&universe, pattern, &message, out).await);
+        }
         let wildcard = is_wildcard(text, package, main_mapping);
         if wildcard {
             labels = buildable_by_wildcard(&universe, labels).await;
