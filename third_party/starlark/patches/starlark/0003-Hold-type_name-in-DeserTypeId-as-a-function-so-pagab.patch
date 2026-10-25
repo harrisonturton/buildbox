@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harry Turton <harrisonturton@gmail.com>
+Date: Sat, 24 Oct 2026 17:07:04 -0400
+Subject: [PATCH] Hold type_name in DeserTypeId as a function, so pagable
+ builds on stable
+
+Vtables, which hold a DeserTypeId, are built in consts, and calling
+std::any::type_name in a const isn't stable. DeserTypeId now keeps the
+function and calls it when it needs the name.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pagable/vtable_registry.rs | 50 +++++++++++++++++++++++++---------
+ 1 file changed, 37 insertions(+), 13 deletions(-)
+
+diff --git a/src/pagable/vtable_registry.rs b/src/pagable/vtable_registry.rs
+index b29c0bc7..a19f17e1 100644
+--- a/src/pagable/vtable_registry.rs
++++ b/src/pagable/vtable_registry.rs
+@@ -43,8 +43,32 @@ use crate::values::layout::vtable::AValueVTable;
+ /// assigned by sorting all registered type names, so it depends only on the set
+ /// of registered types and is therefore stable across runs of the same binary.
+ /// See [`VtableRegistry`].
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+-pub struct DeserTypeId(pub &'static str);
++///
++/// It holds `std::any::type_name::<T>` as a function rather than its result,
++/// since calling `type_name` in a `const` isn't stable: vtables, which hold a
++/// `DeserTypeId`, are built in consts.
++#[derive(Clone, Copy)]
++pub struct DeserTypeId(pub fn() -> &'static str);
++
++impl PartialEq for DeserTypeId {
++    fn eq(&self, other: &DeserTypeId) -> bool {
++        self.as_str() == other.as_str()
++    }
++}
++
++impl Eq for DeserTypeId {}
++
++impl std::hash::Hash for DeserTypeId {
++    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
++        self.as_str().hash(state);
++    }
++}
++
++impl fmt::Debug for DeserTypeId {
++    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
++        f.debug_tuple("DeserTypeId").field(&self.as_str()).finish()
++    }
++}
+ 
+ impl pagable::PagableSerialize for DeserTypeId {
+     fn pagable_serialize(
+@@ -56,7 +80,7 @@ impl pagable::PagableSerialize for DeserTypeId {
+             .get(self)
+             .copied()
+             .ok_or_else(|| {
+-                anyhow::anyhow!("Type `{}` was not registered for serialization", self.0)
++                anyhow::anyhow!("Type `{}` was not registered for serialization", self.as_str())
+             })?;
+         index.pagable_serialize(serializer)
+     }
+@@ -84,19 +108,19 @@ impl DeserTypeId {
+     /// Create a `DeserTypeId` for a type.
+     #[inline]
+     pub const fn of<T: ?Sized>() -> Self {
+-        DeserTypeId(std::any::type_name::<T>())
++        DeserTypeId(std::any::type_name::<T>)
+     }
+ 
+     /// Get the underlying type name string.
+     #[inline]
+-    pub const fn as_str(&self) -> &'static str {
+-        self.0
++    pub fn as_str(&self) -> &'static str {
++        (self.0)()
+     }
+ }
+ 
+ impl Display for DeserTypeId {
+     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+-        Display::fmt(self.0, f)
++        Display::fmt(self.as_str(), f)
+     }
+ }
+ 
+@@ -140,7 +164,7 @@ static VTABLE_REGISTRY: LazyLock<VtableRegistry> = LazyLock::new(|| {
+     // Sort by type name so each type's index depends only on the set of
+     // registered types, making it stable across runs of the same binary.
+     let mut id_to_type: Vec<DeserTypeId> = by_type.keys().copied().collect();
+-    id_to_type.sort_unstable_by_key(|id| id.0);
++    id_to_type.sort_unstable_by_key(|id| id.as_str());
+ 
+     let type_to_id = id_to_type
+         .iter()
+@@ -264,7 +288,7 @@ mod tests {
+     fn test_type_id_indices_are_sorted_by_name() {
+         // Indices are assigned in sorted type-name order; this is what makes
+         // them stable across runs of the same binary.
+-        let names: Vec<&str> = VTABLE_REGISTRY.id_to_type.iter().map(|id| id.0).collect();
++        let names: Vec<&str> = VTABLE_REGISTRY.id_to_type.iter().map(|id| id.as_str()).collect();
+         let mut sorted = names.clone();
+         sorted.sort_unstable();
+         assert_eq!(
+@@ -290,11 +314,11 @@ mod tests {
+         // The encoded form is a small varint index, not the full type-name
+         // string — that is the whole point of the index encoding.
+         assert!(
+-            bytes.len() < id.0.len(),
++            bytes.len() < id.as_str().len(),
+             "expected index encoding ({} bytes) to be smaller than type name `{}` ({} bytes)",
+             bytes.len(),
+-            id.0,
+-            id.0.len(),
++            id.as_str(),
++            id.as_str().len(),
+         );
+ 
+         let mut de = pagable::testing::TestingDeserializer::new(&bytes);
+@@ -335,7 +359,7 @@ mod tests {
+     #[test]
+     fn test_lookup_nonexistent_type() {
+         // Looking up a non-existent type should return an error
+-        let result = lookup_vtable(DeserTypeId("this_type_does_not_exist_12345"));
++        let result = lookup_vtable(DeserTypeId(|| "this_type_does_not_exist_12345"));
+         assert!(result.is_err());
+         match result {
+             Err(err) => match err.kind() {

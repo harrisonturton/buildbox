@@ -1,5 +1,5 @@
 {
-  "checksum": "cbca60fa1bd468ae00400b0cd48f53b37576b5958a225a8c8413794917519d3b",
+  "checksum": "c65cb878e96d188568912d75abe370f8dceb0a05f56da12a9651a3281ad55284",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -11864,7 +11864,16 @@
             "-p1"
           ],
           "patches": [
-            "@@//third_party/starlark:starlark.patch"
+            "@@//third_party/starlark:patches/starlark/0001-Accept-Bazel-s-dict-select-.-and-dict.get-key-defaul.patch",
+            "@@//third_party/starlark:patches/starlark/0002-Release-the-unfrozen-code-of-defs-that-run-once.patch",
+            "@@//third_party/starlark:patches/starlark/0003-Hold-type_name-in-DeserTypeId-as-a-function-so-pagab.patch",
+            "@@//third_party/starlark:patches/starlark/0004-Don-t-check-a-typed-frozen-value-s-type-as-it-s-dese.patch",
+            "@@//third_party/starlark:patches/starlark/0005-Add-register_live_heap-so-paged-values-can-point-int.patch",
+            "@@//third_party/starlark:patches/starlark/0006-Print-a-def-as-Bazel-does-function-NAME-from-FILE.patch",
+            "@@//third_party/starlark:patches/starlark/0007-Return-a-list-from-string.elems-as-Bazel-does.patch",
+            "@@//third_party/starlark:patches/starlark/0008-Leak-a-heap-that-fails-partway-through-deserializing.patch",
+            "@@//third_party/starlark:patches/starlark/0009-Add-forget_serialized_heaps-and-keep-a-read-back-hea.patch",
+            "@@//third_party/starlark:patches/starlark/0010-Add-FrozenHeapRef-holds_functions.patch"
           ],
           "sha256": "9062e866918dc4c9701c98ac99f7f4fa9e4b3b4edce306e147393bc75458c4fc",
           "url": "https://static.crates.io/crates/starlark/0.14.2/download"

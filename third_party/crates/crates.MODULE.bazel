@@ -215,6 +215,7 @@ crate.annotation(
 )
 
 # `pagable`: frozen heaps can be serialized, so analysis can be paged out.
+# Our patches to starlark-rust are in //third_party/starlark.
 crate.spec(
     features = ["pagable"],
     package = "starlark",
@@ -260,13 +261,6 @@ crate.spec(
 crate.spec(
     package = "dhat",
     version = "0.3",
-)
-
-# Bazel's dialect of Starlark, which starlark-rust doesn't accept as written.
-crate.annotation(
-    crate = "starlark",
-    patch_args = ["-p1"],
-    patches = ["//third_party/starlark:starlark.patch"],
 )
 
 # Resolved crate versions are pinned in these lockfiles. To update them, run:

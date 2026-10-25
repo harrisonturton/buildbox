@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harry Turton <harrisonturton@gmail.com>
+Date: Sun, 25 Oct 2026 17:12:36 -0400
+Subject: [PATCH] Leak a heap that fails partway through deserializing, rather
+ than panic
+
+Dropping its arena walked values not yet deserialized, whose sentinel
+vtable panics, so the panic hid the error. The heap is now leaked and the
+error returned.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/values/layout/heap/heap_type.rs | 24 +++++++++++++++++-------
+ 1 file changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/src/values/layout/heap/heap_type.rs b/src/values/layout/heap/heap_type.rs
+index 16371c78..0f448613 100644
+--- a/src/values/layout/heap/heap_type.rs
++++ b/src/values/layout/heap/heap_type.rs
+@@ -691,6 +691,22 @@ impl FrozenFrozenHeap {
+         refs: Vec<FrozenHeapRef>,
+         ctx: &mut StarlarkDeserializerImpl<'_, '_>,
+     ) -> crate::Result<FrozenFrozenHeap> {
++        if let Err(error) = Self::deserialize_values(ctx) {
++            // Values not yet deserialized can't be dropped, or even walked
++            // past, so a heap that failed partway is leaked.
++            std::mem::forget(arena);
++            return Err(error);
++        }
++
++        Ok(FrozenFrozenHeap {
++            arena,
++            refs: refs.into_boxed_slice(),
++            name: None,
++            peak_allocated_bytes: None,
++        })
++    }
++
++    fn deserialize_values(ctx: &mut StarlarkDeserializerImpl<'_, '_>) -> crate::Result<()> {
+         let count = ctx.current_heap_deser_state().value_count();
+         for i in 0..count {
+             let target = ctx.current_heap_deser_state().try_claim(i);
+@@ -709,13 +725,7 @@ impl FrozenFrozenHeap {
+         let end = ctx.current_heap_deser_state().end_position();
+         // SAFETY: end_position is past the last value's data in this heap.
+         unsafe { ctx.pagable().seek(end) };
+-
+-        Ok(FrozenFrozenHeap {
+-            arena,
+-            refs: refs.into_boxed_slice(),
+-            name: None,
+-            peak_allocated_bytes: None,
+-        })
++        Ok(())
+     }
+ }
+ 

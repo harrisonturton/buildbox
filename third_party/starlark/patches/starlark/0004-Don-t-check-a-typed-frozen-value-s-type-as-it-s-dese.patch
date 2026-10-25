@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harry Turton <harrisonturton@gmail.com>
+Date: Sat, 24 Oct 2026 17:21:05 -0400
+Subject: [PATCH] Don't check a typed frozen value's type as it's deserialized
+
+A typed value in a cycle, such as a function's module, may be
+deserialized before what it points to, whose type can't be read yet.
+pagable deserializes the field through the type that serialized it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/values/layout/typed.rs | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/values/layout/typed.rs b/src/values/layout/typed.rs
+index 8f43a3e0..41bb7431 100644
+--- a/src/values/layout/typed.rs
++++ b/src/values/layout/typed.rs
+@@ -475,9 +475,11 @@ impl<'v, T: StarlarkValue<'v>> crate::pagable::StarlarkDeserialize for FrozenVal
+         ctx: &mut dyn crate::pagable::starlark_deserialize::StarlarkDeserializeContext<'_>,
+     ) -> crate::Result<Self> {
+         let fv = FrozenValue::starlark_deserialize(ctx)?;
+-        // SAFETY: pagable deserializes this field through the same Rust type
+-        // that serialized it.
+-        Ok(unsafe { FrozenValueTyped::new_unchecked(fv) })
++        // Pagable deserializes this field through the same Rust type that
++        // serialized it. The value may not be deserialized yet, when values
++        // refer to each other in a cycle, such as a module and the functions
++        // defined in it, so its type isn't checked here.
++        Ok(FrozenValueTyped(fv, marker::PhantomData))
+     }
+ }
+ 

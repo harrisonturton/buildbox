@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harry Turton <harrisonturton@gmail.com>
+Date: Sat, 24 Oct 2026 19:30:56 -0400
+Subject: [PATCH] Add register_live_heap, so paged values can point into live
+ heaps
+
+A heap that stays in memory isn't deserialized, so values deserialized
+later couldn't point into it. register_live_heap records a live heap's
+values by header address, as if it had been deserialized.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pagable.rs                              |  1 +
+ src/pagable/starlark_deserialize_context.rs | 13 +++++++++++++
+ src/values/layout/heap/arena.rs             | 16 ++++++++++++++++
+ src/values/layout/heap/heap_type.rs         |  8 ++++++++
+ 4 files changed, 38 insertions(+)
+
+diff --git a/src/pagable.rs b/src/pagable.rs
+index 938eb253..6888eaae 100644
+--- a/src/pagable.rs
++++ b/src/pagable.rs
+@@ -72,6 +72,7 @@ pub use starlark_deserialize::StarlarkDeserialize;
+ pub use starlark_deserialize::StarlarkDeserializeContext;
+ pub use starlark_deserialize::starlark_deserialize_field;
+ pub use starlark_deserialize_context::StarlarkDeserializerImpl;
++pub use starlark_deserialize_context::register_live_heap;
+ pub use starlark_pagable::StarlarkPagable;
+ pub use starlark_pagable_impls::SmallMapKeyDeserialize;
+ pub use starlark_serialize::StarlarkSerialize;
+diff --git a/src/pagable/starlark_deserialize_context.rs b/src/pagable/starlark_deserialize_context.rs
+index 081349ad..5d846c10 100644
+--- a/src/pagable/starlark_deserialize_context.rs
++++ b/src/pagable/starlark_deserialize_context.rs
+@@ -212,6 +212,19 @@ impl StarlarkDeserState {
+     }
+ }
+ 
++/// Let values deserialized in `session` point into `heap`: a live heap
++/// that isn't deserialized itself, such as one whose compiled functions
++/// can't be serialized, and that must outlive what's deserialized.
++pub fn register_live_heap(session: &pagable::SessionContext, heap: &crate::values::FrozenHeapRef) {
++    let Some(name) = heap.name() else {
++        return;
++    };
++    let heap_id = HeapRefId::from_heap_name(name);
++    let addrs = heap.build_value_header_addrs();
++    let state: Arc<StarlarkDeserState> = session.get_or_insert_with(|| Arc::new(StarlarkDeserState::new()));
++    state.register_heap(heap_id, addrs);
++}
++
+ /// Concrete implementation of StarlarkDeserializeContext.
+ ///
+ /// Wraps a `PagableDeserializer` and a shared `StarlarkDeserState` to
+diff --git a/src/values/layout/heap/arena.rs b/src/values/layout/heap/arena.rs
+index 99c44b22..a96c3fc1 100644
+--- a/src/values/layout/heap/arena.rs
++++ b/src/values/layout/heap/arena.rs
+@@ -504,6 +504,22 @@ impl<A: ArenaAllocator> Arena<A> {
+         map
+     }
+ 
++    /// Every value's header address, by value index: the index
++    /// [`Arena::build_ptr_to_value_index_map`] gives it.
++    pub(crate) fn build_value_header_addrs(&self) -> Vec<usize> {
++        let mut addrs = Vec::new();
++        fn build_for_bump<A: ArenaAllocator>(bump: &A, addrs: &mut Vec<usize>) {
++            Arena::<A>::for_each_bump_ordered(bump, |value| {
++                if let Some(header) = value.unpack_header() {
++                    addrs.push(header as *const AValueHeader as usize);
++                }
++            });
++        }
++        build_for_bump(&self.drop, &mut addrs);
++        build_for_bump(&self.non_drop, &mut addrs);
++        addrs
++    }
++
+     pub(crate) unsafe fn visit_arena<'v>(
+         &'v self,
+         heap_kind: HeapKind,
+diff --git a/src/values/layout/heap/heap_type.rs b/src/values/layout/heap/heap_type.rs
+index 655cb709..16371c78 100644
+--- a/src/values/layout/heap/heap_type.rs
++++ b/src/values/layout/heap/heap_type.rs
+@@ -906,6 +906,14 @@ impl FrozenHeapRef {
+     /// Build a map from raw header pointer address to `value_index` for all
+     /// values in this heap's arena. Indices are assigned in serialization
+     /// order: drop bump first, then non-drop bump.
++    /// Every value's header address, by value index.
++    pub(crate) fn build_value_header_addrs(&self) -> Vec<usize> {
++        match &self.0 {
++            Some(inner) => inner.arena.build_value_header_addrs(),
++            None => Vec::new(),
++        }
++    }
++
+     pub(crate) fn build_ptr_to_value_index_map(&self) -> HashMap<usize, u32> {
+         match &self.0 {
+             Some(inner) => inner.arena.build_ptr_to_value_index_map(),

@@ -1,0 +1,5 @@
+# The upstream repository, and the commit the patches in patches/ apply to:
+# the release of the crate versions in //third_party/crates. Maintained by
+# bazel/patches/patches.sh.
+url https://github.com/facebook/starlark-rust.git
+commit 0c8d107ab963362ba47ee3ab9e0173bc39bd101d

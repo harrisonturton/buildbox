@@ -1,17 +1,13 @@
-# Patches to starlark-rust:
+# Our changes to starlark-rust, as a series of patches with one per commit,
+# applied on top of the upstream commit in UPSTREAM.
 #
-# - A reflected `|` (`rbit_or`), so `dict | select(...)` reaches select.
-# - `dict.get` takes `default` by name, as `d.get(key, default = None)`.
-# - A top-level def releases its unfrozen bytecode and IR once frozen.
-# - A def prints as Bazel prints one: `<function NAME from LABEL>`.
-# - `string.elems()` returns a list, as in Bazel, not an iterator.
-# - `DeserTypeId` holds `type_name::<T>` as a function, so the `pagable`
-#   feature builds on stable Rust, which can't call `type_name` in a const.
-# - A heap that fails partway through being read back is leaked rather than
-#   dropped, since its values not yet read back can't be walked past.
-# - `forget_serialized_heaps`, so that heaps can be serialized again after
-#   heaps serialized earlier are freed or read back at new addresses, and a
-#   heap read back keeps the id it was serialized under.
-# - `FrozenHeapRef::holds_functions`, since a function's compiled code isn't
-#   relocated when its heap is read back.
-exports_files(["starlark.patch"])
+# Don't edit the patches by hand. To change them:
+#
+#   bazel/patches/patches.sh checkout third_party/starlark <checkout>
+#   # ...commit, amend or rebase in <checkout>...
+#   bazel/patches/patches.sh export third_party/starlark <checkout>
+#
+# The checkout is an ordinary clone of starlark-rust with our commits on
+# its `buildbox` branch; export regenerates patches/ and patches.MODULE.bazel
+# from them.
+exports_files(glob(["patches/*/*.patch"]))
