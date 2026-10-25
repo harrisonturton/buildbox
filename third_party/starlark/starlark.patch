@@ -465,7 +465,7 @@ index 99c44b2..a96c3fc 100644
          &'v self,
          heap_kind: HeapKind,
 diff --git a/src/values/layout/heap/heap_type.rs b/src/values/layout/heap/heap_type.rs
-index 655cb70..983313e 100644
+index 655cb70..a2e41c5 100644
 --- a/src/values/layout/heap/heap_type.rs
 +++ b/src/values/layout/heap/heap_type.rs
 @@ -366,6 +366,9 @@ struct FrozenFrozenHeap {
@@ -557,7 +557,7 @@ index 655cb70..983313e 100644
      }
  }
  
-@@ -858,6 +880,12 @@ impl FrozenHeapRef {
+@@ -858,6 +880,26 @@ impl FrozenHeapRef {
          self.0.as_ref().and_then(|a| a.name.as_ref())
      }
  
@@ -567,10 +567,24 @@ index 655cb70..983313e 100644
 +        self.0.as_ref().and_then(|a| a.ref_id())
 +    }
 +
++    /// Whether this heap holds functions. A function's compiled code points
++    /// into the heap it was frozen in, and isn't relocated when the heap is
++    /// serialized and read back, so such a heap can't be paged out.
++    pub fn holds_functions(&self) -> bool {
++        let Some(heap) = self.0.as_ref() else {
++            return false;
++        };
++        let drop = heap.arena.collect_drop_headers_ordered();
++        let non_drop = heap.arena.collect_undrop_headers_ordered();
++        drop.iter()
++            .chain(non_drop.iter())
++            .any(|header| header.unpack().vtable().type_name == crate::values::function::FUNCTION_TYPE)
++    }
++
      /// Get the frozen heaps that this frozen heap depends on.
      pub fn refs(&self) -> impl Iterator<Item = &FrozenHeapRef> {
          self.0.as_ref().map(|h| h.refs.iter()).into_iter().flatten()
-@@ -906,6 +934,14 @@ impl FrozenHeapRef {
+@@ -906,6 +948,14 @@ impl FrozenHeapRef {
      /// Build a map from raw header pointer address to `value_index` for all
      /// values in this heap's arena. Indices are assigned in serialization
      /// order: drop bump first, then non-drop bump.
@@ -585,7 +599,7 @@ index 655cb70..983313e 100644
      pub(crate) fn build_ptr_to_value_index_map(&self) -> HashMap<usize, u32> {
          match &self.0 {
              Some(inner) => inner.arena.build_ptr_to_value_index_map(),
-@@ -976,6 +1012,7 @@ impl FrozenHeap {
+@@ -976,6 +1026,7 @@ impl FrozenHeap {
                  arena,
                  refs: refs.into_iter().collect(),
                  name,

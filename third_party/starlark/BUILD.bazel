@@ -12,4 +12,6 @@
 # - `forget_serialized_heaps`, so that heaps can be serialized again after
 #   heaps serialized earlier are freed or read back at new addresses, and a
 #   heap read back keeps the id it was serialized under.
+# - `FrozenHeapRef::holds_functions`, since a function's compiled code isn't
+#   relocated when its heap is read back.
 exports_files(["starlark.patch"])
