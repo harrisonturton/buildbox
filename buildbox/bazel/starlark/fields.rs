@@ -60,8 +60,7 @@ impl<V: ValueLifetimeless> FieldsGen<V> {
     }
 
     pub fn get(&self, name: &str) -> Option<&V> {
-        let name = Symbol::get(name)?;
-        let index = self.names.iter().position(|existing| *existing == name)?;
+        let index = self.names.iter().position(|existing| existing.as_str() == name)?;
         self.values.get(index)
     }
 
