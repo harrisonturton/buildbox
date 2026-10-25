@@ -153,3 +153,26 @@ DEFAULT = {}.get("k", default = 3)
     assert_eq!(module.get("UNION").unwrap().value().get_type(), "select");
     assert_eq!(module.get("DEFAULT").unwrap().value().unpack_i32(), Some(3));
 }
+
+#[test]
+fn callables_print_as_bazel_prints_them() {
+    let file = label("@@dep+//pkg:callables.bzl");
+    let source = r#"
+def f():
+    pass
+
+def _impl(ctx):
+    pass
+
+r = rule(implementation = _impl)
+m = macro(implementation = _impl)
+
+NAMES = [str(f), str(lambda: None), str(r), str(m)]
+"#;
+    let ast = parse(file, source.to_string()).unwrap();
+    let module = eval_bzl(ast, &BZL_GLOBALS, &Loads { modules: HashMap::new() }, EvalContext::new(FileKind::Bzl, file), heap_name("test", file, 0)).0.unwrap();
+    assert_eq!(
+        module.get("NAMES").unwrap().value().to_repr(),
+        r#"["<function f from @@dep+//pkg:callables.bzl>", "<function lambda from @@dep+//pkg:callables.bzl>", "<rule r>", "<macro m>"]"#
+    );
+}

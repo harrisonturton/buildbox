@@ -63,7 +63,10 @@ pub(crate) fn macro_function(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
     ) -> anyhow::Result<crate::symbolic_macro::SymbolicMacro<'v>> {
         let _ = kwargs;
-        Ok(crate::symbolic_macro::SymbolicMacro { implementation })
+        Ok(crate::symbolic_macro::SymbolicMacro {
+            implementation,
+            exported: std::sync::OnceLock::new(),
+        })
     }
 }
 

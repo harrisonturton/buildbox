@@ -9,6 +9,7 @@ use starlark::values::{
     ValueLike, starlark_value,
 };
 use std::fmt;
+use std::sync::OnceLock;
 
 /// A macro defined with `macro()`. Calling it calls its implementation with
 /// the same keyword arguments, and `visibility = None` if not given; the
@@ -18,6 +19,11 @@ use std::fmt;
 #[repr(C)]
 pub struct SymbolicMacroGen<V: ValueLifetimeless> {
     pub implementation: V,
+    /// The name of the global it's assigned to.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_once_lock", deserialize_with = "crate::paging::deserialize_once_lock")]
+    pub exported: OnceLock<String>,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<SymbolicMacroGen<To>> for SymbolicMacroGen<From> {}
@@ -26,7 +32,10 @@ starlark_complex_value!(pub SymbolicMacro);
 
 impl<'v, V: ValueLike<'v>> fmt::Display for SymbolicMacroGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<macro>")
+        match self.exported.get() {
+            Some(name) => write!(f, "<macro {name}>"),
+            None => write!(f, "<macro>"),
+        }
     }
 }
 
@@ -35,6 +44,11 @@ impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for SymbolicMacroGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
+    fn export_as(&self, variable_name: &str, _eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<()> {
+        let _ = self.exported.set(variable_name.to_string());
+        Ok(())
+    }
+
     fn invoke(&self, _me: Value<'v>, args: &Arguments<'v, '_>, eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<Value<'v>> {
         args.no_positional_args(eval.heap())?;
         let names = args.names_map()?;

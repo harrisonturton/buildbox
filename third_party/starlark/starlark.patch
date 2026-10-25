@@ -24,7 +24,7 @@ index ec989fe..c08cbf5 100644
      pub(crate) typecheck: bool,
  }
 diff --git a/src/eval/compiler/def.rs b/src/eval/compiler/def.rs
-index 144d35c..7d940e1 100644
+index 144d35c..a46c921 100644
 --- a/src/eval/compiler/def.rs
 +++ b/src/eval/compiler/def.rs
 @@ -149,6 +149,56 @@ impl StmtCompiledCell {
@@ -148,7 +148,24 @@ index 144d35c..7d940e1 100644
              inline_def_body,
              stmt_compile_context: self.compile_context(return_type.is_some()),
              globals: self.globals,
-@@ -727,7 +792,7 @@ where
+@@ -601,9 +666,15 @@ fn deserialize_optimized_on_freeze_stmt(
+     })
+ }
+ 
++/// As Bazel shows a function: `<function NAME from FILE>`.
+ impl<V> Display for DefGen<V> {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        write!(f, "{}", self.parameters.signature())
++        write!(
++            f,
++            "<function {} from {}>",
++            self.def_info.name.as_str(),
++            self.def_info.codemap.filename()
++        )
+     }
+ }
+ 
+@@ -727,7 +798,7 @@ where
          if Self::FROZEN {
              self.optimized_on_freeze_stmt.get()
          } else {
@@ -157,7 +174,7 @@ index 144d35c..7d940e1 100644
          }
      }
  
-@@ -893,6 +958,7 @@ impl FrozenDef {
+@@ -893,6 +964,7 @@ impl FrozenDef {
          let body_optimized = self
              .def_info
              .body_stmts
@@ -165,7 +182,7 @@ index 144d35c..7d940e1 100644
              .optimize(&mut OptCtx::new(
                  &mut OptimizeOnFreezeContext {
                      module: &def_module,
-@@ -914,6 +980,15 @@ impl FrozenDef {
+@@ -914,6 +986,15 @@ impl FrozenDef {
          unsafe {
              self.optimized_on_freeze_stmt.set(body_optimized);
          }
