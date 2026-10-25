@@ -45,8 +45,9 @@ enum ServerCommand {
     /// Print the log of a server started in the background.
     Logs(LogsArgs),
 
-    /// List the servers: the default one and those with names.
-    List(ConfigFileArgs),
+    /// List the servers: the default one and those with names, or with
+    /// --all, every server running on this machine.
+    List(ListArgs),
 
     /// Start the server in the background, unless it's running.
     Start(SelectionArgs),
@@ -84,6 +85,21 @@ struct LogsArgs {
 
     #[command(flatten)]
     server: SelectionArgs,
+}
+
+#[derive(Args, Debug)]
+struct ListArgs {
+    /// List every server running on this machine, whatever config started
+    /// it.
+    #[arg(long)]
+    all: bool,
+
+    /// Print only how many servers are running on this machine.
+    #[arg(long)]
+    count: bool,
+
+    #[command(flatten)]
+    config: ConfigFileArgs,
 }
 
 #[derive(Args, Debug)]
@@ -301,11 +317,31 @@ async fn logs(args: LogsArgs) -> Result<(), Box<dyn Error>> {
 
 /// Print each server, whether it's running, and if so, its pid and what
 /// it's doing.
-async fn list(args: ConfigFileArgs) -> Result<(), Box<dyn Error>> {
+async fn list(args: ListArgs) -> Result<(), Box<dyn Error>> {
+    if args.count {
+        println!("{}", crate::servers::find().len());
+        return Ok(());
+    }
+    if args.all {
+        return list_all().await;
+    }
+    let args = args.config;
     println!("{:<20}{:<10}{:<10}{:<10}{:<10}URL", "NAME", "STATE", "PID", "UPTIME", "COMMANDS");
     for daemon in Daemon::all(args.config.as_deref())? {
         println!("{}", server_line(&daemon).await);
     }
+    Ok(())
+}
+
+/// Print every server running on this machine, and how many there are.
+async fn list_all() -> Result<(), Box<dyn Error>> {
+    let servers = crate::servers::find();
+    println!("{}", crate::servers::HEADING);
+    for server in &servers {
+        println!("{}", crate::servers::line(server).await);
+    }
+    let noun = if servers.len() == 1 { "server" } else { "servers" };
+    println!("{} {noun} running.", servers.len());
     Ok(())
 }
 

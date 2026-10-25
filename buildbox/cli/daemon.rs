@@ -220,59 +220,24 @@ fn process_exists(pid: u32) -> bool {
     !matches!(state, Some("Z" | "X"))
 }
 
-/// The pid of a process of this user's listening on TCP `port`, found by
-/// matching the socket's inode against each process's open files.
+/// The pid of a process of this user's listening on TCP `port`.
 fn listening_pid(port: u16) -> Option<u32> {
-    let inodes = listening_inodes(port);
-    if inodes.is_empty() {
-        return None;
-    }
-    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
+    let sockets = crate::servers::listening_sockets();
+    let processes = std::fs::read_dir("/proc").ok()?;
+    for process in processes.flatten() {
+        let Some(pid) = process.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
             continue;
         };
-        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
-            continue;
-        };
-        for fd in fds.flatten() {
-            let Ok(target) = std::fs::read_link(fd.path()) else {
-                continue;
-            };
-            let inode = target.to_str().and_then(|text| text.strip_prefix("socket:[")?.strip_suffix(']').map(str::to_string));
-            if inode.is_some_and(|inode| inodes.contains(&inode)) {
-                return Some(pid);
-            }
+        if crate::servers::listening_address(pid, &sockets).is_some_and(|address| address.port() == port) {
+            return Some(pid);
         }
     }
     None
 }
 
-/// The inodes of the sockets listening on TCP `port`, over IPv4 or IPv6.
-fn listening_inodes(port: u16) -> Vec<String> {
-    /// The state of a listening socket in `/proc/net/tcp`.
-    const LISTEN: &str = "0A";
-    let port = format!("{port:04X}");
-    let mut inodes = Vec::new();
-    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(text) = std::fs::read_to_string(table) else {
-            continue;
-        };
-        for line in text.lines().skip(1) {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let (Some(local), Some(state), Some(inode)) = (fields.get(1), fields.get(3), fields.get(9)) else {
-                continue;
-            };
-            if local.rsplit(':').next() == Some(port.as_str()) && *state == LISTEN {
-                inodes.push(inode.to_string());
-            }
-        }
-    }
-    inodes
-}
-
 /// Whether the process `pid` is a server: `bb up`, by whatever name bb was
 /// run.
-fn is_server_process(pid: u32) -> bool {
+pub fn is_server_process(pid: u32) -> bool {
     let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
         return false;
     };

@@ -140,6 +140,7 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
     tracing::info!("listening on {address}");
     tracing::info!("running up to {} actions at once", config.max_concurrent_actions);
     let _address_file = AddressFile::write(&config.address_file, address);
+    let _registration = register(config, address);
 
     let (stop, stopped) = oneshot::channel::<()>();
     let serve = listener.serve_with_service_and_shutdown(service, async {
@@ -177,6 +178,20 @@ pub async fn run(config: &Config) -> Result<(), ServerError> {
 
 /// The file that tells clients where the server is listening, removed when
 /// it's dropped, as the server stops.
+/// Record the server in the machine's registry of running servers, which
+/// `bb server list --all` reads. A server that can't is still reachable,
+/// so failing only warns.
+fn register(config: &Config, address: SocketAddr) -> Option<registry::Registration> {
+    let dir = registry::default_dir();
+    match registry::register(&dir, address, config.name.clone(), config.bazel_dir.clone()) {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!("{error}");
+            None
+        }
+    }
+}
+
 struct AddressFile {
     path: PathBuf,
     contents: String,

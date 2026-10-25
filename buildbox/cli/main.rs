@@ -10,6 +10,7 @@ mod daemon;
 mod format;
 mod image_layout;
 mod server_command;
+mod servers;
 mod up;
 
 use clap::{Parser, Subcommand};

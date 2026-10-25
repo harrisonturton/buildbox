@@ -1,0 +1,22 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "registry",
+    srcs = ["registry.rs"],
+    visibility = [
+        "//buildbox/cli:__pkg__",
+        "//buildbox/server:__pkg__",
+    ],
+    deps = [
+        "@crates//:libc",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "registry_test",
+    crate = ":registry",
+    deps = ["@crates//:tempfile"],
+)
