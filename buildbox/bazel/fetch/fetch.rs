@@ -13,4 +13,4 @@ mod patch;
 pub use download::{DownloadCache, DownloadError};
 pub use extract::{ArchiveType, ExtractError, extract};
 pub use integrity::{Integrity, IntegrityError};
-pub use patch::{PatchError, apply_patch};
+pub use patch::{PatchError, apply_patch, apply_to_file};

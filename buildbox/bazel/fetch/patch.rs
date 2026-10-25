@@ -47,6 +47,29 @@ pub fn apply_patch(dir: &Path, patch: &str, strip: usize, name: &str) -> Result<
     Ok(())
 }
 
+/// Apply the changes `patch` makes to the file at `file`, after stripping
+/// `strip` leading components, to `content`, that file's contents, ignoring
+/// its changes to other files.
+pub fn apply_to_file(content: &str, file: &str, patch: &str, strip: usize, name: &str) -> Result<String, PatchError> {
+    let mut patched = content.to_string();
+    for change in parse(patch, name)? {
+        if changes_file(&change, file, strip, name)? {
+            patched = apply_hunks(&patched, &change.hunks, name, file)?;
+        }
+    }
+    Ok(patched)
+}
+
+/// Whether `change` is to the file at `file`, under its old or new name.
+fn changes_file(change: &FileChange, file: &str, strip: usize, name: &str) -> Result<bool, PatchError> {
+    for path in change.old_path.iter().chain(&change.new_path) {
+        if strip_path(path, strip, name)? == Path::new(file) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn parse(patch: &str, name: &str) -> Result<Vec<FileChange>, PatchError> {
     let invalid = |message: String| PatchError::Invalid {
         patch: name.to_string(),
@@ -374,6 +397,24 @@ deleted file mode 100644
         let patch = "--- MODULE.bazel\n+++ MODULE.bazel\n@@ -0,0 +1,2 @@\n+module(\n+)\n";
         apply_patch(dir.path(), patch, 0, "p").unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("MODULE.bazel")).unwrap(), "module(\n)\n");
+    }
+
+    #[test]
+    fn one_files_changes_apply_to_its_contents() {
+        let patch = "\
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -1,2 +1,1 @@
+ bazel_dep(name = \"a\")
+-bazel_dep(name = \"b\")
+--- a/other.bzl
++++ b/other.bzl
+@@ -1 +1 @@
+-x
++y
+";
+        let patched = apply_to_file("bazel_dep(name = \"a\")\nbazel_dep(name = \"b\")\n", "MODULE.bazel", patch, 1, "p").unwrap();
+        assert_eq!(patched, "bazel_dep(name = \"a\")\n");
     }
 
     #[test]

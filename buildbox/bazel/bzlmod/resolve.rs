@@ -4,7 +4,8 @@
 use crate::config::BzlmodConfig;
 use crate::fetch_repo::FetchSpecKey;
 use crate::module_file::{self, BazelDep, IncludeReader, ModuleFile, Override};
-use crate::registry::RegistryModuleKey;
+use crate::fetch_repo::read_label_patch;
+use crate::registry::{self, RegistryFileKey, RegistryModule, RegistryModuleKey};
 use crate::repo_spec::{ArchiveSpec, RepoSpec};
 use crate::version::Version;
 use bazel_fs::{Root, RootedPath, Workspace};
@@ -264,13 +265,8 @@ async fn discover(
             let module = module.map_err(|error| error.context(format!("resolving {}@{}", id.0, id.1)))?;
             let mut spec = module.spec.clone();
             add_override_patches(&mut spec, overrides.get(&id.0));
-            discovered.insert(
-                id,
-                Discovered {
-                    file: module.file.clone(),
-                    spec: Some(spec),
-                },
-            );
+            let file = patched_module_file(ctx, &module, &id, overrides.get(&id.0)).await?;
+            discovered.insert(id, Discovered { file, spec: Some(spec) });
         }
         for found in discovered.values() {
             for dep in &found.file.deps {
@@ -282,6 +278,38 @@ async fn discover(
         }
     }
     Ok(discovered)
+}
+
+/// A registry module's MODULE.bazel, with the changes a
+/// single_version_override's patches make to it, as Bazel applies them
+/// during resolution. Only patches in the main repository apply, since
+/// other repositories can't be fetched before resolution.
+async fn patched_module_file(ctx: &Ctx, module: &RegistryModule, id: &(String, String), override_: Option<&Override>) -> Result<ModuleFile, SkyError> {
+    let Some(Override::SingleVersion { patches, patch_strip, .. }) = override_ else {
+        return Ok(module.file.clone());
+    };
+    let patches: Vec<&String> = patches.iter().filter(|patch| in_main_repo(patch)).collect();
+    if patches.is_empty() {
+        return Ok(module.file.clone());
+    }
+    let url = registry::module_file_url(&module.registry, &id.0, &id.1);
+    let registry_file = ctx.compute(&RegistryFileKey(url.clone())).await?;
+    let Some(bytes) = &registry_file.0 else {
+        return Err(SkyError::new(format!("{url} no longer exists")));
+    };
+    let mut source = String::from_utf8_lossy(bytes).into_owned();
+    for patch in patches {
+        let contents = read_label_patch(ctx, patch).await?;
+        let contents = String::from_utf8_lossy(&contents);
+        source = bazel_fetch::apply_to_file(&source, "MODULE.bazel", &contents, *patch_strip as usize, patch)
+            .map_err(|error| SkyError::new(format!("error applying single_version_override patch {patch} to module file: {error}")))?;
+    }
+    module_file::evaluate(&url, &source, false, None).map_err(|error| SkyError::new(format!("{url}, patched: {error}")))
+}
+
+/// Whether `label`, as the root module writes it, is in the main repository.
+fn in_main_repo(label: &str) -> bool {
+    label.starts_with("//") || label.starts_with("@//") || label.starts_with("@@//")
 }
 
 /// A single_version_override's patches apply on top of the registry's.

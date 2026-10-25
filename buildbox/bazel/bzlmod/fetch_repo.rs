@@ -165,20 +165,26 @@ async fn read_label_patches(ctx: &Ctx, archive: &ArchiveSpec) -> Result<HashMap<
         let Some(label) = patch.url.strip_prefix("label:") else {
             continue;
         };
-        let mapping = RepoMappingTable::new(RepoName::MAIN, Vec::new());
-        let context = LabelContext {
-            package: PackageId::new(RepoName::MAIN, PathId::ROOT),
-            mapping: &mapping,
-            lenient: false,
-        };
-        let parsed = Label::parse(label, &context).map_err(|error| SkyError::new(error.to_string()))?;
-        let path = parsed.package.path.join_path(PathId::parse(parsed.name.as_str()).map_err(|e| SkyError::new(e.to_string()))?);
-        let Some(bytes) = bazel_fs::read_file(ctx, RootedPath::new(Root::Workspace, path)).await? else {
-            return Err(SkyError::new(format!("patch {label} doesn't exist")));
-        };
-        patches.insert(patch.url.clone(), bytes);
+        patches.insert(patch.url.clone(), read_label_patch(ctx, label).await?);
     }
     Ok(patches)
+}
+
+/// The contents of the patch `label`, a file of the main repository, read
+/// through the graph.
+pub async fn read_label_patch(ctx: &Ctx, label: &str) -> Result<Vec<u8>, SkyError> {
+    let mapping = RepoMappingTable::new(RepoName::MAIN, Vec::new());
+    let context = LabelContext {
+        package: PackageId::new(RepoName::MAIN, PathId::ROOT),
+        mapping: &mapping,
+        lenient: false,
+    };
+    let parsed = Label::parse(label, &context).map_err(|error| SkyError::new(error.to_string()))?;
+    let path = parsed.package.path.join_path(PathId::parse(parsed.name.as_str()).map_err(|e| SkyError::new(e.to_string()))?);
+    let Some(bytes) = bazel_fs::read_file(ctx, RootedPath::new(Root::Workspace, path)).await? else {
+        return Err(SkyError::new(format!("patch {label} doesn't exist")));
+    };
+    Ok(bytes)
 }
 
 fn fill_archive(
@@ -203,6 +209,11 @@ fn fill_archive(
             .download(std::slice::from_ref(&file.url), integrity.as_ref(), &dir.join(path))
             .map_err(|error| error.to_string())?;
     }
+    if let Some(module_file) = module_file {
+        let path = dir.join("MODULE.bazel");
+        make_writable(&path);
+        std::fs::write(&path, module_file).map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    }
     for (index, patch) in archive.patches.iter().enumerate() {
         let contents = match label_patches.get(&patch.url) {
             Some(contents) => contents.clone(),
@@ -219,11 +230,6 @@ fn fill_archive(
         };
         let text = String::from_utf8_lossy(&contents);
         bazel_fetch::apply_patch(dir, &text, archive.patch_strip as usize, &patch.url).map_err(|error| error.to_string())?;
-    }
-    if let Some(module_file) = module_file {
-        let path = dir.join("MODULE.bazel");
-        make_writable(&path);
-        std::fs::write(&path, module_file).map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     }
     Ok(())
 }
