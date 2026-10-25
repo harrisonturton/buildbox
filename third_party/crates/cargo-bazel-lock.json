@@ -1,5 +1,5 @@
 {
-  "checksum": "c65cb878e96d188568912d75abe370f8dceb0a05f56da12a9651a3281ad55284",
+  "checksum": "5d9e9268400fab6c73471bdb380e6579b6639c52b55b2a1e9840df6d9f196959",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -11873,7 +11873,8 @@
             "@@//third_party/starlark:patches/starlark/0007-Return-a-list-from-string.elems-as-Bazel-does.patch",
             "@@//third_party/starlark:patches/starlark/0008-Leak-a-heap-that-fails-partway-through-deserializing.patch",
             "@@//third_party/starlark:patches/starlark/0009-Add-forget_serialized_heaps-and-keep-a-read-back-hea.patch",
-            "@@//third_party/starlark:patches/starlark/0010-Add-FrozenHeapRef-holds_functions.patch"
+            "@@//third_party/starlark:patches/starlark/0010-Add-FrozenHeapRef-holds_functions.patch",
+            "@@//third_party/starlark:patches/starlark/0011-Add-eval_module_all_errors-failing-with-every-name-e.patch"
           ],
           "sha256": "9062e866918dc4c9701c98ac99f7f4fa9e4b3b4edce306e147393bc75458c4fc",
           "url": "https://static.crates.io/crates/starlark/0.14.2/download"

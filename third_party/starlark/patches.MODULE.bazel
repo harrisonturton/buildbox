@@ -19,5 +19,6 @@ crate.annotation(
         "//third_party/starlark:patches/starlark/0008-Leak-a-heap-that-fails-partway-through-deserializing.patch",
         "//third_party/starlark:patches/starlark/0009-Add-forget_serialized_heaps-and-keep-a-read-back-hea.patch",
         "//third_party/starlark:patches/starlark/0010-Add-FrozenHeapRef-holds_functions.patch",
+        "//third_party/starlark:patches/starlark/0011-Add-eval_module_all_errors-failing-with-every-name-e.patch",
     ],
 )

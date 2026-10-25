@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harry Turton <harrisonturton@gmail.com>
+Date: Sun, 25 Oct 2026 19:07:06 -0400
+Subject: [PATCH] Add eval_module_all_errors, failing with every name error a
+ module has
+
+The resolver finds every name a module uses that isn't defined, but
+eval_module fails with only the first. eval_module_all_errors fails with
+all the errors found before the module runs, in order, as Bazel reports
+them; eval_module still fails with the first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01H2KN4B9EK4GzM2uqpms4ft
+---
+ src/eval.rs | 45 ++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 32 insertions(+), 13 deletions(-)
+
+diff --git a/src/eval.rs b/src/eval.rs
+index 828a1a3f..f906a03e 100644
+--- a/src/eval.rs
++++ b/src/eval.rs
+@@ -70,6 +70,18 @@ impl<'v, 'a, 'e> Evaluator<'v, 'a, 'e> {
+     /// Evaluate an [`AstModule`] with this [`Evaluator`], modifying the in-scope
+     /// [`Module`](crate::environment::Module) as appropriate.
+     pub fn eval_module(&mut self, ast: AstModule, globals: &Globals) -> crate::Result<Value<'v>> {
++        self.eval_module_all_errors(ast, globals)
++            .map_err(|errors| errors.into_iter().next().expect("a failure has an error"))
++    }
++
++    /// Like [`eval_module`](Self::eval_module), but failing with every error
++    /// found before the module runs, such as each name that isn't defined, in
++    /// the order they appear, rather than only the first.
++    pub fn eval_module_all_errors(
++        &mut self,
++        ast: AstModule,
++        globals: &Globals,
++    ) -> Result<Value<'v>, Vec<crate::Error>> {
+         #[cfg(not(target_arch = "wasm32"))]
+         let start = Instant::now();
+ 
+@@ -89,12 +101,7 @@ impl<'v, 'a, 'e> Evaluator<'v, 'a, 'e> {
+             self.module_env.set_docstring(docstring)
+         }
+ 
+-        let ModuleScopes {
+-            cst,
+-            module_slot_count,
+-            scope_data,
+-            top_level_stmt_count,
+-        } = ModuleScopes::check_module_err(
++        let (errors, scopes) = ModuleScopes::check_module(
+             self.module_env.mutable_names(),
+             self.module_env.frozen_heap(),
+             &HashMap::new(),
+@@ -104,7 +111,16 @@ impl<'v, 'a, 'e> Evaluator<'v, 'a, 'e> {
+             },
+             codemap,
+             &dialect,
+-        )?;
++        );
++        if !errors.is_empty() {
++            return Err(errors.into_iter().map(|error| error.into_error()).collect());
++        }
++        let ModuleScopes {
++            cst,
++            module_slot_count,
++            scope_data,
++            top_level_stmt_count,
++        } = scopes;
+ 
+         self.frozen_heap().add_reference(globals.heap());
+ 
+@@ -125,10 +141,12 @@ impl<'v, 'a, 'e> Evaluator<'v, 'a, 'e> {
+                 )),
+         );
+ 
+-        self.call_stack.alloc_if_needed(
+-            self.max_callstack_size
+-                .unwrap_or(evaluator::DEFAULT_STACK_SIZE),
+-        )?;
++        self.call_stack
++            .alloc_if_needed(
++                self.max_callstack_size
++                    .unwrap_or(evaluator::DEFAULT_STACK_SIZE),
++            )
++            .map_err(|error| vec![crate::Error::from(error)])?;
+ 
+         // Set up the world to allow evaluation (do NOT use ? from now on)
+ 
+@@ -157,10 +175,11 @@ impl<'v, 'a, 'e> Evaluator<'v, 'a, 'e> {
+         #[cfg(not(target_arch = "wasm32"))]
+         self.module_env.add_eval_duration(start.elapsed());
+ 
+-        self.run_infrequent_instr_checks()?;
++        self.run_infrequent_instr_checks()
++            .map_err(|error| vec![error])?;
+ 
+         // Return the result of evaluation
+-        res.map_err(|e| e.into_error())
++        res.map_err(|e| vec![e.into_error()])
+     }
+ 
+     /// Evaluate a function stored in a [`Value`], passing in `positional` and `named` arguments.

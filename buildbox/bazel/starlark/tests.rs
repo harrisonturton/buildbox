@@ -157,6 +157,13 @@ fn failures_keep_earlier_targets_and_their_traceback() {
 }
 
 #[test]
+fn every_undefined_name_is_an_error() {
+    let package = evaluate_build("foo()\nfilegroup(name = 'ok', srcs = bar)\n");
+    let errors: Vec<String> = package.errors.iter().map(ToString::to_string).collect();
+    assert_eq!(errors, ["//pkg:BUILD:1:1: name 'foo' is not defined", "//pkg:BUILD:2:31: name 'bar' is not defined"]);
+}
+
+#[test]
 fn undefined_names_are_errors_at_their_position_with_a_suggestion() {
     let package = evaluate_build("filegroup(name = 'ok')\nselct({})\n");
     assert!(package.targets.iter().all(|target| target.name().as_str() != "ok"));

@@ -136,12 +136,14 @@ pub fn eval_build(
         let mut eval = Evaluator::new(&module);
         eval.extra = Some(&context);
         eval.set_loader(loads);
-        eval.eval_module(ast, globals).map(|_| ()).map_err(|error| EvalError::with_candidates(error, &candidates))
+        eval.eval_module_all_errors(ast, globals).map(|_| ())
     });
     let printed = context.printed.take();
     let mut builder = context.package.take().expect("set above").into_inner();
-    if let Err(error) = result {
-        builder.errors.push(error.reported);
+    if let Err(errors) = result {
+        for error in errors {
+            builder.errors.push(EvalError::with_candidates(error, &candidates).reported);
+        }
     }
     (builder.finish(), printed)
 }
