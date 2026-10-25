@@ -9,4 +9,7 @@
 #   feature builds on stable Rust, which can't call `type_name` in a const.
 # - A heap that fails partway through being read back is leaked rather than
 #   dropped, since its values not yet read back can't be walked past.
+# - `forget_serialized_heaps`, so that heaps can be serialized again after
+#   heaps serialized earlier are freed or read back at new addresses, and a
+#   heap read back keeps the id it was serialized under.
 exports_files(["starlark.patch"])

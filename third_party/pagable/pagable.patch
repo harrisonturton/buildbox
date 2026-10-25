@@ -1,8 +1,179 @@
+diff --git a/src/context.rs b/src/context.rs
+index 57dcb82..98b67ce 100644
+--- a/src/context.rs
++++ b/src/context.rs
+@@ -132,16 +132,16 @@ impl<'de, 's> PagableDeserializer<'de> for PagableDeserializerImpl<'de, 's> {
+         self.arc_index += 1;
+ 
+         let storage = self.storage.backing_storage();
+-        let cell = storage.arc_cache().get_or_create_cell(type_id, *key);
+-
++        let handle = self.storage;
+         // First thread to reach here deserializes; others block.
+-        let arc = cell.get_or_try_init(|| -> crate::Result<Box<dyn ArcEraseDyn>> {
+-            let data = storage.fetch_data_blocking(key)?;
+-            let mut deserializer =
+-                PagableDeserializerImpl::new(&data.data, &data.arcs, self.storage);
+-            deserialize_fn(&mut deserializer)
+-        })?;
+-        Ok(arc.clone_dyn())
++        storage
++            .arc_cache()
++            .get_or_try_init(type_id, *key, &mut || {
++                let data = storage.fetch_data_blocking(key)?;
++                let mut deserializer =
++                    PagableDeserializerImpl::new(&data.data, &data.arcs, handle);
++                deserialize_fn(&mut deserializer)
++            })
+     }
+ 
+     fn position(&self) -> PagableCursor {
 diff --git a/src/storage/traits.rs b/src/storage/traits.rs
-index 55746de..03fac14 100644
+index 55746de..a42fcdf 100644
 --- a/src/storage/traits.rs
 +++ b/src/storage/traits.rs
-@@ -127,6 +127,13 @@ pub trait PagableStorage: Send + Sync + 'static {
+@@ -19,16 +19,47 @@ use either::Either;
+ use once_cell::sync::OnceCell;
+ 
+ use crate::arc_erase::ArcEraseDyn;
++use crate::arc_erase::WeakEraseDyn;
+ use crate::storage::data::DataKey;
+ use crate::storage::data::PagableData;
+ use crate::storage::support::SerializerForPaging;
+ use crate::traits::SessionContext;
+ 
+ /// Thread-safe cache of deserialized arcs, keyed by `(TypeId, DataKey)`.
+-/// `OnceCell` per entry ensures each arc is deserialized at most once.
+-// TODO: this should store weak pointers
++/// `OnceCell` per entry ensures each arc is deserialized at most once while
++/// it's alive. Arcs that can be held weakly are, so the cache doesn't keep
++/// them alive, and a key is deserialized again once its arc is dropped.
+ pub struct DeserializedArcCache {
+-    map: DashMap<(TypeId, DataKey), Arc<OnceCell<Box<dyn ArcEraseDyn>>>>,
++    map: DashMap<(TypeId, DataKey), Arc<OnceCell<CachedArc>>>,
++}
++
++/// An arc in the cache: weakly if its type supports it, otherwise strongly.
++enum CachedArc {
++    Weak(Box<dyn WeakEraseDyn>),
++    Strong(Box<dyn ArcEraseDyn>),
++}
++
++impl CachedArc {
++    fn new(arc: &dyn ArcEraseDyn) -> Self {
++        match arc.downgrade() {
++            Some(weak) if weak.upgrade().is_some() => CachedArc::Weak(weak),
++            _ => CachedArc::Strong(arc.clone_dyn()),
++        }
++    }
++
++    fn get(&self) -> Option<Box<dyn ArcEraseDyn>> {
++        match self {
++            CachedArc::Weak(weak) => weak.upgrade(),
++            CachedArc::Strong(arc) => Some(arc.clone_dyn()),
++        }
++    }
++
++    fn is_expired(&self) -> bool {
++        match self {
++            CachedArc::Weak(weak) => weak.is_expired(),
++            CachedArc::Strong(_) => false,
++        }
++    }
+ }
+ 
+ impl DeserializedArcCache {
+@@ -41,36 +72,77 @@ impl DeserializedArcCache {
+     pub fn get(&self, type_id: &TypeId, key: &DataKey) -> Option<Box<dyn ArcEraseDyn>> {
+         self.map
+             .get(&(*type_id, *key))
+-            .and_then(|cell| cell.get().map(|v| v.clone_dyn()))
++            .and_then(|cell| cell.get().and_then(CachedArc::get))
+     }
+ 
+-    /// Returns the `OnceCell` for this key, creating it if needed.
+-    /// Use `cell.get_or_try_init(|| ...)` to deserialize at most once.
+-    pub fn get_or_create_cell(
+-        &self,
+-        type_id: TypeId,
+-        key: DataKey,
+-    ) -> Arc<OnceCell<Box<dyn ArcEraseDyn>>> {
++    fn cell(&self, type_id: TypeId, key: DataKey) -> Arc<OnceCell<CachedArc>> {
+         self.map
+             .entry((type_id, key))
+             .or_insert_with(|| Arc::new(OnceCell::new()))
+             .clone()
+     }
+ 
++    /// Forget `cell`, the entry for this key, once its arc has been dropped.
++    fn remove_expired(&self, type_id: TypeId, key: DataKey, cell: &Arc<OnceCell<CachedArc>>) {
++        self.map
++            .remove_if(&(type_id, key), |_, current| Arc::ptr_eq(current, cell));
++    }
++
++    /// The live arc for this key, or the one `init` makes, which the first
++    /// thread to reach here runs while others wait for it.
++    pub fn get_or_try_init(
++        &self,
++        type_id: TypeId,
++        key: DataKey,
++        init: &mut dyn FnMut() -> crate::Result<Box<dyn ArcEraseDyn>>,
++    ) -> crate::Result<Box<dyn ArcEraseDyn>> {
++        loop {
++            let cell = self.cell(type_id, key);
++            let mut made = None;
++            let cached = cell.get_or_try_init(|| -> crate::Result<CachedArc> {
++                let arc = init()?;
++                let cached = CachedArc::new(&*arc);
++                made = Some(arc);
++                Ok(cached)
++            })?;
++            if let Some(arc) = made.or_else(|| cached.get()) {
++                return Ok(arc);
++            }
++            self.remove_expired(type_id, key, &cell);
++        }
++    }
++
++    /// Cache `arc` under this key, replacing what was cached.
++    pub fn insert(&self, type_id: TypeId, key: DataKey, arc: &dyn ArcEraseDyn) {
++        let cell = OnceCell::with_value(CachedArc::new(arc));
++        self.map.insert((type_id, key), Arc::new(cell));
++    }
++
+     pub fn clear(&self) {
+         self.map.clear();
+     }
+ 
++    /// Forget the arcs that have been dropped.
++    pub fn prune(&self) {
++        self.map
++            .retain(|_, cell| !cell.get().is_some_and(CachedArc::is_expired));
++    }
++
+     pub fn on_arc_deserialized(
+         &self,
+         typeid: TypeId,
+         key: DataKey,
+         arc: Box<dyn ArcEraseDyn>,
+     ) -> Option<Box<dyn ArcEraseDyn>> {
+-        let cell = self.get_or_create_cell(typeid, key);
+-        match cell.set(arc) {
+-            Ok(()) => None,
+-            Err(_already_set) => cell.get().map(|v| v.clone_dyn()),
++        loop {
++            let cell = self.cell(typeid, key);
++            if let Some(existing) = cell.get().and_then(CachedArc::get) {
++                return Some(existing);
++            }
++            if cell.set(CachedArc::new(&*arc)).is_ok() {
++                return None;
++            }
++            self.remove_expired(typeid, key, &cell);
+         }
+     }
+ }
+@@ -127,6 +199,13 @@ pub trait PagableStorage: Send + Sync + 'static {
          self.arc_cache().on_arc_deserialized(typeid, key, arc)
      }
  
@@ -16,7 +187,7 @@ index 55746de..03fac14 100644
      /// Schedules a type-erased arc for background paging to storage.
      ///
      /// Called when a pagable arc becomes fully unpinned and eligible for eviction.
-@@ -199,6 +206,10 @@ pub trait PagableStorage: Send + Sync + 'static {
+@@ -199,6 +278,10 @@ pub trait PagableStorage: Send + Sync + 'static {
                          }
                          continue;
                      }

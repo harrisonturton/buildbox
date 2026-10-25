@@ -12,7 +12,7 @@
 //! no dependent's live heap refers to it.
 
 use dashmap::DashMap;
-use pagable::arc_erase::ArcEraseDyn;
+use pagable::arc_erase::{ArcEraseDyn, WeakEraseDyn};
 use pagable::context::PagableDeserializerImpl;
 use pagable::storage::data::{DataKey, PagableData};
 use pagable::storage::handle::PagableStorageHandle;
@@ -62,10 +62,9 @@ struct StoreState {
     /// which are kept live, are known by identity: a target's heap may be
     /// freed and its address reused by another.
     known: HashMap<usize, DataKey>,
-    /// The key each heap read back since the cache of read heaps was last
-    /// cleared came from, by identity. The cache holds them, so their
-    /// identities can't be reused meanwhile.
-    read_back: HashMap<usize, DataKey>,
+    /// The key each heap read back came from, by identity, while it's
+    /// live, which the weak reference tells.
+    read_back: HashMap<usize, ReadBack>,
     /// The heaps whose values those read back may point into, kept live,
     /// by identity: their values' addresses are registered for reading
     /// back.
@@ -175,17 +174,30 @@ impl PagableStorage for HeapStore {
         if state.paging.contains(&identity) {
             return None;
         }
-        if let Some(key) = state.known.get(&identity).or_else(|| state.read_back.get(&identity)) {
-            return Some(*key);
+        if let Some(key) = state.known.get(&identity).copied().or_else(|| state.read_back_key(identity)) {
+            return Some(key);
         }
         let key = DataKey(u128::MAX - state.next_pin);
         state.next_pin += 1;
         state.known.insert(identity, key);
         state.pinned.insert(key, arc.clone_dyn());
         drop(state);
-        let cell = self.arcs.get_or_create_cell(arc.as_arc_any().type_id(), key);
-        let _ = cell.set(arc.clone_dyn());
+        self.arcs.insert(arc.as_arc_any().type_id(), key, arc);
         Some(key)
+    }
+}
+
+/// A heap read back: the key it came from, and a weak reference to it.
+struct ReadBack {
+    key: DataKey,
+    heap: Box<dyn WeakEraseDyn>,
+}
+
+impl StoreState {
+    /// The key a heap was read back from, if it was and is still live.
+    fn read_back_key(&self, identity: usize) -> Option<DataKey> {
+        let read_back = self.read_back.get(&identity)?;
+        (!read_back.heap.is_expired()).then_some(read_back.key)
     }
 }
 
@@ -253,6 +265,16 @@ impl PagedValue {
         state.key = Some(key);
         state.live = None;
     }
+
+    /// Where the value is stored, if it has been paged out.
+    fn key(&self) -> Option<DataKey> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).key
+    }
+
+    /// Drop the live copy of a value read back, which is still stored.
+    fn release(&self) {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).live = None;
+    }
 }
 
 /// Page out every live value of `values` together, returning how many
@@ -276,39 +298,67 @@ impl HeapStore {
     }
 
     /// Page out every live value of `values` together, returning how many
-    /// were.
+    /// were. What earlier page-outs learnt of heaps'
+    /// addresses is forgotten first, since those heaps may since have been
+    /// freed or read back.
+    ///
+    /// A value read back is still stored as it was, so it's released rather
+    /// than stored again: stored again, its heap could get another key, and
+    /// reading both keys back would make two copies of one heap.
     fn page_out<'a>(self: &Arc<HeapStore>, values: impl IntoIterator<Item = &'a PagedValue>) -> anyhow::Result<usize> {
-        let store = self;
         let live: Vec<(&PagedValue, OwnedFrozenValue)> = values.into_iter().filter_map(|value| Some((value, value.live()?))).collect();
-    {
-        let mut state = store.lock();
-        state.paging = live.iter().filter_map(|(_, value)| heap_identity(&store.session, value.owner())).collect();
+        let (read_back, new): (Vec<_>, Vec<_>) = live.into_iter().partition(|(value, _)| value.key().is_some());
+        starlark::pagable::forget_serialized_heaps(&self.session);
+        self.mark_paging(&new);
+        self.register_pinned_heaps(new.iter().map(|(_, value)| value.owner()));
+        let stored = self.store_values(&new);
+        self.forget_freed();
+        for ((value, _), key) in new.iter().zip(stored?) {
+            value.stored(key);
+        }
+        for (value, _) in &read_back {
+            value.release();
+        }
+        Ok(new.len() + read_back.len())
     }
-    store.register_pinned_heaps(live.iter().map(|(_, value)| value.owner()));
-    let finished: DashMap<usize, Arc<ArcSerSlot>> = DashMap::new();
-    let mut keys = Vec::with_capacity(live.len());
-    for (_, value) in &live {
-        let mut serializer = SerializerForPaging::new(&store.session);
-        value.pagable_serialize(&mut serializer)?;
-        let (data, arcs) = serializer.finish();
-        let key = store.page_out_item(data, arcs, &finished, &store.session).map_err(|error| match error {
-            PageOutError::Failed(error) => error,
-            PageOutError::AlreadyFailed => anyhow::anyhow!("paging out a heap failed"),
-        })?;
-        keys.push(key);
+
+    /// Note the heaps of `values` as being paged out, other than those read
+    /// back, which are stored already: an alias's value is its target's, so
+    /// its heap may have been read back for the target.
+    fn mark_paging(&self, values: &[(&PagedValue, OwnedFrozenValue)]) {
+        let identities: Vec<usize> = values.iter().filter_map(|(_, value)| heap_identity(&self.session, value.owner())).collect();
+        let mut state = self.lock();
+        let paging = identities.into_iter().filter(|identity| state.read_back_key(*identity).is_none()).collect();
+        state.paging = paging;
     }
-    store.write_pending()?;
-    {
-        let mut state = store.lock();
+
+    /// Serialize `values` and write them to a file, returning their keys.
+    fn store_values(&self, values: &[(&PagedValue, OwnedFrozenValue)]) -> anyhow::Result<Vec<DataKey>> {
+        let finished: DashMap<usize, Arc<ArcSerSlot>> = DashMap::new();
+        let mut keys = Vec::with_capacity(values.len());
+        for (_, value) in values {
+            let mut serializer = SerializerForPaging::new(&self.session);
+            value.pagable_serialize(&mut serializer)?;
+            let (data, arcs) = serializer.finish();
+            let key = self.page_out_item(data, arcs, &finished, &self.session).map_err(|error| match error {
+                PageOutError::Failed(error) => error,
+                PageOutError::AlreadyFailed => anyhow::anyhow!("paging out a heap failed"),
+            })?;
+            keys.push(key);
+        }
+        self.write_pending()?;
+        Ok(keys)
+    }
+
+    /// Forget the heaps read back that have since been freed. The cache of
+    /// read heaps holds them weakly, so a heap is read once while it's live
+    /// however many values point into it, and freed once none is used.
+    fn forget_freed(&self) {
+        let mut state = self.lock();
         state.paging.clear();
-        state.read_back.clear();
-    }
-    store.arcs.clear();
-    store.reregister_pinned();
-    for ((value, _), key) in live.iter().zip(keys) {
-        value.stored(key);
-    }
-    Ok(live.len())
+        state.read_back.retain(|_, read_back| !read_back.heap.is_expired());
+        drop(state);
+        self.arcs.prune();
     }
 }
 
@@ -336,26 +386,19 @@ impl HeapStore {
         }
     }
 
-    /// Note the identities of the heaps just read back, which the cache of
-    /// read heaps now holds.
+    /// Note the identities of the heaps just read back.
     fn note_read_back(&self) {
         let heap_type = heap_type_id();
         let mut state = self.lock();
         let fetched = std::mem::take(&mut state.fetched);
         for key in fetched {
-            if let Some(arc) = self.arcs.get(&heap_type, &key) {
-                state.read_back.insert(arc.identity(), key);
-            }
-        }
-    }
-
-    /// Put the pinned heaps back in the cache of read arcs, after it's
-    /// cleared of targets' heaps so that those can be freed.
-    fn reregister_pinned(&self) {
-        let state = self.lock();
-        for (key, arc) in &state.pinned {
-            let cell = self.arcs.get_or_create_cell(arc.as_arc_any().type_id(), *key);
-            let _ = cell.set(arc.clone_dyn());
+            let Some(arc) = self.arcs.get(&heap_type, &key) else {
+                continue;
+            };
+            let Some(heap) = arc.downgrade() else {
+                continue;
+            };
+            state.read_back.insert(arc.identity(), ReadBack { key, heap });
         }
     }
 }
@@ -432,5 +475,59 @@ mod tests {
         let key = value.state.lock().unwrap().key.unwrap();
         let read = store.page_in(key).unwrap();
         assert_eq!(read.value().to_repr(), before);
+    }
+
+    #[test]
+    fn a_value_read_back_pages_out_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(HeapStore::new(dir.path().to_path_buf()));
+        let bzl = module("shared = {'key': 'value'}", "bzl", &[]);
+        let target = module("providers = {'shared': shared, 'own': ['a', 'b']}", "target", &[("shared", &bzl.get("shared").unwrap())]);
+        let value = PagedValue::new(target.get("providers").unwrap());
+        let before = value.get().unwrap().value().to_repr();
+        drop(target);
+
+        for _ in 0..3 {
+            assert_eq!(store.page_out([&value]).unwrap(), 1);
+            let key = value.state.lock().unwrap().key.unwrap();
+            value.state.lock().unwrap().live = Some(store.page_in(key).unwrap());
+        }
+        assert_eq!(value.live().unwrap().value().to_repr(), before);
+    }
+
+    #[test]
+    fn a_value_read_back_is_released_not_stored_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(HeapStore::new(dir.path().to_path_buf()));
+        let target = module("providers = {'own': ['a', 'b']}", "target", &[]);
+        let value = PagedValue::new(target.get("providers").unwrap());
+        drop(target);
+        store.page_out([&value]).unwrap();
+        let key = value.key().unwrap();
+        let stored = store.lock().index.len();
+
+        value.state.lock().unwrap().live = Some(store.page_in(key).unwrap());
+        assert_eq!(store.page_out([&value]).unwrap(), 1);
+        assert_eq!(value.key(), Some(key));
+        assert!(value.live().is_none());
+        assert_eq!(store.lock().index.len(), stored);
+    }
+
+    #[test]
+    fn a_heap_read_back_is_stored_once_for_every_value_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(HeapStore::new(dir.path().to_path_buf()));
+        let target = module("providers = {'own': ['a', 'b']}", "target", &[]);
+        let value = PagedValue::new(target.get("providers").unwrap());
+        drop(target);
+        store.page_out([&value]).unwrap();
+
+        let read = store.page_in(value.key().unwrap()).unwrap();
+        value.state.lock().unwrap().live = Some(read.clone());
+        let alias = PagedValue::new(read);
+        assert_eq!(store.page_out([&value, &alias]).unwrap(), 2);
+        let target = store.page_in(value.key().unwrap()).unwrap();
+        let aliased = store.page_in(alias.key().unwrap()).unwrap();
+        assert_eq!(heap_identity(&store.session, target.owner()), heap_identity(&store.session, aliased.owner()));
     }
 }

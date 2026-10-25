@@ -237,10 +237,10 @@ index c6c7b65..b7fce37 100644
              StmtP::Return(None) => Ok(StmtsCompiled::one(IrSpanned {
                  node: StmtCompiled::Return(IrSpanned {
 diff --git a/src/pagable.rs b/src/pagable.rs
-index 938eb25..6888eaa 100644
+index 938eb25..640751c 100644
 --- a/src/pagable.rs
 +++ b/src/pagable.rs
-@@ -72,6 +72,7 @@ pub use starlark_deserialize::StarlarkDeserialize;
+@@ -72,11 +72,13 @@ pub use starlark_deserialize::StarlarkDeserialize;
  pub use starlark_deserialize::StarlarkDeserializeContext;
  pub use starlark_deserialize::starlark_deserialize_field;
  pub use starlark_deserialize_context::StarlarkDeserializerImpl;
@@ -248,6 +248,12 @@ index 938eb25..6888eaa 100644
  pub use starlark_pagable::StarlarkPagable;
  pub use starlark_pagable_impls::SmallMapKeyDeserialize;
  pub use starlark_serialize::StarlarkSerialize;
+ pub use starlark_serialize::StarlarkSerializeContext;
+ pub use starlark_serialize_context::StarlarkSerializerImpl;
++pub use starlark_serialize_context::forget_serialized_heaps;
+ 
+ /// Sealed marker emitted by `#[starlark_pagable_typetag]` on a trait. The
+ /// impl form requires it, pairing the two structurally.
 diff --git a/src/pagable/starlark_deserialize_context.rs b/src/pagable/starlark_deserialize_context.rs
 index 081349a..5d846c1 100644
 --- a/src/pagable/starlark_deserialize_context.rs
@@ -272,6 +278,51 @@ index 081349a..5d846c1 100644
  /// Concrete implementation of StarlarkDeserializeContext.
  ///
  /// Wraps a `PagableDeserializer` and a shared `StarlarkDeserState` to
+diff --git a/src/pagable/starlark_serialize_context.rs b/src/pagable/starlark_serialize_context.rs
+index 5e9adad..0db7883 100644
+--- a/src/pagable/starlark_serialize_context.rs
++++ b/src/pagable/starlark_serialize_context.rs
+@@ -67,6 +67,12 @@ impl StarlarkSerState {
+         self.registered_heaps.insert(heap_id);
+     }
+ 
++    /// Forget every heap registered so far.
++    fn clear(&self) {
++        self.registered_heaps.clear();
++        self.ptr_to_location.clear();
++    }
++
+     /// Check if a heap's offset map has already been registered.
+     fn has_heap(&self, heap_id: HeapRefId) -> bool {
+         self.registered_heaps.contains(&heap_id)
+@@ -100,16 +106,25 @@ impl StarlarkSerState {
+     /// pagable arc mechanism defers heap serialization but we need the
+     /// value-index maps immediately to resolve pointers.
+     pub(crate) fn ensure_offset_maps_registered(&self, heap_ref: &FrozenHeapRef) {
+-        let Some(name) = heap_ref.name() else {
++        let Some(heap_id) = heap_ref.ref_id() else {
+             return;
+         };
+-        let heap_id = HeapRefId::from_heap_name(name);
+         self.ensure_offset_maps_registered_inner(heap_id, heap_ref.refs_slice(), || {
+             heap_ref.build_ptr_to_value_index_map()
+         });
+     }
+ }
+ 
++/// Forget the addresses of the heaps serialized in `session` so far, before
++/// serializing again once some of them may have been freed: a heap read back
++/// has the same name, and so the same id, at new addresses, and a freed
++/// heap's addresses can be reused by another.
++pub fn forget_serialized_heaps(session: &pagable::SessionContext) {
++    if let Some(state) = session.get::<Arc<StarlarkSerState>>() {
++        state.clear();
++    }
++}
++
+ /// Concrete implementation of StarlarkSerializeContext.
+ ///
+ /// Wraps a `PagableSerializer` and a shared `StarlarkSerState` to
 diff --git a/src/pagable/vtable_registry.rs b/src/pagable/vtable_registry.rs
 index b29c0bc..a19f17e 100644
 --- a/src/pagable/vtable_registry.rs
@@ -414,10 +465,60 @@ index 99c44b2..a96c3fc 100644
          &'v self,
          heap_kind: HeapKind,
 diff --git a/src/values/layout/heap/heap_type.rs b/src/values/layout/heap/heap_type.rs
-index 655cb70..0f44861 100644
+index 655cb70..983313e 100644
 --- a/src/values/layout/heap/heap_type.rs
 +++ b/src/values/layout/heap/heap_type.rs
-@@ -691,6 +691,22 @@ impl FrozenFrozenHeap {
+@@ -366,6 +366,9 @@ struct FrozenFrozenHeap {
+     // TODO(nero): remove Option here, make it required.
+     #[allocative(skip)] // We don't really expect it to be big
+     name: Option<FrozenHeapName>,
++    /// The id a deserialized heap, which has no name, was serialized under.
++    #[allocative(skip)]
++    serialized_id: Option<HeapRefId>,
+     peak_allocated_bytes: Option<usize>,
+ }
+ 
+@@ -402,6 +405,15 @@ impl PartiallyDeserializedHeap {
+ }
+ 
+ impl FrozenFrozenHeap {
++    /// The id this heap is serialized under: its name's, or, if it was
++    /// deserialized, the id it was serialized under before.
++    fn ref_id(&self) -> Option<HeapRefId> {
++        match &self.name {
++            Some(name) => Some(HeapRefId::from_heap_name(name)),
++            None => self.serialized_id,
++        }
++    }
++
+     /// Serialization format:
+     /// ```text
+     /// [refs_count: usize]
+@@ -430,11 +442,9 @@ impl FrozenFrozenHeap {
+     ///   [value_data...]
+     /// ```
+     fn serialize_inner(&self, serializer: &mut dyn PagableSerializer) -> crate::Result<()> {
+-        let heap_name = self
+-            .name
+-            .as_ref()
++        let heap_id = self
++            .ref_id()
+             .expect("The name of the FrozenFrozenHeap should exist in starlark pagable serialize");
+-        let heap_id = HeapRefId::from_heap_name(heap_name);
+         // TODO(nero): right now FrozenHeapName hasn't been implemented for Pagable. so just serialize HeapRefId;
+         heap_id.pagable_serialize(serializer)?;
+ 
+@@ -557,7 +567,8 @@ impl FrozenFrozenHeap {
+         // Register per-value header addresses in shared state.
+         state.register_heap(heap_id, value_addrs);
+ 
+-        let heap = Self::deserialize_phase2(arena, refs, &mut ctx)?;
++        let mut heap = Self::deserialize_phase2(arena, refs, &mut ctx)?;
++        heap.serialized_id = Some(heap_id);
+ 
+         Ok(heap)
+     }
+@@ -691,6 +702,23 @@ impl FrozenFrozenHeap {
          refs: Vec<FrozenHeapRef>,
          ctx: &mut StarlarkDeserializerImpl<'_, '_>,
      ) -> crate::Result<FrozenFrozenHeap> {
@@ -432,6 +533,7 @@ index 655cb70..0f44861 100644
 +            arena,
 +            refs: refs.into_boxed_slice(),
 +            name: None,
++            serialized_id: None,
 +            peak_allocated_bytes: None,
 +        })
 +    }
@@ -440,7 +542,7 @@ index 655cb70..0f44861 100644
          let count = ctx.current_heap_deser_state().value_count();
          for i in 0..count {
              let target = ctx.current_heap_deser_state().try_claim(i);
-@@ -709,13 +725,7 @@ impl FrozenFrozenHeap {
+@@ -709,13 +737,7 @@ impl FrozenFrozenHeap {
          let end = ctx.current_heap_deser_state().end_position();
          // SAFETY: end_position is past the last value's data in this heap.
          unsafe { ctx.pagable().seek(end) };
@@ -455,7 +557,20 @@ index 655cb70..0f44861 100644
      }
  }
  
-@@ -906,6 +916,14 @@ impl FrozenHeapRef {
+@@ -858,6 +880,12 @@ impl FrozenHeapRef {
+         self.0.as_ref().and_then(|a| a.name.as_ref())
+     }
+ 
++    /// The id this heap is serialized under, which a deserialized heap
++    /// keeps although it has no name.
++    pub(crate) fn ref_id(&self) -> Option<HeapRefId> {
++        self.0.as_ref().and_then(|a| a.ref_id())
++    }
++
+     /// Get the frozen heaps that this frozen heap depends on.
+     pub fn refs(&self) -> impl Iterator<Item = &FrozenHeapRef> {
+         self.0.as_ref().map(|h| h.refs.iter()).into_iter().flatten()
+@@ -906,6 +934,14 @@ impl FrozenHeapRef {
      /// Build a map from raw header pointer address to `value_index` for all
      /// values in this heap's arena. Indices are assigned in serialization
      /// order: drop bump first, then non-drop bump.
@@ -470,6 +585,14 @@ index 655cb70..0f44861 100644
      pub(crate) fn build_ptr_to_value_index_map(&self) -> HashMap<usize, u32> {
          match &self.0 {
              Some(inner) => inner.arena.build_ptr_to_value_index_map(),
+@@ -976,6 +1012,7 @@ impl FrozenHeap {
+                 arena,
+                 refs: refs.into_iter().collect(),
+                 name,
++                serialized_id: None,
+                 peak_allocated_bytes,
+             })))
+         }
 diff --git a/src/values/layout/typed.rs b/src/values/layout/typed.rs
 index 8f43a3e..41bb743 100644
 --- a/src/values/layout/typed.rs
