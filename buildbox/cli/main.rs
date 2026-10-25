@@ -56,6 +56,9 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// The stack each runtime thread gets. See [`new_runtime`].
 const THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
 
+/// The most worker threads the runtime gets. See [`new_runtime`].
+const MAX_WORKER_THREADS: usize = 8;
+
 fn main() -> ExitCode {
     // The server runs this binary as its container helper, which must stay
     // single-threaded, so this comes before anything that might start
@@ -108,9 +111,16 @@ fn main() -> ExitCode {
 /// The async runtime. Its threads evaluate Starlark, whose compiler
 /// recurses once per level of a nested expression, so they get more stack
 /// than the default 2 MiB; it's committed only as it's used.
+///
+/// CPU-heavy work runs on blocking threads, so the workers only schedule
+/// small tasks, and more of them than [`MAX_WORKER_THREADS`] spend their time
+/// waking each other: on 48 cores, a cold analysis of neptune took twice
+/// the CPU with a worker per core, and no less time.
 fn new_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    let parallelism = std::thread::available_parallelism().map(usize::from).unwrap_or(1);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .worker_threads(parallelism.min(MAX_WORKER_THREADS))
         .thread_stack_size(THREAD_STACK_SIZE)
         .build()
 }
