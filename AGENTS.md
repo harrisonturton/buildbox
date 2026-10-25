@@ -32,8 +32,11 @@ alike.
   separate its sections, split it.
 - **Errors carry context.** Use typed errors (`thiserror`) and say what was
   being attempted. Don't discard the underlying error.
-- **No blocking work on the async runtime.** Filesystem and process work runs
-  on blocking threads (`tokio::task::spawn_blocking`, `tokio::process`).
+- **Don't block the runtime's workers.** A worker stuck in a syscall can't
+  run the other tasks queued on it, including the gRPC server's. Run work
+  that can take a long or unbounded time (subprocesses, network, large or
+  many-file I/O) on blocking threads (`tokio::task::spawn_blocking`,
+  `tokio::process`). Measure before moving work either way.
 - **Document APIs, not implementations.** Give every module a short `//!`
   comment and every public type and function a short `///` comment saying
   what it is for, written as you go. Keep them concise. Avoid `//` comments
