@@ -33,6 +33,9 @@ pub struct RuleClass {
     /// The toolchain types among those that may go unresolved, for which
     /// the rule gets `None`.
     pub optional_toolchain_types: Vec<Label>,
+    /// The exec groups the rule's actions can run in, by name: those
+    /// `rule(exec_groups = ...)` declares, and `test` for test rules.
+    pub exec_groups: Vec<Symbol>,
 }
 
 /// One attribute a rule class takes.

@@ -231,7 +231,40 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     let (toolchain_types, optional) = toolchain_types(rule, &parser)?;
     class.toolchain_types = toolchain_types;
     class.optional_toolchain_types = optional;
+    class.exec_groups = exec_groups(rule)?;
     Ok(class)
+}
+
+/// The exec groups `rule(exec_groups = {...})` declares, and the `test`
+/// group Bazel gives test rules that don't declare it.
+fn exec_groups<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> anyhow::Result<Vec<Symbol>> {
+    let mut names = Vec::new();
+    if let Some(groups) = rule.option("exec_groups").filter(|groups| !groups.is_none()) {
+        let Some(groups) = DictRef::from_value(groups) else {
+            anyhow::bail!("rule: exec_groups must be a dict, not {}", groups.get_type());
+        };
+        for name in groups.keys() {
+            let Some(name) = name.unpack_str() else {
+                anyhow::bail!("rule: exec group names must be strings, not {}", name.get_type());
+            };
+            if !is_valid_exec_group_name(name) {
+                anyhow::bail!("Exec group name '{name}' is not a valid name.");
+            }
+            names.push(Symbol::intern(name));
+        }
+    }
+    let test = Symbol::intern("test");
+    if rule.test && !names.contains(&test) {
+        names.push(test);
+    }
+    Ok(names)
+}
+
+/// Whether an exec group can have this name: it must be an identifier.
+fn is_valid_exec_group_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let starts_well = chars.next().is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
+    starts_well && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The hidden attributes a rule gets from a subrule it declares, whose

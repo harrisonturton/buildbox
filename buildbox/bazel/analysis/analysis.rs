@@ -15,6 +15,8 @@ mod build_ctx;
 pub mod cc;
 mod condition;
 mod configured;
+mod coverage;
+mod exec_groups;
 mod expand;
 mod file_value;
 mod fragments;
@@ -42,9 +44,11 @@ pub use runfiles::{FilesToRun, Runfiles};
 pub use state::runfiles_tree;
 pub use target_value::{DEFAULT_INFO, TargetValue};
 
-/// Add the natives analysis provides to Starlark: the C++ API, and how
-/// subrules find their attributes. Call before any file is evaluated.
+/// Add the natives analysis provides to Starlark: the C++ and coverage
+/// APIs, and how subrules find their attributes. Call before any file is
+/// evaluated.
 pub fn register() {
     cc::register();
+    bazel_starlark::register_bzl_extension(coverage::register);
     build_ctx::register();
 }

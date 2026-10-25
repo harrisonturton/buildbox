@@ -25,6 +25,8 @@ rust_library(
         "cc/variables.rs",
         "condition.rs",
         "configured.rs",
+        "coverage.rs",
+        "exec_groups.rs",
         "expand.rs",
         "file_value.rs",
         "inputs.rs",

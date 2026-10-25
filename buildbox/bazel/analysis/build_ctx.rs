@@ -5,6 +5,7 @@ use crate::action::Action;
 use crate::actions::{self, Actions};
 use crate::artifact::{self, Artifact};
 use crate::configured::{ConfiguredTarget, Implementation};
+use crate::exec_groups::ExecGroups;
 use crate::file_value::{FileRoot, FileValue};
 use crate::providers::{self, Defaults};
 use crate::rule_ctx::RuleCtx;
@@ -377,11 +378,19 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     set("version_file", heap.alloc(FileValue(crate::workspace_status::version_file(&input.config))));
     set("toolchains", heap.alloc(ToolchainContext::new(&input.toolchains, definition_mapping(input), heap)));
     set("fragments", heap.alloc(crate::fragments::Fragments(options)));
-    set("exec_groups", heap.alloc(Opaque::new("ctx.exec_groups")));
+    set("exec_groups", heap.alloc(exec_groups(input)));
     set("split_attr", heap.alloc(AllocStruct(Vec::<(&str, Value<'v>)>::new())));
     set("aspect_ids", heap.alloc(AllocList::EMPTY));
     set("build_setting_value", build_setting_value(input, heap));
     Ok(fields)
+}
+
+/// What `ctx.exec_groups` holds: the exec groups the rule declares.
+fn exec_groups(input: &RuleInput) -> ExecGroups {
+    ExecGroups {
+        target: format!("{} rule {}", input.class.kind, input.label),
+        names: input.class.exec_groups.iter().map(|name| name.to_string()).collect(),
+    }
 }
 
 /// The value of a build setting: from the command line, or its default.
