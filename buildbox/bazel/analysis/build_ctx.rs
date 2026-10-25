@@ -18,7 +18,7 @@ use bazel_label::{Label, RepoMappingTable, RepoName};
 use bazel_packages::{AttrSchema, AttrType, AttrValue, Cfg, RuleClass};
 use bazel_starlark::attr_module::Attribute;
 use bazel_starlark::label_value::LabelValue;
-use bazel_starlark::opaque::Opaque;
+use bazel_starlark::opaque::{Analyzing, Opaque};
 use bazel_starlark::{EvalContext, FileKind};
 use intern::Symbol;
 use skycodec::Fingerprinter;
@@ -216,6 +216,7 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     context.extension = Some(Box::new(state));
     module.set(RULE_CTX, ctx);
     let returned = {
+        let _analyzing = Analyzing::begin();
         let mut eval = Evaluator::new(module);
         eval.extra = Some(&context);
         implement(input, &prepared, ctx, &mut eval)
@@ -465,13 +466,13 @@ pub fn register() {
 }
 
 /// Late-bound attributes for Apple platforms, which rules read
-/// unconditionally but only use when building for them. They stand in for
-/// targets bb doesn't analyze.
+/// unconditionally but only use when building for them. Lenient opaque
+/// values stand in for the targets, which bb doesn't analyze yet.
 const APPLE_LATE_BOUND_ATTRS: &[&str] = &["_xcode_config"];
 
 fn attr_value<'v>(input: &RuleInput, prepared: &Prepared<'v>, schema: &AttrSchema, value: &AttrValue, heap: Heap<'v>) -> Value<'v> {
     if APPLE_LATE_BOUND_ATTRS.contains(&schema.name.as_str()) && matches!(value, AttrValue::None) {
-        return heap.alloc(Opaque::new(schema.name.as_str()));
+        return heap.alloc(Opaque::lenient(schema.name.as_str()));
     }
     let config = dep_config(schema.cfg, input.config.id);
     let target = |label: &Label| prepared.deps.get(&(*label, config)).copied().unwrap_or_else(Value::new_none);

@@ -37,8 +37,10 @@ support, rules_lint, IDE plugins and `compile_commands.json` generators.
 
 ## 3. Execution platforms and exec groups
 
-- **Exec groups:** `ctx.exec_groups` is opaque, and actions drop their
-  `exec_group` argument (`buildbox/bazel/analysis/actions.rs`).
+- **Exec groups:** `ctx.exec_groups` knows which groups a rule declares,
+  but fails when asked for one's context, since no toolchains are resolved
+  per group. Actions drop their `exec_group` argument
+  (`buildbox/bazel/analysis/actions.rs`).
 - **Remote platform:** the REAPI `Platform` of every action is empty
   (`buildbox/bazel/execution/spawn.rs`), so `exec_properties` never reach a
   remote executor.
@@ -52,16 +54,25 @@ than the host doesn't work.
 ## 4. Builtin APIs for rule sets other than C++
 
 Only C++ has a real implementation. `java_common`,
-`proto_common_do_not_use`, `apple_common`, `coverage_common`, `testing`
-and `config` are opaque values (`buildbox/bazel/starlark/opaque.rs`), and
-there's no `py_internal` or `JavaInfo`. This leaves out Java and Kotlin,
-Python, proto, Apple, Android, and analysis tests (`testing.analysis_test`,
-which rules_testing and skylib's `unittest` use).
+`proto_common_do_not_use`, `apple_common`, `testing` and `config` are opaque
+values (`buildbox/bazel/starlark/opaque.rs`), and there's no `py_internal` or
+`JavaInfo`. This leaves out Java and Kotlin, Python, proto, Apple, Android,
+and analysis tests (`testing.analysis_test`, which rules_testing and
+skylib's `unittest` use). `coverage_common` is real, but only as Bazel
+behaves with coverage off (section 6).
 
-Opaque values are permissive even during analysis: every attribute exists,
-calling one returns another, and iterating one yields an empty list. A rule
-that reaches one can analyze "successfully" with wrong results instead of
-failing. They should fail during analysis whatever else is done here.
+A rule implementation fails if it calls, iterates or searches an opaque
+value, or returns one as a provider, so a missing API is an error rather
+than a silently wrong analysis. Two gaps remain:
+
+- Opaque values are still truthy, since starlark-rust's `to_bool` can't
+  fail: `if java_common.something:` takes the branch.
+- Apple's late-bound `_xcode_config` is a lenient opaque value, which rules
+  can use freely: rules_cc reads it unconditionally on every platform.
+  Bazel 9 analyzes `@local_config_xcode//:host_xcodes` (apple_support's
+  `xcode_config`, through `@bazel_tools`' `xcode_configure` extension)
+  instead, which needs `apple_common.XcodeVersionConfig` and the Apple
+  platform types.
 
 ## 5. Query tooling
 
@@ -95,7 +106,9 @@ CI integrations and remote build services depend on these.
 - **Lockfile:** `MODULE.bazel.lock` is neither read nor written;
   `--lockfile_mode` is accepted and ignored.
 - **Overrides:** `git_override` and `multiple_version_override` fail
-  (`buildbox/bazel/bzlmod/resolve.rs`).
+  (`buildbox/bazel/bzlmod/resolve.rs`). A `single_version_override` with
+  patches replaces the registry's `patch_strip` with its own, so the
+  registry's patches apply with the wrong strip when the two differ.
 - **Commands:** there's no `mod`, `fetch`, `vendor` or `sync`.
 - **Authentication:** downloads support neither `.netrc` nor credential
   helpers, so private registries and authenticated `http_archive`s fail.
@@ -109,11 +122,9 @@ Bazel rejects.
 
 ## Suggested order
 
-1. Make opaque values fail during analysis (section 4). It's small and
-   stops silent miscompiles.
-2. A general options model, then transitions, then the exec configuration
+1. A general options model, then transitions, then the exec configuration
    from the resolved execution platform. cquery largely follows.
-3. Aspects, which much of the remaining ecosystem depends on.
+2. Aspects, which much of the remaining ecosystem depends on.
 
 ## Not yet audited
 

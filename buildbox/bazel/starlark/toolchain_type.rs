@@ -59,6 +59,7 @@ fn config_common_functions(builder: &mut GlobalsBuilder) {
 
     const FeatureFlagInfo: crate::opaque::Opaque = crate::opaque::Opaque {
         type_name: String::new(),
+        lenient: false,
     };
 }
 

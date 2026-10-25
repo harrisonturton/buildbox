@@ -60,8 +60,8 @@ pub fn collect<'v>(label: Label, returned: Value<'v>, defaults: &Defaults, heap:
     };
     let mut providers = SmallMap::new();
     for item in items {
-        if item.downcast_ref::<Opaque>().is_some() {
-            continue;
+        if let Some(opaque) = item.downcast_ref::<Opaque>() {
+            anyhow::bail!("{label}: the rule returned '{}', which isn't supported by bb yet", opaque.type_name);
         }
         let key = match ProviderInstance::from_value(item) {
             Some(instance) => instance.provider_key().unwrap_or_default(),
