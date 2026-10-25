@@ -4,6 +4,7 @@
 # - `dict.get` takes `default` by name, as `d.get(key, default = None)`.
 # - A top-level def releases its unfrozen bytecode and IR once frozen.
 # - A def prints as Bazel prints one: `<function NAME from LABEL>`.
+# - `string.elems()` returns a list, as in Bazel, not an iterator.
 # - `DeserTypeId` holds `type_name::<T>` as a function, so the `pagable`
 #   feature builds on stable Rust, which can't call `type_name` in a const.
 exports_files(["starlark.patch"])

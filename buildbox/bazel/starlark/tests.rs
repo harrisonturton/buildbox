@@ -147,11 +147,13 @@ fn accepts_bazels_dialect() {
     let source = r#"
 UNION = {"a": "1"} | select({"//conditions:default": {"b": "2"}})
 DEFAULT = {}.get("k", default = 3)
+ELEMS = "abc".elems()[1:]
 "#;
     let ast = parse(file, source.to_string()).unwrap();
     let module = eval_bzl(ast, &BZL_GLOBALS, &Loads { modules: HashMap::new() }, EvalContext::new(FileKind::Bzl, file), heap_name("test", file, 0)).0.unwrap();
     assert_eq!(module.get("UNION").unwrap().value().get_type(), "select");
     assert_eq!(module.get("DEFAULT").unwrap().value().unpack_i32(), Some(3));
+    assert_eq!(module.get("ELEMS").unwrap().value().to_repr(), r#"["b", "c"]"#);
 }
 
 #[test]

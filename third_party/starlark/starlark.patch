@@ -514,3 +514,38 @@ index e71c19f..43bff82 100644
      ) -> starlark::Result<Value<'v>> {
          match this.get(key)? {
              None => Ok(default.unwrap_or_else(Value::new_none)),
+diff --git a/src/values/types/string/methods.rs b/src/values/types/string/methods.rs
+index 86f1371..b1d1b71 100644
+--- a/src/values/types/string/methods.rs
++++ b/src/values/types/string/methods.rs
+@@ -39,7 +39,6 @@ use crate::values::none::NoneOr;
+ use crate::values::string::dot_format;
+ use crate::values::tuple::UnpackTuple;
+ use crate::values::type_repr::StarlarkTypeRepr;
+-use crate::values::types::string::iter::iterate_chars;
+ use crate::values::types::string::iter::iterate_codepoints;
+ use crate::values::typing::iter::StarlarkIter;
+ 
+@@ -113,19 +112,15 @@ pub(crate) fn string_methods(builder: &mut MethodsBuilder) {
+     /// `S.elems()` returns an iterable value containing the
+     /// sequence of numeric bytes values in the string S.
+     ///
+-    /// To materialize the entire sequence of bytes, apply `list(...)` to the
+-    /// result.
++    /// As in Bazel, the result is a list, so it can be indexed and sliced.
+     ///
+     /// ```
+     /// # starlark::assert::is_true(r#"
+     /// list("Hello, 世界".elems()) == ["H", "e", "l", "l", "o", ",", " ", "世", "界"]
+     /// # "#);
+     /// ```
+-    fn elems<'v>(
+-        this: StringValue<'v>,
+-        heap: Heap<'v>,
+-    ) -> anyhow::Result<ValueOfUnchecked<'v, StarlarkIter<String>>> {
+-        Ok(iterate_chars(this, heap))
++    fn elems<'v>(this: &str, heap: Heap<'v>) -> anyhow::Result<Vec<Value<'v>>> {
++        Ok(this.chars().map(|c| heap.alloc(c)).collect())
+     }
+ 
+     /// [string.capitalize](
