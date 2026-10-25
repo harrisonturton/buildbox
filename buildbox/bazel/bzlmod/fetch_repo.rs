@@ -1,7 +1,7 @@
 //! Fetching repositories into the machine-wide repository directory.
 
 use crate::config::BzlmodConfig;
-use crate::repo_spec::{ArchiveSpec, RepoSpec};
+use crate::repo_spec::{ArchiveSpec, RemoteFile, RepoSpec};
 use crate::spec::RepoSpecKey;
 use bazel_fetch::{ArchiveType, DownloadCache, Integrity};
 use bazel_fs::{Root, RootedPath};
@@ -187,6 +187,10 @@ pub async fn read_label_patch(ctx: &Ctx, label: &str) -> Result<Vec<u8>, SkyErro
     Ok(bytes)
 }
 
+/// Fill `dir` with an archive's repository, in Bazel's order: the archive
+/// and its overlay, the registry's patches, the registry's MODULE.bazel,
+/// then the main repository's patches. A registry's patches are written
+/// against the archive's MODULE.bazel, so they come before it's replaced.
 fn fill_archive(
     dir: &Path,
     downloads: &DownloadCache,
@@ -209,29 +213,42 @@ fn fill_archive(
             .download(std::slice::from_ref(&file.url), integrity.as_ref(), &dir.join(path))
             .map_err(|error| error.to_string())?;
     }
-    if let Some(module_file) = module_file {
-        let path = dir.join("MODULE.bazel");
-        make_writable(&path);
-        std::fs::write(&path, module_file).map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    let (local, remote): (Vec<&RemoteFile>, Vec<&RemoteFile>) = archive.patches.iter().partition(|patch| label_patches.contains_key(&patch.url));
+    for (index, patch) in remote.into_iter().enumerate() {
+        let contents = download_patch(dir, downloads, patch, index)?;
+        apply(dir, &contents, archive.patch_strip, &patch.url)?;
     }
-    for (index, patch) in archive.patches.iter().enumerate() {
-        let contents = match label_patches.get(&patch.url) {
-            Some(contents) => contents.clone(),
-            None => {
-                let file = dir.join(format!(".bb_patch_{index}"));
-                let integrity = parse_integrity(&patch.integrity)?;
-                downloads
-                    .download(std::slice::from_ref(&patch.url), integrity.as_ref(), &file)
-                    .map_err(|error| error.to_string())?;
-                let contents = std::fs::read(&file).map_err(|error| format!("failed to read patch {}: {error}", file.display()))?;
-                let _ = std::fs::remove_file(&file);
-                contents
-            }
-        };
-        let text = String::from_utf8_lossy(&contents);
-        bazel_fetch::apply_patch(dir, &text, archive.patch_strip as usize, &patch.url).map_err(|error| error.to_string())?;
+    if let Some(module_file) = module_file {
+        write_module_file(dir, module_file)?;
+    }
+    for patch in local {
+        apply(dir, &label_patches[&patch.url], archive.patch_strip, &patch.url)?;
     }
     Ok(())
+}
+
+/// Download one of the registry's patches.
+fn download_patch(dir: &Path, downloads: &DownloadCache, patch: &RemoteFile, index: usize) -> Result<Vec<u8>, String> {
+    let file = dir.join(format!(".bb_patch_{index}"));
+    let integrity = parse_integrity(&patch.integrity)?;
+    downloads
+        .download(std::slice::from_ref(&patch.url), integrity.as_ref(), &file)
+        .map_err(|error| error.to_string())?;
+    let contents = std::fs::read(&file).map_err(|error| format!("failed to read patch {}: {error}", file.display()))?;
+    let _ = std::fs::remove_file(&file);
+    Ok(contents)
+}
+
+/// Replace the archive's MODULE.bazel with the registry's.
+fn write_module_file(dir: &Path, module_file: &[u8]) -> Result<(), String> {
+    let path = dir.join("MODULE.bazel");
+    make_writable(&path);
+    std::fs::write(&path, module_file).map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn apply(dir: &Path, contents: &[u8], strip: i64, name: &str) -> Result<(), String> {
+    let text = String::from_utf8_lossy(contents);
+    bazel_fetch::apply_patch(dir, &text, strip as usize, name).map_err(|error| error.to_string())
 }
 
 /// Archives can contain read-only files that the registry's files replace.
