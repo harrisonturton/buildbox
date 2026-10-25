@@ -370,11 +370,14 @@ fn heap_identity(session: &SessionContext, heap: &FrozenHeapRef) -> Option<usize
 }
 
 /// The type of the arc a frozen heap is held in, as the cache of read
-/// heaps knows it.
+/// heaps knows it. The heap probed for it holds a value, since an empty
+/// heap isn't held in an arc at all.
 fn heap_type_id() -> std::any::TypeId {
     static HEAP_TYPE: OnceLock<std::any::TypeId> = OnceLock::new();
     *HEAP_TYPE.get_or_init(|| {
-        let heap = starlark::values::FrozenHeap::new().into_ref_named(starlark::values::FrozenHeapName::User(Box::new("probe".to_string())));
+        let probe = starlark::values::FrozenHeap::new();
+        probe.alloc_str("probe");
+        let heap = probe.into_ref_named(starlark::values::FrozenHeapName::User(Box::new("probe".to_string())));
         let session = SessionContext::new();
         let mut serializer = SerializerForPaging::new(&session);
         let _ = heap.pagable_serialize(&mut serializer);
@@ -407,6 +410,11 @@ mod tests {
             module.freeze_named(name(heap_name))
         })
         .unwrap()
+    }
+
+    #[test]
+    fn heaps_are_found_in_the_cache_of_read_heaps() {
+        assert_ne!(heap_type_id(), std::any::TypeId::of::<()>());
     }
 
     #[test]
