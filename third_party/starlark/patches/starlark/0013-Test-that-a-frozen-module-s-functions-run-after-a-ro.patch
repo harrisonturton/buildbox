@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harry Turton <harrisonturton@gmail.com>
+Date: Sun, 25 Oct 2026 19:44:16 -0400
+Subject: [PATCH] Test that a frozen module's functions run after a round trip
+
+Reads a module's functions back at new addresses and calls them, through
+constants, other defs, a closure, builtins and a loop. Without
+per-instruction serialization of bytecode this segfaults.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pagable/tests.rs | 53 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 53 insertions(+)
+
+diff --git a/src/pagable/tests.rs b/src/pagable/tests.rs
+index 34db1caf..274da14e 100644
+--- a/src/pagable/tests.rs
++++ b/src/pagable/tests.rs
+@@ -2494,3 +2494,56 @@ fn test_globals_roundtrip() {
+     let mut serializer = pagable::testing::TestingSerializer::new();
+     globals.pagable_serialize(&mut serializer).unwrap();
+ }
++
++/// A frozen module's functions, read back at new addresses, still run: their
++/// bytecode refers to constants, other functions and builtins by value, not
++/// by address.
++#[test]
++fn test_functions_round_trip_and_run() -> crate::Result<()> {
++    use crate::environment::Module;
++    use crate::eval::Evaluator;
++    use crate::syntax::AstModule;
++    use crate::syntax::Dialect;
++
++    let program = r#"
++SCALE = 3
++def helper(x):
++    return x * SCALE
++
++def make_adder(n):
++    return lambda y: y + n
++
++add_two = make_adder(2)
++
++def f(x, *, label = "v"):
++    items = [helper(x), add_two(x), len(str(x))]
++    for i in range(2):
++        items.append(i)
++    return {label: items, "joined": ",".join([str(i) for i in items]), "upper": label.upper()}
++"#;
++    let ast = AstModule::parse("functions.star", program.to_owned(), &Dialect::Extended).unwrap();
++    let globals = GlobalsBuilder::standard().build_named(GlobalFrozenHeapName { name: "standard" });
++    let frozen = Module::with_temp_heap(|module| {
++        {
++            let mut eval = Evaluator::new(&module);
++            eval.eval_module(ast, &globals)?;
++        }
++        Ok::<_, crate::Error>(module.freeze_named(TestHeapName::heap_name("functions"))?)
++    })?;
++    let f = frozen.get("f").map_err(crate::Error::new_other)?;
++    // SAFETY: `f` keeps its heap alive while the value is used.
++    let (heap_ref, value) = (f.owner().clone(), unsafe { f.unchecked_frozen_value() });
++    drop(frozen);
++    drop(f);
++    let restored = round_trip_owned(heap_ref, value)?;
++
++    let result = Module::with_temp_heap(|module| {
++        let mut eval = Evaluator::new(&module);
++        let f = eval.heap().access_owned_frozen_value(&restored);
++        let label = eval.heap().alloc("w");
++        let result = eval.eval_function(f, &[eval.heap().alloc(5)], &[("label", label)])?;
++        Ok::<_, crate::Error>(result.to_repr())
++    })?;
++    assert_eq!(result, r#"{"w": [15, 7, 1, 0, 1], "joined": "15,7,1,0,1", "upper": "W"}"#);
++    Ok(())
++}

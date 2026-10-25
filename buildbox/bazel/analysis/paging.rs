@@ -4,9 +4,9 @@
 //! refers to its dependencies' heaps and to the heaps of the `.bzl`
 //! modules, builtins and globals it used. A [`HeapStore`] serializes
 //! targets' heaps to files and reads them back when they're next used.
-//! Heaps of other kinds are never serialized, since starlark-rust can't yet
-//! serialize compiled functions: they're pinned, kept live, and referred to
-//! by a key that resolves back to the live heap when a target is read.
+//! Heaps of other kinds, such as `.bzl` modules', are never serialized:
+//! they're pinned, kept live, and referred to by a key that resolves back to
+//! the live heap when a target is read.
 //!
 //! Targets are paged out together, since a target's heap is freed only once
 //! no dependent's live heap refers to it.
@@ -307,8 +307,6 @@ impl HeapStore {
     /// reading both keys back would make two copies of one heap.
     fn page_out<'a>(self: &Arc<HeapStore>, values: impl IntoIterator<Item = &'a PagedValue>) -> anyhow::Result<usize> {
         let live: Vec<(&PagedValue, OwnedFrozenValue)> = values.into_iter().filter_map(|value| Some((value, value.live()?))).collect();
-        let kept = kept_live(&self.session, live.iter().map(|(_, value)| value.owner()));
-        let live: Vec<(&PagedValue, OwnedFrozenValue)> = live.into_iter().filter(|(_, value)| !self.is_kept(&kept, value.owner())).collect();
         let (read_back, new): (Vec<_>, Vec<_>) = live.into_iter().partition(|(value, _)| value.key().is_some());
         starlark::pagable::forget_serialized_heaps(&self.session);
         self.mark_paging(&new);
@@ -332,10 +330,6 @@ impl HeapStore {
         let mut state = self.lock();
         let paging = identities.into_iter().filter(|identity| state.read_back_key(*identity).is_none()).collect();
         state.paging = paging;
-    }
-
-    fn is_kept(&self, kept: &HashSet<usize>, heap: &FrozenHeapRef) -> bool {
-        heap_identity(&self.session, heap).is_some_and(|identity| kept.contains(&identity))
     }
 
     /// Serialize `values` and write them to a file, returning their keys.
@@ -407,26 +401,6 @@ impl HeapStore {
             state.read_back.insert(arc.identity(), ReadBack { key, heap });
         }
     }
-}
-
-/// The identities of the heaps that stay live rather than being paged out:
-/// those of `heaps` holding functions, such as a lambda a rule stored in a
-/// provider, whose compiled code can't be read back, and every heap they
-/// refer to. Heaps paged out refer to them by key, so reading those back
-/// doesn't read these, and nothing they refer to may be paged out either;
-/// it couldn't be freed anyway.
-fn kept_live<'a>(session: &SessionContext, heaps: impl IntoIterator<Item = &'a FrozenHeapRef>) -> HashSet<usize> {
-    let mut pending: Vec<FrozenHeapRef> = heaps.into_iter().filter(|heap| heap.holds_functions()).cloned().collect();
-    let mut kept = HashSet::new();
-    while let Some(heap) = pending.pop() {
-        let Some(identity) = heap_identity(session, &heap) else {
-            continue;
-        };
-        if kept.insert(identity) {
-            pending.extend(heap.refs().cloned());
-        }
-    }
-    kept
 }
 
 /// The identity a heap has as an arc, found by serializing a reference to
@@ -558,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn a_heap_holding_functions_stays_live() {
+    fn a_function_runs_after_its_heap_is_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(HeapStore::new(dir.path().to_path_buf()));
         let bzl = module("def make(n):\n    return lambda x: x + n", "bzl", &[]);
@@ -566,14 +540,14 @@ mod tests {
         let value = PagedValue::new(target.get("providers").unwrap());
         drop(target);
 
-        assert_eq!(store.page_out([&value]).unwrap(), 0);
-        let read = value.get().unwrap();
+        assert_eq!(store.page_out([&value]).unwrap(), 1);
+        let read = store.page_in(value.key().unwrap()).unwrap();
         let result = module("result = providers['add'](1)", "user", &[("providers", &read)]);
         assert_eq!(result.get("result").unwrap().value().unpack_i32(), Some(3));
     }
 
     #[test]
-    fn heaps_a_heap_holding_functions_refers_to_stay_live() {
+    fn a_function_read_back_through_its_dependencies_runs() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(HeapStore::new(dir.path().to_path_buf()));
         let bzl = module("def make(n):\n    return lambda x: x + n", "bzl", &[]);
@@ -585,43 +559,27 @@ mod tests {
         let value = PagedValue::new(target.get("providers").unwrap());
         drop((leaf, functions, target));
 
-        assert_eq!(store.page_out([&leaf_value, &functions_value, &value]).unwrap(), 1);
-        let key = value.state.lock().unwrap().key.unwrap();
-        let read = store.page_in(key).unwrap();
+        assert_eq!(store.page_out([&leaf_value, &functions_value, &value]).unwrap(), 3);
+        let read = store.page_in(value.key().unwrap()).unwrap();
         let result = module("result = providers['add'](providers['n'][0])", "user", &[("providers", &read)]);
         assert_eq!(result.get("result").unwrap().value().unpack_i32(), Some(4));
     }
 
     #[test]
-    fn a_heap_kept_live_after_reading_back_is_read_once() {
+    fn a_function_read_back_pages_out_again() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(HeapStore::new(dir.path().to_path_buf()));
-        let bzl = module("def make(n):\n    return lambda x: x + n", "bzl", &[]);
-        let leaf = module("providers = {'n': [2]}", "leaf", &[]);
-        let leaf_value = PagedValue::new(leaf.get("providers").unwrap());
-        let user = module("providers = {'n': leaf['n']}", "user", &[("leaf", &leaf.get("providers").unwrap())]);
-        let user_value = PagedValue::new(user.get("providers").unwrap());
-        drop((leaf, user));
-        assert_eq!(store.page_out([&leaf_value, &user_value]).unwrap(), 2);
+        let bzl = module("def make(n):\n    return lambda x: x * n", "bzl", &[]);
+        let target = module("providers = {'times': make(3)}", "target", &[("make", &bzl.get("make").unwrap())]);
+        let value = PagedValue::new(target.get("providers").unwrap());
+        drop(target);
 
-        let leaf_key = leaf_value.state.lock().unwrap().key.unwrap();
-        let leaf = store.page_in(leaf_key).unwrap();
-        leaf_value.state.lock().unwrap().live = Some(leaf.clone());
-        let functions = module("providers = {'add': make(leaf['n'][0]), 'n': leaf['n']}", "functions", &[("make", &bzl.get("make").unwrap()), ("leaf", &leaf)]);
-        let functions_value = PagedValue::new(functions.get("providers").unwrap());
-        drop((leaf, functions));
-        assert_eq!(store.page_out([&leaf_value, &functions_value]).unwrap(), 0);
-
-        let user_key = user_value.state.lock().unwrap().key.unwrap();
-        let user = store.page_in(user_key).unwrap();
-        let both = module("providers = {'n': user['n'], 'add': functions['add'], 'same_n': functions['n']}", "both", &[("user", &user), ("functions", &functions_value.get().unwrap())]);
-        let both_value = PagedValue::new(both.get("providers").unwrap());
-        drop((user, both));
-        assert_eq!(store.page_out([&leaf_value, &functions_value, &both_value]).unwrap(), 1);
-
-        let both_key = both_value.state.lock().unwrap().key.unwrap();
-        let read = store.page_in(both_key).unwrap();
-        let result = module("result = providers['add'](providers['n'][0] + providers['same_n'][0])", "result", &[("providers", &read)]);
-        assert_eq!(result.get("result").unwrap().value().unpack_i32(), Some(6));
+        for round in 1..=3 {
+            assert_eq!(store.page_out([&value]).unwrap(), 1);
+            let read = store.page_in(value.key().unwrap()).unwrap();
+            value.state.lock().unwrap().live = Some(read.clone());
+            let result = module("result = providers['times'](5)", &format!("user{round}"), &[("providers", &read)]);
+            assert_eq!(result.get("result").unwrap().value().unpack_i32(), Some(15));
+        }
     }
 }

@@ -1,0 +1,830 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chenhao Zuo <nero@meta.com>
+Date: Wed, 17 Jun 2026 16:01:42 -0700
+Subject: [PATCH] Cross-process pagable ser/de for BcInstrs
+
+Summary:
+`BcInstrs` is a packed `Box<[u64]>` of `BcInstrRepr` records with embedded `FrozenValue`s; copying the raw words is unsound across processes because the pointers don't relocate.
+
+Give `BcInstrs` a manual `StarlarkSerialize`/`StarlarkDeserialize` that walks the instruction stream and routes each instruction's `I::Arg` through its own ser/de, so embedded `FrozenValue`s relocate via the normal mechanism. Wire format: a u8 tag followed by a `(u32 opcode, arg)` stream terminated by `End`. `'static`-backed args re-resolve on read instead of being serialized (`BcNativeFunction` from its frozen value, `KnownMethod` by name); `BcOpcode` serializes as a u32 (there are >256 opcodes). This unblocks paging any `FrozenDef`.
+
+Reviewed By: christolliday
+
+Differential Revision: D108842732
+
+fbshipit-source-id: acc9b5836a003e287ffe2341b58a2b73a19679f2
+(cherry picked from commit 1db2639f54d9758f931dc978ba316af54978dcbc)
+---
+ src/eval/bc/addr.rs                    |  41 ++++++-
+ src/eval/bc/call.rs                    |   7 +-
+ src/eval/bc/for_loop.rs                |   6 +-
+ src/eval/bc/instr_arg.rs               |   4 +-
+ src/eval/bc/instr_impl.rs              |   4 +-
+ src/eval/bc/instrs.rs                  | 132 +++++++++++++++++++--
+ src/eval/bc/native_function.rs         |  19 +++
+ src/eval/bc/opcode.rs                  |  23 ++++
+ src/eval/bc/slow_arg.rs                |   7 +-
+ src/eval/bc/stack_ptr.rs               |  22 +++-
+ src/eval/runtime/arguments.rs          |  10 +-
+ src/pagable/starlark_pagable_impls.rs  | 153 ++++++++++++++-----------
+ src/values/layout/value_not_special.rs |   4 +-
+ src/values/types/known_methods.rs      |  24 ++++
+ 14 files changed, 362 insertions(+), 94 deletions(-)
+
+diff --git a/src/eval/bc/addr.rs b/src/eval/bc/addr.rs
+index e3c5dbcc..8cd39b65 100644
+--- a/src/eval/bc/addr.rs
++++ b/src/eval/bc/addr.rs
+@@ -25,7 +25,9 @@ use std::ops::Sub;
+ 
+ use derive_more::Display;
+ use dupe::Dupe;
++use starlark_derive::StarlarkPagable;
+ 
++use crate as starlark;
+ use crate::eval::bc::if_debug::IfDebug;
+ use crate::eval::bc::instr::BcInstr;
+ use crate::eval::bc::opcode::BcOpcode;
+@@ -35,7 +37,18 @@ use crate::eval::bc::repr::BcInstrRepr;
+ 
+ /// Address relative to bytecode start.
+ #[derive(
+-    Eq, PartialEq, Copy, Clone, Dupe, Debug, PartialOrd, Ord, Display, Hash, Default
++    Eq,
++    PartialEq,
++    Copy,
++    Clone,
++    Dupe,
++    Debug,
++    PartialOrd,
++    Ord,
++    Display,
++    Hash,
++    Default,
++    StarlarkPagable
+ )]
+ #[display("@{}", _0)]
+ pub(crate) struct BcAddr(pub(crate) u32);
+@@ -231,7 +244,18 @@ impl<'b> BcPtrAddr<'b> {
+ }
+ 
+ /// Difference between addresses.
+-#[derive(Eq, PartialEq, Copy, Clone, Dupe, Debug, PartialOrd, Ord, Display)]
++#[derive(
++    Eq,
++    PartialEq,
++    Copy,
++    Clone,
++    Dupe,
++    Debug,
++    PartialOrd,
++    Ord,
++    Display,
++    StarlarkPagable
++)]
+ pub(crate) struct BcAddrOffset(pub(crate) u32);
+ 
+ impl BcAddrOffset {
+@@ -251,5 +275,16 @@ impl BcAddrOffset {
+ }
+ 
+ /// Negative difference between addresses.
+-#[derive(Eq, PartialEq, Copy, Clone, Dupe, Debug, PartialOrd, Ord, Display)]
++#[derive(
++    Eq,
++    PartialEq,
++    Copy,
++    Clone,
++    Dupe,
++    Debug,
++    PartialOrd,
++    Ord,
++    Display,
++    StarlarkPagable
++)]
+ pub(crate) struct BcAddrOffsetNeg(pub(crate) u32);
+diff --git a/src/eval/bc/call.rs b/src/eval/bc/call.rs
+index 1cf78e6d..7b4adb6e 100644
+--- a/src/eval/bc/call.rs
++++ b/src/eval/bc/call.rs
+@@ -22,8 +22,10 @@ use std::fmt::Display;
+ use std::fmt::Formatter;
+ use std::marker::PhantomData;
+ 
++use starlark_derive::StarlarkPagable;
+ use starlark_syntax::slice_vec_ext::VecExt;
+ 
++use crate as starlark;
+ use crate::coerce::coerce;
+ use crate::collections::symbol::symbol::Symbol;
+ use crate::eval::bc::frame::BcFramePtr;
+@@ -54,7 +56,8 @@ pub(crate) trait BcCallArgsForDef: BcInstrArg {
+ }
+ 
+ /// Full call arguments: positional, named, star and star-star. All taken from the stack.
+-#[derive(Debug)]
++#[derive(Debug, StarlarkPagable)]
++#[starlark_pagable(bound = "S: ArgSymbol + starlark::pagable::StarlarkPagable")]
+ pub(crate) struct BcCallArgsFull<S: ArgSymbol> {
+     pub(crate) pos_named: BcSlotInRange,
+     pub(crate) names: Box<[(S, FrozenStringValue)]>,
+@@ -63,7 +66,7 @@ pub(crate) struct BcCallArgsFull<S: ArgSymbol> {
+ }
+ 
+ /// Positional-only call arguments, from stack.
+-#[derive(Debug)]
++#[derive(Debug, StarlarkPagable)]
+ pub(crate) struct BcCallArgsPos {
+     /// Range of positional arguments.
+     pub(crate) pos: BcSlotInRange,
+diff --git a/src/eval/bc/for_loop.rs b/src/eval/bc/for_loop.rs
+index 391e8afc..64541a69 100644
+--- a/src/eval/bc/for_loop.rs
++++ b/src/eval/bc/for_loop.rs
+@@ -17,6 +17,9 @@
+ 
+ use dupe::Dupe;
+ use pagable::Pagable;
++use starlark_derive::StarlarkPagableViaPagable;
++
++use crate as starlark;
+ 
+ /// Depth of the loop. For example,
+ ///
+@@ -37,6 +40,7 @@ use pagable::Pagable;
+     PartialEq,
+     Ord,
+     PartialOrd,
+-    Pagable
++    Pagable,
++    StarlarkPagableViaPagable
+ )]
+ pub(crate) struct LoopDepth(pub(crate) u32);
+diff --git a/src/eval/bc/instr_arg.rs b/src/eval/bc/instr_arg.rs
+index fb9bec49..f1a7778f 100644
+--- a/src/eval/bc/instr_arg.rs
++++ b/src/eval/bc/instr_arg.rs
+@@ -50,6 +50,8 @@ use crate::eval::runtime::arguments::ArgSymbol;
+ use crate::eval::runtime::frame_span::FrameSpan;
+ use crate::eval::runtime::slots::LocalCapturedSlotId;
+ use crate::eval::runtime::slots::LocalSlotId;
++use crate::pagable::StarlarkDeserialize;
++use crate::pagable::StarlarkSerialize;
+ use crate::values::FrozenValue;
+ use crate::values::FrozenValueTyped;
+ use crate::values::StarlarkValue;
+@@ -75,7 +77,7 @@ impl Display for TruncateValueRepr {
+ }
+ 
+ /// Instruction fixed argument.
+-pub(crate) trait BcInstrArg: 'static {
++pub(crate) trait BcInstrArg: 'static + StarlarkSerialize + StarlarkDeserialize {
+     /// Append space then append the argument, or append nothing if the argument is empty.
+     fn fmt_append(
+         param: &Self,
+diff --git a/src/eval/bc/instr_impl.rs b/src/eval/bc/instr_impl.rs
+index 6600f175..c697d5bf 100644
+--- a/src/eval/bc/instr_impl.rs
++++ b/src/eval/bc/instr_impl.rs
+@@ -21,9 +21,11 @@ use std::cmp::Ordering;
+ use std::marker;
+ use std::ptr;
+ 
++use starlark_derive::StarlarkPagable;
+ use starlark_syntax::eval_exception::EvalException;
+ use starlark_syntax::internal_error;
+ 
++use crate as starlark;
+ use crate::coerce::coerce;
+ use crate::collections::Hashed;
+ use crate::collections::SmallMap;
+@@ -1393,7 +1395,7 @@ impl BcInstr for InstrReturnCheckType {
+ pub(crate) struct InstrDefImpl;
+ pub(crate) type InstrDef = InstrNoFlow<InstrDefImpl>;
+ 
+-#[derive(Debug)]
++#[derive(Debug, StarlarkPagable)]
+ pub(crate) struct InstrDefData {
+     pub(crate) function_name: String,
+     pub(crate) params: ParametersCompiled<u32>,
+diff --git a/src/eval/bc/instrs.rs b/src/eval/bc/instrs.rs
+index 91a6a9dd..293d5009 100644
+--- a/src/eval/bc/instrs.rs
++++ b/src/eval/bc/instrs.rs
+@@ -46,6 +46,10 @@ use crate::eval::bc::repr::BcInstrRepr;
+ use crate::eval::bc::slow_arg::BcInstrEndArg;
+ use crate::eval::bc::slow_arg::BcInstrSlowArg;
+ use crate::eval::bc::writer::BcStatementLocations;
++use crate::pagable::StarlarkDeserialize;
++use crate::pagable::StarlarkDeserializeContext;
++use crate::pagable::StarlarkSerialize;
++use crate::pagable::StarlarkSerializeContext;
+ use crate::static_starlark_value;
+ use crate::values::FrozenStringValue;
+ use crate::values::types::any_array::AnyArray;
+@@ -141,20 +145,130 @@ impl BcInstrsEmpty {
+     }
+ }
+ 
+-#[derive(StarlarkPagable)]
+ pub(crate) struct BcInstrs {
+-    // We use `usize` here to guarantee the buffer is properly aligned
+-    // to store `BcInstrLayout`.
+-    //
+-    // `Left`: owned compiled buffer. `Right`: empty marker, resolved lazily
+-    // via [`empty_instrs()`] to a single shared `InstrEnd`.
+-    //
+-    // TODO(nero): pagable ser/de of `Box<[u64]>` is NOT correct for
+-    // cross-process round-trip T269226805
++    // `Left`: owned compiled buffer (`u64` for 8-byte alignment of
++    // `BcInstrRepr`). `Right`: empty marker, resolved lazily.
+     instrs: Either<Box<[u64]>, BcInstrsEmpty>,
+     pub(crate) stmt_locs: BcStatementLocations,
+ }
+ 
++// Manual `StarlarkSerialize` / `StarlarkDeserialize` for `BcInstrs`.
++//
++// The `Box<[u64]>` here is a packed buffer of `BcInstrRepr<I>` with embedded
++// `FrozenValue`s — raw `u64` ser/de is unsound across processes. We walk via
++// `self.iter()` and route each `I::Arg` through its own `StarlarkSerialize`.
++//
++// Wire format: u8 tag (0=empty, 1=compiled). Tag=1 is followed by a stream
++// of `(u32 opcode, I::Arg)` terminated by `BcOpcode::End`. Then `stmt_locs`.
++
++impl StarlarkSerialize for BcInstrs {
++    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
++        use pagable::PagableSerialize;
++        match &self.instrs {
++            Either::Right(empty) => {
++                0u8.pagable_serialize(ctx.pagable())?;
++                <BcInstrsEmpty as StarlarkSerialize>::starlark_serialize(empty, ctx)?;
++            }
++            Either::Left(_) => {
++                1u8.pagable_serialize(ctx.pagable())?;
++                for (ptr, _ip) in self.iter() {
++                    let opcode = ptr.get_opcode();
++                    (opcode as u32).pagable_serialize(ctx.pagable())?;
++                    let mut handler = SerializeArgHandler {
++                        ctx,
++                        ptr,
++                        result: Ok(()),
++                    };
++                    opcode.dispatch(&mut handler);
++                    handler.result?;
++                }
++            }
++        }
++        self.stmt_locs.starlark_serialize(ctx)?;
++        Ok(())
++    }
++}
++
++impl StarlarkDeserialize for BcInstrs {
++    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
++        use pagable::PagableDeserialize;
++        let tag = u8::pagable_deserialize(ctx.pagable())?;
++        let instrs = match tag {
++            0 => Either::Right(<BcInstrsEmpty as StarlarkDeserialize>::starlark_deserialize(ctx)?),
++            1 => {
++                let mut writer = BcInstrsWriter::new();
++                loop {
++                    let opcode_n = u32::pagable_deserialize(ctx.pagable())?;
++                    let opcode = BcOpcode::by_number(opcode_n).ok_or_else(|| {
++                        crate::Error::new_other(anyhow::anyhow!(
++                            "invalid BcOpcode number on deserialize: {opcode_n}"
++                        ))
++                    })?;
++                    let mut handler = DeserializeArgHandler {
++                        ctx,
++                        writer: &mut writer,
++                        result: Ok(()),
++                    };
++                    opcode.dispatch(&mut handler);
++                    handler.result?;
++                    if opcode == BcOpcode::End {
++                        break;
++                    }
++                }
++                // Take the buffer without `finish()` (which appends another
++                // `InstrEnd`); the deserialized one is already in place.
++                let mut writer = writer;
++                let buf = mem::take(&mut writer.instrs);
++                mem::forget(writer);
++                Either::Left(buf.into_boxed_slice())
++            }
++            _ => {
++                return Err(crate::Error::new_other(anyhow::anyhow!(
++                    "invalid BcInstrs tag: {tag}"
++                )));
++            }
++        };
++        let stmt_locs = BcStatementLocations::starlark_deserialize(ctx)?;
++        Ok(BcInstrs { instrs, stmt_locs })
++    }
++}
++
++struct SerializeArgHandler<'a, 'b> {
++    ctx: &'a mut dyn StarlarkSerializeContext,
++    ptr: BcPtrAddr<'b>,
++    result: crate::Result<()>,
++}
++
++impl<'a, 'b> BcOpcodeHandler<()> for &mut SerializeArgHandler<'a, 'b> {
++    #[inline(always)]
++    fn handle<I: BcInstr>(self) {
++        // Dispatched on the opcode at `ptr`, so the record is `BcInstrRepr<I>`.
++        let repr = self
++            .ptr
++            .get_instr_checked::<I>()
++            .expect("opcode/instr type mismatch");
++        self.result = <I::Arg as StarlarkSerialize>::starlark_serialize(&repr.arg, self.ctx);
++    }
++}
++
++struct DeserializeArgHandler<'a, 'de, 'w> {
++    ctx: &'a mut dyn StarlarkDeserializeContext<'de>,
++    writer: &'w mut BcInstrsWriter,
++    result: crate::Result<()>,
++}
++
++impl<'a, 'de, 'w> BcOpcodeHandler<()> for &mut DeserializeArgHandler<'a, 'de, 'w> {
++    #[inline(always)]
++    fn handle<I: BcInstr>(self) {
++        match <I::Arg as StarlarkDeserialize>::starlark_deserialize(self.ctx) {
++            Ok(arg) => {
++                self.writer.write::<I>(arg);
++            }
++            Err(e) => self.result = Err(e),
++        }
++    }
++}
++
+ /// Raw instructions writer.
+ ///
+ /// Higher level wrapper is `BcWriter`.
+diff --git a/src/eval/bc/native_function.rs b/src/eval/bc/native_function.rs
+index 54a03fda..361822b5 100644
+--- a/src/eval/bc/native_function.rs
++++ b/src/eval/bc/native_function.rs
+@@ -20,6 +20,10 @@ use dupe::Dupe;
+ 
+ use crate::eval::Arguments;
+ use crate::eval::Evaluator;
++use crate::pagable::StarlarkDeserialize;
++use crate::pagable::StarlarkDeserializeContext;
++use crate::pagable::StarlarkSerialize;
++use crate::pagable::StarlarkSerializeContext;
+ use crate::values::FrozenValueTyped;
+ use crate::values::Value;
+ use crate::values::function::NativeFunc;
+@@ -33,6 +37,21 @@ pub(crate) struct BcNativeFunction {
+     imp: &'static NativeFunc,
+ }
+ 
++// Only the frozen value is on the wire; `imp` is recomputed from `fun` on
++// deserialize via `BcNativeFunction::new`.
++impl StarlarkSerialize for BcNativeFunction {
++    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
++        self.fun.starlark_serialize(ctx)
++    }
++}
++
++impl StarlarkDeserialize for BcNativeFunction {
++    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
++        let fun = FrozenValueTyped::<'static, NativeFunction>::starlark_deserialize(ctx)?;
++        Ok(BcNativeFunction::new(fun))
++    }
++}
++
+ impl BcNativeFunction {
+     pub(crate) fn new(fun: FrozenValueTyped<'static, NativeFunction>) -> BcNativeFunction {
+         BcNativeFunction {
+diff --git a/src/eval/bc/opcode.rs b/src/eval/bc/opcode.rs
+index 5c11eef6..e3fd53c6 100644
+--- a/src/eval/bc/opcode.rs
++++ b/src/eval/bc/opcode.rs
+@@ -26,6 +26,10 @@ use starlark_derive::starlark_internal_bc;
+ 
+ use crate::eval::bc::instr::BcInstr;
+ use crate::eval::bc::instr_impl::*;
++use crate::pagable::StarlarkDeserialize;
++use crate::pagable::StarlarkDeserializeContext;
++use crate::pagable::StarlarkSerialize;
++use crate::pagable::StarlarkSerializeContext;
+ 
+ /// Bytecode instruction opcode.
+ #[starlark_internal_bc]
+@@ -129,6 +133,25 @@ pub(crate) trait BcOpcodeAllHandler {
+     fn handle<I: BcInstr>(&mut self, opcode: BcOpcode);
+ }
+ 
++// Manual `StarlarkSerialize`/`StarlarkDeserialize` over `u32`. The derive
++// would emit a `u8` discriminant — too narrow for the (>256) opcode count.
++impl StarlarkSerialize for BcOpcode {
++    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
++        use pagable::PagableSerialize;
++        (*self as u32).pagable_serialize(ctx.pagable())?;
++        Ok(())
++    }
++}
++
++impl StarlarkDeserialize for BcOpcode {
++    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
++        use pagable::PagableDeserialize;
++        let n = u32::pagable_deserialize(ctx.pagable())?;
++        BcOpcode::by_number(n)
++            .ok_or_else(|| crate::Error::new_other(anyhow::anyhow!("invalid BcOpcode number: {n}")))
++    }
++}
++
+ impl BcOpcode {
+     /// Opcode count.
+     pub(crate) const COUNT: usize = (BcOpcode::End as usize) + 1;
+diff --git a/src/eval/bc/slow_arg.rs b/src/eval/bc/slow_arg.rs
+index 84fb8325..d75b06b3 100644
+--- a/src/eval/bc/slow_arg.rs
++++ b/src/eval/bc/slow_arg.rs
+@@ -15,6 +15,9 @@
+  * limitations under the License.
+  */
+ 
++use starlark_derive::StarlarkPagable;
++
++use crate as starlark;
+ use crate::eval::bc::addr::BcAddr;
+ use crate::eval::runtime::frame_span::FrameSpan;
+ use crate::values::FrozenStringValue;
+@@ -22,7 +25,7 @@ use crate::values::types::any_array::FrozenAnyArray;
+ 
+ /// Slow instruction arg: stored in the end of bytecode,
+ /// expensive to access. Used to implement errors.
+-#[derive(Default, Debug)]
++#[derive(Default, Debug, StarlarkPagable)]
+ pub(crate) struct BcInstrSlowArg {
+     /// Instruction code span.
+     pub(crate) span: FrameSpan,
+@@ -30,7 +33,7 @@ pub(crate) struct BcInstrSlowArg {
+     pub(crate) spans: Vec<FrameSpan>,
+ }
+ 
+-#[derive(Debug)]
++#[derive(Debug, StarlarkPagable)]
+ pub(crate) struct BcInstrEndArg {
+     /// Offset of end instruction.
+     pub(crate) end_addr: BcAddr,
+diff --git a/src/eval/bc/stack_ptr.rs b/src/eval/bc/stack_ptr.rs
+index 7dd013d0..018d8976 100644
+--- a/src/eval/bc/stack_ptr.rs
++++ b/src/eval/bc/stack_ptr.rs
+@@ -20,6 +20,8 @@
+ use std::ops::Add;
+ 
+ use dupe::Dupe;
++use starlark_derive::StarlarkPagable;
++use starlark_derive::StarlarkPagableViaPagable;
+ 
+ use crate as starlark;
+ use crate::register_starlark_any;
+@@ -38,7 +40,8 @@ use crate::register_starlark_any;
+     Eq,
+     Hash,
+     derive_more::Display,
+-    pagable::Pagable
++    pagable::Pagable,
++    StarlarkPagableViaPagable
+ )]
+ #[display("&{}", _0)]
+ pub(crate) struct BcSlot(pub(crate) u32);
+@@ -110,7 +113,16 @@ impl BcSlotRange {
+ /// Slot containing a value.
+ ///
+ /// The slot may be a local variable, so this slot cannot be used to store a temporary value.
+-#[derive(Debug, Copy, Clone, Dupe, derive_more::Display, PartialEq, Eq)]
++#[derive(
++    Debug,
++    Copy,
++    Clone,
++    Dupe,
++    derive_more::Display,
++    PartialEq,
++    Eq,
++    StarlarkPagable
++)]
+ pub(crate) struct BcSlotIn(BcSlot);
+ 
+ impl Add<u32> for BcSlotIn {
+@@ -132,7 +144,7 @@ impl BcSlotIn {
+     }
+ }
+ 
+-#[derive(Copy, Clone, Dupe, Debug, derive_more::Display)]
++#[derive(Copy, Clone, Dupe, Debug, derive_more::Display, StarlarkPagable)]
+ #[display("{}..{}", start, end)]
+ pub(crate) struct BcSlotInRange {
+     pub(crate) start: BcSlotIn,
+@@ -179,7 +191,7 @@ impl BcSlotInRange {
+     }
+ }
+ 
+-#[derive(Copy, Clone, Dupe, Debug)]
++#[derive(Copy, Clone, Dupe, Debug, StarlarkPagable)]
+ pub(crate) struct BcSlotInRangeFrom(pub(crate) BcSlotIn);
+ 
+ impl BcSlotInRangeFrom {
+@@ -202,7 +214,7 @@ impl BcSlotInRangeFrom {
+     Dupe,
+     derive_more::Display,
+     pagable::Pagable,
+-    starlark_derive::StarlarkPagableViaPagable
++    StarlarkPagableViaPagable
+ )]
+ pub(crate) struct BcSlotOut(BcSlot);
+ 
+diff --git a/src/eval/runtime/arguments.rs b/src/eval/runtime/arguments.rs
+index 35be14a5..1298cd1e 100644
+--- a/src/eval/runtime/arguments.rs
++++ b/src/eval/runtime/arguments.rs
+@@ -22,10 +22,12 @@ use std::marker::PhantomData;
+ use dupe::Clone_;
+ use dupe::Dupe_;
+ use either::Either;
++use starlark_derive::StarlarkPagable;
+ use starlark_map::small_set::SmallSet;
+ use starlark_syntax::value_error;
+ use thiserror::Error;
+ 
++use crate as starlark;
+ use crate::cast::transmute;
+ use crate::coerce::Coerce;
+ use crate::coerce::coerce;
+@@ -35,6 +37,8 @@ use crate::collections::StarlarkHashValue;
+ use crate::collections::symbol::symbol::Symbol;
+ use crate::eval::ParametersSpec;
+ use crate::hint::unlikely;
++use crate::pagable::StarlarkDeserialize;
++use crate::pagable::StarlarkSerialize;
+ use crate::values::Heap;
+ use crate::values::StringValue;
+ use crate::values::Value;
+@@ -72,7 +76,9 @@ impl From<FunctionError> for crate::Error {
+ }
+ 
+ /// An object accompanying argument name for faster argument resolution.
+-pub(crate) trait ArgSymbol: Debug + Coerce<Self> + 'static {
++pub(crate) trait ArgSymbol:
++    Debug + Coerce<Self> + 'static + StarlarkSerialize + StarlarkDeserialize
++{
+     fn get_index_from_param_spec<'v, V: ValueLike<'v>>(
+         &self,
+         ps: &ParametersSpec<V>,
+@@ -95,7 +101,7 @@ impl ArgSymbol for Symbol {
+ }
+ 
+ /// `Symbol` resolved to function parameter index.
+-#[derive(Debug)]
++#[derive(Debug, StarlarkPagable)]
+ pub(crate) struct ResolvedArgName {
+     /// Hash of the argument name.
+     pub(crate) hash: StarlarkHashValue,
+diff --git a/src/pagable/starlark_pagable_impls.rs b/src/pagable/starlark_pagable_impls.rs
+index a0e63e46..963cd4b4 100644
+--- a/src/pagable/starlark_pagable_impls.rs
++++ b/src/pagable/starlark_pagable_impls.rs
+@@ -80,6 +80,26 @@ impl_starlark_via_pagable!(
+     bool, u8, u16, u32, u64, usize, i8, i16, i32, i64, f32, f64, String,
+ );
+ 
++impl_starlark_via_pagable!(starlark_map::StarlarkHashValue);
++
++// `Hashed<K>` writes hash + key on the wire and reconstructs via the
++// stored hash on deserialize (avoids requiring `K: Hash`).
++impl<K: StarlarkSerialize> StarlarkSerialize for Hashed<K> {
++    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
++        self.hash().starlark_serialize(ctx)?;
++        self.key().starlark_serialize(ctx)?;
++        Ok(())
++    }
++}
++
++impl<K: StarlarkDeserialize> StarlarkDeserialize for Hashed<K> {
++    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
++        let hash = starlark_map::StarlarkHashValue::starlark_deserialize(ctx)?;
++        let key = K::starlark_deserialize(ctx)?;
++        Ok(Hashed::new_unchecked(hash, key))
++    }
++}
++
+ impl<T: StarlarkSerialize> StarlarkSerialize for Vec<T> {
+     fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
+         self.len().pagable_serialize(ctx.pagable())?;
+@@ -145,73 +165,6 @@ impl<T: StarlarkDeserialize> StarlarkDeserialize for Option<T> {
+     }
+ }
+ 
+-// ============================================================================
+-// Tuples (A, B) — composes with `Vec<T>: StarlarkSerialize` to give
+-// `Vec<(A, B)>: StarlarkSerialize` for free.
+-// ============================================================================
+-
+-impl<A: StarlarkSerialize, B: StarlarkSerialize> StarlarkSerialize for (A, B) {
+-    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
+-        self.0.starlark_serialize(ctx)?;
+-        self.1.starlark_serialize(ctx)?;
+-        Ok(())
+-    }
+-}
+-
+-impl<A: StarlarkDeserialize, B: StarlarkDeserialize> StarlarkDeserialize for (A, B) {
+-    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
+-        let a = A::starlark_deserialize(ctx)?;
+-        let b = B::starlark_deserialize(ctx)?;
+-        Ok((a, b))
+-    }
+-}
+-
+-impl<A: StarlarkSerialize, B: StarlarkSerialize, C: StarlarkSerialize> StarlarkSerialize
+-    for (A, B, C)
+-{
+-    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
+-        self.0.starlark_serialize(ctx)?;
+-        self.1.starlark_serialize(ctx)?;
+-        self.2.starlark_serialize(ctx)?;
+-        Ok(())
+-    }
+-}
+-
+-impl<A: StarlarkDeserialize, B: StarlarkDeserialize, C: StarlarkDeserialize> StarlarkDeserialize
+-    for (A, B, C)
+-{
+-    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
+-        let a = A::starlark_deserialize(ctx)?;
+-        let b = B::starlark_deserialize(ctx)?;
+-        let c = C::starlark_deserialize(ctx)?;
+-        Ok((a, b, c))
+-    }
+-}
+-
+-impl<A: StarlarkSerialize, B: StarlarkSerialize, C: StarlarkSerialize, D: StarlarkSerialize>
+-    StarlarkSerialize for (A, B, C, D)
+-{
+-    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
+-        self.0.starlark_serialize(ctx)?;
+-        self.1.starlark_serialize(ctx)?;
+-        self.2.starlark_serialize(ctx)?;
+-        self.3.starlark_serialize(ctx)?;
+-        Ok(())
+-    }
+-}
+-
+-impl<A: StarlarkDeserialize, B: StarlarkDeserialize, C: StarlarkDeserialize, D: StarlarkDeserialize>
+-    StarlarkDeserialize for (A, B, C, D)
+-{
+-    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
+-        let a = A::starlark_deserialize(ctx)?;
+-        let b = B::starlark_deserialize(ctx)?;
+-        let c = C::starlark_deserialize(ctx)?;
+-        let d = D::starlark_deserialize(ctx)?;
+-        Ok((a, b, c, d))
+-    }
+-}
+-
+ // ============================================================================
+ // SmallMap
+ // ============================================================================
+@@ -327,6 +280,72 @@ impl SmallMapKeyDeserialize for FrozenStringValue {
+     }
+ }
+ 
++// ============================================================================
++// Unit / tuples / fixed-size arrays
++// ============================================================================
++
++impl StarlarkSerialize for () {
++    fn starlark_serialize(&self, _ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
++        Ok(())
++    }
++}
++
++impl StarlarkDeserialize for () {
++    fn starlark_deserialize(_ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
++        Ok(())
++    }
++}
++
++macro_rules! impl_starlark_for_tuple {
++    ($($name:ident: $idx:tt),+) => {
++        impl<$($name: StarlarkSerialize),+> StarlarkSerialize for ($($name,)+) {
++            fn starlark_serialize(
++                &self,
++                ctx: &mut dyn StarlarkSerializeContext,
++            ) -> crate::Result<()> {
++                $(self.$idx.starlark_serialize(ctx)?;)+
++                Ok(())
++            }
++        }
++        impl<$($name: StarlarkDeserialize),+> StarlarkDeserialize for ($($name,)+) {
++            fn starlark_deserialize(
++                ctx: &mut dyn StarlarkDeserializeContext<'_>,
++            ) -> crate::Result<Self> {
++                Ok(($($name::starlark_deserialize(ctx)?,)+))
++            }
++        }
++    };
++}
++
++impl_starlark_for_tuple!(T1: 0);
++impl_starlark_for_tuple!(T1: 0, T2: 1);
++impl_starlark_for_tuple!(T1: 0, T2: 1, T3: 2);
++impl_starlark_for_tuple!(T1: 0, T2: 1, T3: 2, T4: 3);
++impl_starlark_for_tuple!(T1: 0, T2: 1, T3: 2, T4: 3, T5: 4);
++impl_starlark_for_tuple!(T1: 0, T2: 1, T3: 2, T4: 3, T5: 4, T6: 5);
++impl_starlark_for_tuple!(T1: 0, T2: 1, T3: 2, T4: 3, T5: 4, T6: 5, T7: 6);
++impl_starlark_for_tuple!(T1: 0, T2: 1, T3: 2, T4: 3, T5: 4, T6: 5, T7: 6, T8: 7);
++
++impl<T: StarlarkSerialize, const N: usize> StarlarkSerialize for [T; N] {
++    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
++        for elem in self.iter() {
++            elem.starlark_serialize(ctx)?;
++        }
++        Ok(())
++    }
++}
++
++impl<T: StarlarkDeserialize, const N: usize> StarlarkDeserialize for [T; N] {
++    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
++        let mut tmp: Vec<T> = Vec::with_capacity(N);
++        for _ in 0..N {
++            tmp.push(T::starlark_deserialize(ctx)?);
++        }
++        // SAFETY: pushed exactly N elements above.
++        Ok(tmp.try_into().unwrap_or_else(|_| unreachable!()))
++    }
++}
++
+ // ============================================================================
+ // Box<[T]> (boxed slice)
+ // ============================================================================
+diff --git a/src/values/layout/value_not_special.rs b/src/values/layout/value_not_special.rs
+index c9bd26ee..1b6343ea 100644
+--- a/src/values/layout/value_not_special.rs
++++ b/src/values/layout/value_not_special.rs
+@@ -16,14 +16,16 @@
+  */
+ 
+ use dupe::Dupe;
++use starlark_derive::StarlarkPagable;
+ 
++use crate as starlark;
+ use crate::values::FrozenValue;
+ use crate::values::Value;
+ use crate::values::layout::vtable::AValueDyn;
+ use crate::values::stack_guard;
+ 
+ /// `FrozenValue` which is not `i32` or `str`.
+-#[derive(Copy, Clone, Dupe, Debug, derive_more::Display)]
++#[derive(Copy, Clone, Dupe, Debug, derive_more::Display, StarlarkPagable)]
+ pub(crate) struct FrozenValueNotSpecial(FrozenValue);
+ 
+ impl FrozenValueNotSpecial {
+diff --git a/src/values/types/known_methods.rs b/src/values/types/known_methods.rs
+index 6e92fef2..e354ef1b 100644
+--- a/src/values/types/known_methods.rs
++++ b/src/values/types/known_methods.rs
+@@ -22,6 +22,10 @@ use once_cell::sync::Lazy;
+ use crate::environment::Methods;
+ use crate::eval::Arguments;
+ use crate::eval::Evaluator;
++use crate::pagable::StarlarkDeserialize;
++use crate::pagable::StarlarkDeserializeContext;
++use crate::pagable::StarlarkSerialize;
++use crate::pagable::StarlarkSerializeContext;
+ use crate::values::FrozenValueTyped;
+ use crate::values::StarlarkValue;
+ use crate::values::Value;
+@@ -43,6 +47,26 @@ pub(crate) struct KnownMethod {
+     imp: &'static NativeMeth,
+ }
+ 
++// `type_methods` and `imp` are `'static` pointers tied to the in-process
++// known-methods table. Round-trip the method name only and re-resolve via
++// `get_known_method` on deserialize.
++impl StarlarkSerialize for KnownMethod {
++    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
++        self.method.as_ref().name.starlark_serialize(ctx)
++    }
++}
++
++impl StarlarkDeserialize for KnownMethod {
++    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
++        let name = String::starlark_deserialize(ctx)?;
++        get_known_method(&name).ok_or_else(|| {
++            crate::Error::new_other(anyhow::anyhow!(
++                "KnownMethod `{name}` not in known-methods table on deserialize"
++            ))
++        })
++    }
++}
++
+ impl KnownMethod {
+     #[inline]
+     pub(crate) fn to_value<'v>(&self) -> Value<'v> {
