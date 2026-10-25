@@ -35,10 +35,6 @@ impl PackageBuilder {
         }
     }
 
-    pub fn has_targets(&self) -> bool {
-        !self.targets.is_empty()
-    }
-
     pub fn target(&self, name: Symbol) -> Option<&Target> {
         self.targets.get(&name)
     }

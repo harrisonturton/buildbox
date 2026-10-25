@@ -38,12 +38,12 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
         let context = EvalContext::get(eval)?;
         let mut builder = context.package_builder("package()")?;
         if builder.package_called {
-            anyhow::bail!("package() can only be called once per BUILD file");
-        }
-        if builder.has_targets() {
-            anyhow::bail!("package() must be called before any rule");
+            anyhow::bail!("'package' can only be used once per BUILD file");
         }
         builder.package_called = true;
+        if kwargs.is_empty() {
+            anyhow::bail!("at least one argument must be given to the 'package' function");
+        }
         let package = builder.id;
         let mapping = context.mapping_for(package.repo);
         let parser = LabelParser {

@@ -142,6 +142,18 @@ fn errors_keep_earlier_targets() {
 }
 
 #[test]
+fn package_can_follow_targets() {
+    let build_label = label("//pkg:BUILD");
+    let source = "exports_files(['LICENSE'])\npackage(default_visibility = ['//visibility:public'])\nfilegroup(name = 'ok')\n";
+    let build = parse(build_label, source.to_string()).unwrap();
+    let context = EvalContext::new(FileKind::Build, build_label);
+    let builder = PackageBuilder::new(PackageId::main("pkg").unwrap(), Symbol::intern("BUILD"));
+    let (package, _) = eval_build(build, &BUILD_GLOBALS, &Loads { modules: HashMap::new() }, context, builder);
+    assert!(package.errors.is_empty(), "{:?}", package.errors);
+    assert_eq!(package.args.default_visibility, [label("//visibility:public")]);
+}
+
+#[test]
 fn accepts_bazels_dialect() {
     let file = label("//pkg:dialect.bzl");
     let source = r#"
