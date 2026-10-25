@@ -7,4 +7,6 @@
 # - `string.elems()` returns a list, as in Bazel, not an iterator.
 # - `DeserTypeId` holds `type_name::<T>` as a function, so the `pagable`
 #   feature builds on stable Rust, which can't call `type_name` in a const.
+# - A heap that fails partway through being read back is leaked rather than
+#   dropped, since its values not yet read back can't be walked past.
 exports_files(["starlark.patch"])
