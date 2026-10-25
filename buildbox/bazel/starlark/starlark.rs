@@ -118,6 +118,16 @@ fn with_legacy_globals(build: impl Fn(Option<&LegacyGlobals<'_>>) -> Globals) ->
     build(Some(&legacy))
 }
 
+/// The name of globals `with_legacy_globals` builds: `with` for those it
+/// returns, and `without` for those it builds first. Both stay live, and
+/// heaps are told apart by name when they're paged.
+fn pass_name(legacy: Option<&LegacyGlobals<'_>>, with: &'static str, without: &'static str) -> &'static str {
+    match legacy {
+        Some(_) => with,
+        None => without,
+    }
+}
+
 fn build_globals_builder() -> GlobalsBuilder {
     let mut builder = standard()
         .with(build_api::build_functions)
@@ -159,13 +169,13 @@ pub fn register_builtins_internal(internal: fn(&mut GlobalsBuilder)) {
 
 /// `_builtins`, as `@_builtins` sees it: `internal` with the registered
 /// members, and everything else opaque.
-fn builtins_object(builder: &mut GlobalsBuilder) -> FrozenValue {
+fn builtins_object(builder: &mut GlobalsBuilder, name: &'static str) -> FrozenValue {
     let internals = BUILTINS_INTERNALS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
     let mut members = GlobalsBuilder::new();
     for internal in internals {
         internal(&mut members);
     }
-    let members = members.build_named(GlobalFrozenHeapName { name: "bb builtins internal" });
+    let members = members.build_named(GlobalFrozenHeapName { name });
     builder.frozen_heap().add_reference(members.heap());
     let internal_members = members.iter().map(|(name, value)| (name.to_string(), value)).collect();
     let internal = builder.alloc(opaque::Namespace::new("_builtins.internal", internal_members));
@@ -216,10 +226,12 @@ pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
             native_rules::register(native);
             native_values(native, legacy);
         });
-        let value = builtins_object(&mut builder);
+        let value = builtins_object(&mut builder, pass_name(legacy, "bb builtins internal", "bb builtins internal without legacy_globals"));
         builder.set("_builtins", value);
         add_extensions(&mut builder);
-        builder.build_named(GlobalFrozenHeapName { name: "bb bzl" })
+        builder.build_named(GlobalFrozenHeapName {
+            name: pass_name(legacy, "bb bzl", "bb bzl without legacy_globals"),
+        })
     })
 });
 
@@ -243,8 +255,8 @@ fn globals_name(what: &str, builtins: &StarlarkBuiltins<'_>) -> GlobalFrozenHeap
 
 /// The globals of `.bzl` files, with builtin rules and values.
 pub fn bzl_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
-    let name = globals_name("bb bzl", builtins);
     with_legacy_globals(|legacy| {
+        let name = globals_name(pass_name(legacy, "bb bzl", "bb bzl without legacy_globals"), builtins);
         let mut builder = bzl_globals_builder();
         builder.frozen_heap().add_reference(builtins.heap);
         for (name, value) in &builtins.toplevels {
