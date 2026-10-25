@@ -85,7 +85,7 @@ fn load_package() -> Package {
 #[test]
 fn build_files_define_targets() {
     let package = load_package();
-    assert_eq!(package.errors, Vec::<String>::new());
+    assert!(package.errors.is_empty(), "{:?}", package.errors);
     let names: Vec<&str> = package.targets.iter().map(|t| t.name().as_str()).collect();
     assert_eq!(names, ["BUILD", "a", "a.out", "b", "b_inner", "exported.txt", "gen", "gen.txt", "opt.c", "x.c", "y.c"]);
     assert_eq!(package.args.default_visibility, [label("//visibility:public")]);
@@ -129,16 +129,38 @@ fn labels_resolve_relative_to_their_file() {
     assert_eq!(gen.attr(Symbol::intern("cmd")), Some(&AttrValue::String("echo @@//tools:x > $@".into())));
 }
 
-#[test]
-fn errors_keep_earlier_targets() {
+fn evaluate_build(source: &str) -> Package {
     let build_label = label("//pkg:BUILD");
-    let build = parse(build_label, "filegroup(name = 'ok')\nfilegroup(name = 'bad', nope = 1)\n".to_string()).unwrap();
+    let build = parse(build_label, source.to_string()).unwrap();
     let context = EvalContext::new(FileKind::Build, build_label);
     let builder = PackageBuilder::new(PackageId::main("pkg").unwrap(), Symbol::intern("BUILD"));
-    let (package, _) = eval_build(build, &BUILD_GLOBALS, &Loads { modules: HashMap::new() }, context, builder);
+    eval_build(build, &BUILD_GLOBALS, &Loads { modules: HashMap::new() }, context, builder).0
+}
+
+#[test]
+fn invalid_rules_are_errors_at_their_call() {
+    let package = evaluate_build("filegroup(name = 'ok')\nfilegroup(name = 'bad', nope = 1)\nfilegroup(name = 'after')\n");
     assert!(package.target(Symbol::intern("ok")).is_some());
+    assert!(package.target(Symbol::intern("bad")).is_some());
+    assert!(package.target(Symbol::intern("after")).is_some());
     assert_eq!(package.errors.len(), 1);
-    assert!(package.errors[0].contains("no such attribute 'nope'"), "{}", package.errors[0]);
+    assert_eq!(package.errors[0].to_string(), "//pkg:BUILD:2:10: //pkg:bad: no such attribute 'nope' in 'filegroup' rule");
+}
+
+#[test]
+fn failures_keep_earlier_targets_and_their_traceback() {
+    let package = evaluate_build("filegroup(name = 'ok')\nfail('boom')\nfilegroup(name = 'after')\n");
+    assert!(package.target(Symbol::intern("ok")).is_some());
+    assert!(package.target(Symbol::intern("after")).is_none());
+    let expected = "Traceback (most recent call last):\n\tFile \"//pkg:BUILD\", line 2, column 5, in <toplevel>\n\t\tfail('boom')\nError in fail: boom";
+    assert_eq!(package.errors[0].to_string(), expected);
+}
+
+#[test]
+fn undefined_names_are_errors_at_their_position_with_a_suggestion() {
+    let package = evaluate_build("filegroup(name = 'ok')\nselct({})\n");
+    assert!(package.targets.iter().all(|target| target.name().as_str() != "ok"));
+    assert_eq!(package.errors[0].to_string(), "//pkg:BUILD:2:1: name 'selct' is not defined (did you mean 'select'?)");
 }
 
 #[test]
@@ -190,3 +212,4 @@ NAMES = [str(f), str(lambda: None), str(r), str(m)]
         r#"["<function f from @@dep+//pkg:callables.bzl>", "<function lambda from @@dep+//pkg:callables.bzl>", "<rule r>", "<macro m>"]"#
     );
 }
+

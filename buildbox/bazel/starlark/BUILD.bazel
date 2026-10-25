@@ -25,6 +25,7 @@ rust_library(
         "print.rs",
         "provider.rs",
         "repo_api.rs",
+        "reported.rs",
         "rule_value.rs",
         "select.rs",
         "subrule.rs",

@@ -21,6 +21,7 @@ pub mod paging;
 pub mod print;
 pub mod provider;
 pub mod repo_api;
+pub mod reported;
 pub mod rule_value;
 pub mod select;
 pub mod subrule;

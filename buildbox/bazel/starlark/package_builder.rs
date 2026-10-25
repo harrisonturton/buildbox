@@ -1,7 +1,7 @@
 //! Accumulates the targets a BUILD file defines.
 
 use bazel_label::{Label, PackageId};
-use bazel_packages::{Package, PackageArgs, PackageGroup, Rule, RuleClassRef, SourceFile, Target};
+use bazel_packages::{Package, PackageArgs, PackageError, PackageGroup, Rule, RuleClassRef, SourceFile, Target};
 use intern::Symbol;
 use std::collections::{BTreeMap, HashMap};
 
@@ -11,10 +11,9 @@ pub struct PackageBuilder {
     pub build_file_name: Symbol,
     pub args: PackageArgs,
     pub loads: Vec<Label>,
-    /// Whether `package()` has been called, which must happen before any
-    /// target is defined.
+    /// Whether `package()` has been called, which may happen once.
     pub package_called: bool,
-    pub errors: Vec<String>,
+    pub errors: Vec<PackageError>,
     rule_classes: Vec<RuleClassRef>,
     rule_class_index: HashMap<RuleClassRef, u32>,
     targets: BTreeMap<Symbol, Target>,

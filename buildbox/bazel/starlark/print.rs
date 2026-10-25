@@ -4,7 +4,6 @@
 use crate::context::EvalContext;
 use crate::label_value::LabelValue;
 use bazel_label::{Label, RepoMappingTable, RepoName};
-use starlark::codemap::FileSpan;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
@@ -42,18 +41,6 @@ impl Printed {
     }
 }
 
-/// The file, line and column of a call's `(`, which is where Bazel places
-/// the call.
-fn call_position(span: &FileSpan) -> (String, usize, usize) {
-    let begin = span.resolve_span().begin;
-    let source = span.source_span();
-    let column = match source.find('(') {
-        Some(offset) if !source[..offset].contains('\n') => begin.column + offset,
-        _ => begin.column,
-    };
-    (span.filename().to_string(), begin.line + 1, column + 1)
-}
-
 /// A value as `print()` shows it: a label in its shorthand display form,
 /// anything else as `str()` gives it.
 fn debug_print(value: Value<'_>, main_mapping: Option<&RepoMappingTable>) -> String {
@@ -79,8 +66,13 @@ pub(crate) fn print_function(builder: &mut GlobalsBuilder) {
         let Some(span) = eval.call_stack_top_location() else {
             anyhow::bail!("print() was called from outside Starlark code");
         };
-        let (file, line, column) = call_position(&span);
-        context.printed.borrow_mut().push(Printed { file, line, column, text });
+        let position = crate::reported::call_position(&span);
+        context.printed.borrow_mut().push(Printed {
+            file: position.file,
+            line: position.line as usize,
+            column: position.column as usize,
+            text,
+        });
         Ok(NoneType)
     }
 }

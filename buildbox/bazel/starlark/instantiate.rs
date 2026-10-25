@@ -3,14 +3,19 @@
 use crate::context::EvalContext;
 use crate::convert::{self, LabelParser};
 use crate::select::selector_parts;
-use bazel_packages::{AttrType, AttrValue, Generator, Location, Rule, RuleClass, RuleClassRef};
+use crate::reported::call_position;
+use bazel_packages::{AttrType, AttrValue, Generator, Location, PackageError, Rule, RuleClass, RuleClassRef};
 use intern::Symbol;
 use starlark::codemap::FileSpan;
 use starlark::eval::Evaluator;
 use starlark::values::Value;
 
 /// Create a rule of class `schema` from the keyword arguments of a call,
-/// and the values computed for attributes with computed defaults.
+/// and the values computed for attributes with computed defaults. A rule
+/// that isn't valid, such as one with an attribute its class doesn't have,
+/// is an error of the package, at the call in the BUILD file, and the BUILD
+/// file's evaluation goes on, as Bazel's does; the rule is still created,
+/// without the attributes in error.
 pub fn instantiate<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     class: RuleClassRef,
@@ -20,6 +25,7 @@ pub fn instantiate<'v>(
 ) -> anyhow::Result<()> {
     let context = EvalContext::get(eval)?;
     let (location, generator) = call_site(eval);
+    let position = eval.call_stack().frames.first().and_then(|frame| frame.location.as_ref()).map(call_position);
     let mut builder = context.package_builder(&format!("{}()", schema.kind))?;
     let package = builder.id;
     let mapping = context.mapping_for(package.repo);
@@ -29,23 +35,46 @@ pub fn instantiate<'v>(
     };
 
     let name = rule_name(schema, kwargs)?;
+    let (rule, mut errors) = rule(schema, kwargs, computed, &parser, name, location, generator);
+    if let Err(error) = builder.add_rule(class, rule) {
+        errors.push(error);
+    }
+    for error in errors {
+        let error = match &position {
+            Some(position) => PackageError::at(position.clone(), error.to_string()),
+            None => PackageError::new(error.to_string()),
+        };
+        builder.errors.push(error);
+    }
+    Ok(())
+}
+
+/// The rule `kwargs` and `computed` make, named `name`, and the errors in
+/// the attributes it was given, which it's made without.
+fn rule<'v>(
+    schema: &RuleClass,
+    kwargs: &[(&str, Value<'v>)],
+    computed: &[(&str, Value<'v>)],
+    parser: &LabelParser<'_>,
+    name: Symbol,
+    location: Location,
+    generator: Option<Generator>,
+) -> (Rule, Vec<anyhow::Error>) {
+    let package = parser.package;
     let mut attrs = Vec::with_capacity(kwargs.len());
+    let mut errors = Vec::new();
     for (attr, value) in kwargs {
         if *attr == "name" || value.is_none() {
             continue;
         }
-        let symbol = Symbol::intern(attr);
-        let Some(attr_schema) = schema.attr(symbol) else {
-            anyhow::bail!("{}: no such attribute '{attr}' in '{}' rule", package.label(name), schema.kind);
-        };
-        if !attr_schema.configurable && selector_parts(*value).is_some() {
-            anyhow::bail!("{}: attribute '{attr}' is not configurable", package.label(name));
+        match attribute(schema, attr, *value, parser, name) {
+            Ok(converted) => attrs.push(converted),
+            Err(error) => errors.push(error),
         }
-        let converted = convert::attr_value(*value, attr_schema.ty, &parser, attr)
-            .map_err(|error| anyhow::anyhow!("{}: {error}", package.label(name)))?;
-        attrs.push((symbol, converted));
     }
-    check_mandatory(schema, &attrs, name, &package)?;
+    if let Err(error) = check_mandatory(schema, &attrs, name, &package) {
+        errors.push(error);
+    }
 
     let mut computed_attrs = Vec::with_capacity(computed.len());
     for (attr, value) in computed {
@@ -56,7 +85,7 @@ pub fn instantiate<'v>(
         if value.is_none() {
             continue;
         }
-        if let Ok(converted) = convert::attr_value(*value, attr_schema.ty, &parser, attr) {
+        if let Ok(converted) = convert::attr_value(*value, attr_schema.ty, parser, attr) {
             computed_attrs.push((symbol, converted));
         }
     }
@@ -71,7 +100,21 @@ pub fn instantiate<'v>(
         outputs,
         computed: computed_attrs,
     };
-    builder.add_rule(class, rule)
+    (rule, errors)
+}
+
+/// The attribute `attr` of the rule `name` given `value`.
+fn attribute(schema: &RuleClass, attr: &str, value: Value<'_>, parser: &LabelParser<'_>, name: Symbol) -> anyhow::Result<(Symbol, AttrValue)> {
+    let label = parser.package.label(name);
+    let symbol = Symbol::intern(attr);
+    let Some(attr_schema) = schema.attr(symbol) else {
+        anyhow::bail!("{label}: no such attribute '{attr}' in '{}' rule", schema.kind);
+    };
+    if !attr_schema.configurable && selector_parts(value).is_some() {
+        anyhow::bail!("{label}: attribute '{attr}' is not configurable");
+    }
+    let converted = convert::attr_value(value, attr_schema.ty, parser, attr).map_err(|error| anyhow::anyhow!("{label}: {error}"))?;
+    Ok((symbol, converted))
 }
 
 fn rule_name(schema: &RuleClass, kwargs: &[(&str, Value<'_>)]) -> anyhow::Result<Symbol> {

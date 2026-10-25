@@ -194,7 +194,8 @@ impl<C: Compute> Universe<C> {
                 continue;
             };
             for error in &package.0.errors {
-                errors.push(format!("{}:{error}", build_file.display()));
+                let path = build_file.display().to_string();
+                errors.push(error.report(&|_| path.clone()));
             }
         }
         errors
@@ -282,7 +283,7 @@ impl<C: Compute> Universe<C> {
         let Some(error) = loaded.0.errors.first() else {
             return Ok(());
         };
-        self.error(error.clone())
+        self.error(error.to_string())
     }
 
     /// The `.bzl` files a package loads, directly and through other `.bzl`

@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 package(default_visibility = ["//visibility:private"])
 
@@ -6,6 +6,7 @@ rust_library(
     name = "packages",
     srcs = [
         "attr.rs",
+        "error.rs",
         "packages.rs",
         "rule_class.rs",
     ],
@@ -17,4 +18,9 @@ rust_library(
         "//buildbox/intern",
         "//buildbox/skycodec",
     ],
+)
+
+rust_test(
+    name = "packages_test",
+    crate = ":packages",
 )

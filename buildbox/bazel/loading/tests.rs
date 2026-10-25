@@ -73,7 +73,7 @@ async fn packages_load_through_the_graph() {
     let session = graph.session().await;
 
     let app = session.evaluate(&PackageKey(package("app"))).await.unwrap();
-    assert_eq!(app.0.errors, Vec::<String>::new());
+    assert!(app.0.errors.is_empty(), "{:?}", app.0.errors);
     let names: Vec<&str> = app.0.targets.iter().map(|t| t.name().as_str()).collect();
     assert_eq!(names, ["BUILD.bazel", "app", "main.c"]);
     assert_eq!(app.0.loads, [Label::parse_canonical("//defs:rules.bzl").unwrap()]);
@@ -107,7 +107,7 @@ async fn editing_a_bzl_file_reloads_the_packages_that_use_it() {
         .await;
     let reloaded = graph.session().await.evaluate(&PackageKey(package("app"))).await.unwrap();
     assert_eq!(reloaded.0.errors.len(), 1);
-    assert!(reloaded.0.errors[0].contains("not supported on type `int`"), "{:?}", reloaded.0.errors);
+    assert!(reloaded.0.errors[0].to_string().contains("not supported on type `int`"), "{:?}", reloaded.0.errors);
 }
 
 #[tokio::test]

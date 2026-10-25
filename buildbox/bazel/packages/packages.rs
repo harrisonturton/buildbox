@@ -5,9 +5,11 @@
 //! don't need an interpreter.
 
 mod attr;
+mod error;
 mod rule_class;
 
 pub use attr::{AttrType, AttrValue, Select, SelectorPart, DEFAULT_CONDITION};
+pub use error::{PackageError, SourcePosition, TraceFrame};
 pub use rule_class::{AttrDefault, AttrSchema, Cfg, RuleClass, RuleClassRef};
 
 use bazel_label::{Label, PackageId};
@@ -28,8 +30,8 @@ pub struct Package {
     pub loads: Vec<Label>,
     pub args: PackageArgs,
     /// Errors from evaluating the BUILD file. A package with errors still
-    /// has the targets defined before the first error.
-    pub errors: Vec<String>,
+    /// has the targets defined before evaluation failed.
+    pub errors: Vec<PackageError>,
 }
 
 /// The settings `package()` sets for every target in a package.
