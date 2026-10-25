@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 use skycodec::from_bytes;
 use skystore::Kind;
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 
 /// The most key types a process can register.
@@ -53,8 +53,8 @@ pub(crate) struct KindInfo {
 /// registered, so that a restored engine's keys keep their kinds.
 #[derive(Default)]
 struct Registry {
-    by_type: HashMap<TypeId, KindId>,
-    by_name: HashMap<String, KindId>,
+    by_type: FxHashMap<TypeId, KindId>,
+    by_name: FxHashMap<String, KindId>,
     infos: Vec<Option<&'static KindInfo>>,
 }
 

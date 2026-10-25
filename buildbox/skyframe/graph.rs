@@ -12,7 +12,6 @@ use futures::FutureExt;
 use rustc_hash::{FxHashMap, FxHashSet};
 use skystore::ValueRef;
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -136,7 +135,7 @@ enum Resolution {
 /// The services a graph's key functions use, by type.
 #[derive(Clone, Default)]
 pub struct Globals {
-    values: Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+    values: Arc<FxHashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
 impl Globals {

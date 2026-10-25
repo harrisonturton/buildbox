@@ -12,7 +12,7 @@ use crate::shared::Sharing;
 use bazel_starlark::depset::Depset;
 use skycodec::{Decode, DecodeError, Decoder, Encode, Encoder};
 use starlark::values::{Value, ValueIdentity};
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
@@ -61,7 +61,7 @@ impl InputSet {
         let Some(root) = &self.0 else {
             return Vec::new();
         };
-        let mut visited: std::collections::HashSet<*const Node> = std::collections::HashSet::new();
+        let mut visited: FxHashSet<*const Node> = FxHashSet::default();
         let mut pending: Vec<&Arc<Node>> = vec![root];
         let mut members = Vec::new();
         while let Some(node) = pending.pop() {
@@ -130,7 +130,7 @@ impl Decode for InputSet {
 /// and outlive the analysis, so their identities stay theirs.
 #[derive(Default)]
 pub struct InputSets {
-    frozen: HashMap<ValueIdentity<'static>, InputSet>,
+    frozen: FxHashMap<ValueIdentity<'static>, InputSet>,
 }
 
 impl InputSets {

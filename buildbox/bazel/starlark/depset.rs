@@ -10,7 +10,7 @@ use starlark::values::{
     Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
 };
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 
 /// The order a depset's elements are listed in.
@@ -145,10 +145,10 @@ impl<'v, V: ValueLike<'v>> DepsetGen<V> {
 /// identity.
 #[derive(Default)]
 struct Seen<'v> {
-    by_hash: HashMap<u32, Vec<Value<'v>>>,
-    by_identity: std::collections::HashSet<starlark::values::ValueIdentity<'v>>,
+    by_hash: FxHashMap<u32, Vec<Value<'v>>>,
+    by_identity: FxHashSet<starlark::values::ValueIdentity<'v>>,
     /// The depsets already traversed.
-    visited: std::collections::HashSet<starlark::values::ValueIdentity<'v>>,
+    visited: FxHashSet<starlark::values::ValueIdentity<'v>>,
 }
 
 impl<'v> Seen<'v> {
