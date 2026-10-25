@@ -229,7 +229,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         target_constraints: platform.values(),
         toolchains,
     };
-    let name = bazel_starlark::heap_name("target", key.label, fingerprint);
+    let name = heap_name("target", key, fingerprint);
     let (analyzed, printed) = bazel_loading::blocking(move || evaluate(input, name)).await?;
     bazel_loading::report_printed(ctx, &printed).await;
     let analyzed = match analyzed {
@@ -552,7 +552,7 @@ fn file(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> 
         module.frozen_heap().add_reference(bazel_starlark::provider::builtin_providers_heap());
         let target = providers::file_target(key.label, artifact, module.heap())?;
         module.set(TARGET, module.heap().alloc(target));
-        let module = module.freeze_named(bazel_starlark::heap_name("file", key.label, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        let module = module.freeze_named(heap_name("file", key, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
         Ok(Analyzed { module, actions: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
@@ -604,11 +604,20 @@ async fn package_group(ctx: &Ctx, key: ConfiguredTargetKey, group: &bazel_packag
         let provided = module.heap().alloc(specification);
         let target = providers::collect(key.label, provided, &defaults, module.heap())?;
         module.set(TARGET, module.heap().alloc(target));
-        let module = module.freeze_named(bazel_starlark::heap_name("package group", key.label, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        let module = module.freeze_named(heap_name("package group", key, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
         Ok(Analyzed { module, actions: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
     Ok(configured(ctx, key, Symbol::intern("package group"), false, analyzed, fingerprint))
+}
+
+/// The name of the frozen heap of `key`'s providers. Heaps are told apart
+/// by name when they're paged, so the name has the configuration, which
+/// targets in different configurations may otherwise share, such as a
+/// source file's.
+fn heap_name(what: &str, key: ConfiguredTargetKey, fingerprint: Fingerprint) -> starlark::values::FrozenHeapName {
+    let target = format!("{} {}", key.label, key.config.get().output_directory);
+    bazel_starlark::heap_name(what, target, fingerprint)
 }
 
 /// A configured target with only an empty `DefaultInfo`.
@@ -621,7 +630,7 @@ fn empty_target(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, is_test: bool, 
         };
         let target = providers::collect(key.label, starlark::values::Value::new_none(), &defaults, module.heap())?;
         module.set(TARGET, module.heap().alloc(target));
-        let module = module.freeze_named(bazel_starlark::heap_name("empty", key.label, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        let module = module.freeze_named(heap_name("empty", key, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
         Ok(Analyzed { module, actions: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;

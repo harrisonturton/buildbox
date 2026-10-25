@@ -165,7 +165,7 @@ fn builtins_object(builder: &mut GlobalsBuilder) -> FrozenValue {
     for internal in internals {
         internal(&mut members);
     }
-    let members = members.build();
+    let members = members.build_named(GlobalFrozenHeapName { name: "bb builtins internal" });
     builder.frozen_heap().add_reference(members.heap());
     let internal_members = members.iter().map(|(name, value)| (name.to_string(), value)).collect();
     let internal = builder.alloc(opaque::Namespace::new("_builtins.internal", internal_members));
