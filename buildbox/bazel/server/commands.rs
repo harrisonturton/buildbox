@@ -291,14 +291,16 @@ pub async fn page_check(context: &CommandContext<'_>, out: &Output) -> i32 {
         let mut failures: std::collections::BTreeMap<String, (usize, String)> = std::collections::BTreeMap::new();
         let mut read = 0;
         for target in &targets {
-            match target.providers() {
-                Ok(providers) if providers.get().is_some() => read += 1,
-                Ok(_) => failures.entry("no providers".to_string()).or_insert((0, target.label.to_string())).0 += 1,
-                Err(error) => {
-                    let reason = error.message().lines().next().unwrap_or_default().to_string();
-                    failures.entry(reason).or_insert((0, target.label.to_string())).0 += 1;
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_back_one(target)));
+            let reason = match outcome {
+                Ok(Ok(())) => {
+                    read += 1;
+                    continue;
                 }
-            }
+                Ok(Err(reason)) => reason,
+                Err(panic) => format!("panicked: {}", panic_message(&panic)),
+            };
+            failures.entry(reason).or_insert((0, target.label.to_string())).0 += 1;
         }
         (read, failures)
     })
@@ -313,6 +315,23 @@ pub async fn page_check(context: &CommandContext<'_>, out: &Output) -> i32 {
     }
     out.stdout(&text).await;
     exit::SUCCESS
+}
+
+/// Read back one paged-out target's providers, or say why it can't be.
+fn read_back_one(target: &bazel_analysis::ConfiguredTarget) -> Result<(), String> {
+    match target.providers() {
+        Ok(providers) if providers.get().is_some() => Ok(()),
+        Ok(_) => Err("no providers".to_string()),
+        Err(error) => Err(error.message().lines().next().unwrap_or_default().to_string()),
+    }
+}
+
+/// What a caught panic said.
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = panic.downcast_ref::<String>() {
+        return message.clone();
+    }
+    panic.downcast_ref::<&str>().map_or_else(|| "(no message)".to_string(), |message| message.to_string())
 }
 
 /// `dump`: what the server holds in memory; with `--allocator`, the

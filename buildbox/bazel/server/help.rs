@@ -71,9 +71,11 @@ const COMMANDS: &[CommandHelp] = &[
     },
 ];
 
-/// bb's own commands, which the client runs.
+/// bb's own commands: the server runs `page-check`, and the client the
+/// others.
 const BB_COMMANDS: &[(&str, &str)] = &[
     ("artifacts", "Manages the server's artifacts, such as container images."),
+    ("page-check", "Pages every analyzed target out of memory and back, reporting failures."),
     ("server", "Inspects and controls the server: status, commands, metrics, logs, stop."),
     ("up", "Runs the server in the foreground."),
 ];
@@ -97,9 +99,14 @@ Example:
   % bb --bazelrc=/path/to/rc build //base
 ";
 
-/// Whether a command is a Bazel command bb supports.
+/// The commands of bb's own that the server runs, in a workspace as Bazel
+/// commands are.
+const BB_SERVER_COMMANDS: &[&str] = &["page-check"];
+
+/// Whether the server runs a command: a Bazel command bb supports, or one
+/// of bb's own diagnostics.
 pub fn is_supported(command: &str) -> bool {
-    COMMANDS.iter().any(|help| help.name == command)
+    COMMANDS.iter().any(|help| help.name == command) || BB_SERVER_COMMANDS.contains(&command)
 }
 
 /// `help [topic]`, which Bazel also runs for `-h`, `-help` and `--help`.
