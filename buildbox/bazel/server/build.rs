@@ -93,6 +93,9 @@ pub struct Built {
     pub config: ConfigId,
     /// Each top-level target, with the files it built.
     pub targets: Vec<(Label, Arc<ConfiguredTarget>, Vec<OutputFile>)>,
+    /// How many of the targets didn't build every file they build at the
+    /// top level.
+    pub unbuilt: usize,
     pub exec_root: PathBuf,
     pub errors: bool,
 }
@@ -287,9 +290,13 @@ async fn analyze_and_build(
     errors |= failed;
     let built_by_path: HashMap<PathId, OutputFile> = built.iter().map(|file| (file.path, *file)).collect();
     let mut targets = Vec::new();
+    let mut unbuilt = 0;
     for ((label, target), top) in analyzed.into_iter().zip(&top_levels) {
         let artifacts = top.as_ref().map(|top| top.artifacts.as_slice()).unwrap_or_default();
         let files: Vec<OutputFile> = artifacts.iter().filter_map(|artifact| built_by_path.get(&artifact.exec_path).copied()).collect();
+        if files.len() < artifacts.len() {
+            unbuilt += 1;
+        }
         targets.push((label, target, files));
     }
     if let Some(backend) = &backend {
@@ -311,6 +318,7 @@ async fn analyze_and_build(
         main_mapping,
         config,
         targets,
+        unbuilt,
         exec_root,
         errors,
     })
@@ -835,7 +843,7 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
     }
     let executed = options.flag("build", true);
     let failed = match executed {
-        true => built.targets.iter().filter(|(_, target, files)| !all_built(target, files)).count(),
+        true => built.unbuilt,
         false => 0,
     };
     if failed > 0 && options.flag("keep_going", false) {
