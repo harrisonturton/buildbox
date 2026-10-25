@@ -126,6 +126,9 @@ pub fn bazel_wording(message: &str, candidates: &[String]) -> String {
     if let Some(rest) = message.strip_prefix("Parse error: unexpected ") {
         return syntax_error(rest).unwrap_or_else(|| format!("syntax error: {rest}"));
     }
+    if let Some(error) = lexer_error(message) {
+        return error;
+    }
     if let Some(operation) = binary_operation(message) {
         return operation;
     }
@@ -151,12 +154,45 @@ fn binary_operation(message: &str) -> Option<String> {
 }
 
 /// `syntax error at 'cmd': expected )`, from starlark-rust's
-/// `identifier 'cmd', expected symbol ')'`.
+/// `identifier 'cmd', expected symbol ')'`, and Bazel's words for errors
+/// of indentation.
 fn syntax_error(unexpected: &str) -> Option<String> {
     let (found, expected) = unexpected.split_once(", expected ")?;
-    let token = found.split_once(' ').map(|(_, token)| token).unwrap_or(found).trim_matches('\'');
-    let expected = expected.strip_prefix("symbol ").unwrap_or(expected).trim_matches('\'');
-    Some(format!("syntax error at '{token}': expected {expected}"))
+    if found == "new indentation block" {
+        return Some("indentation error".to_string());
+    }
+    if expected == "new indentation block" {
+        return Some("expected an indented block".to_string());
+    }
+    Some(format!("syntax error at '{}': expected {}", token_name(found), token_name(expected)))
+}
+
+/// A token as Bazel names it, from starlark-rust's description of it, such
+/// as `identifier 'cmd'`, `symbol ')'` or `new line`: the quoted text, if
+/// any.
+fn token_name(description: &str) -> &str {
+    if description == "new line" {
+        return "newline";
+    }
+    let quoted = description.find('\'').zip(description.rfind('\''));
+    match quoted {
+        Some((open, close)) if open < close => &description[open + 1..close],
+        _ => description,
+    }
+}
+
+/// A lexer error as Bazel's lexer words it, from starlark-rust's.
+fn lexer_error(message: &str) -> Option<String> {
+    let rest = message.strip_prefix("Parse error: ")?;
+    if let Some(input) = rest.strip_prefix("invalid input `").and_then(|input| input.strip_suffix('`')) {
+        return Some(format!("invalid character: '{input}'"));
+    }
+    let worded = match rest {
+        "unfinished string literal" => "unclosed string literal",
+        "incorrect indentation" => "indentation error",
+        _ => rest,
+    };
+    Some(worded.to_string())
 }
 
 /// ` (did you mean 'name'?)` for the candidate closest to `input`, if one
@@ -232,6 +268,15 @@ mod tests {
     fn operators_are_found_outside_strings() {
         assert_eq!(unquoted_find("1 + \"a+b\"", "+"), Some(2));
         assert_eq!(unquoted_find("\"+\" + 1", "+"), Some(4));
+    }
+
+    #[test]
+    fn lexer_errors_are_worded_as_bazel_words_them() {
+        assert_eq!(bazel_wording("Parse error: invalid input `$`", &[]), "invalid character: '$'");
+        assert_eq!(bazel_wording("Parse error: unfinished string literal", &[]), "unclosed string literal");
+        assert_eq!(bazel_wording("Parse error: unexpected new indentation block, expected expression", &[]), "indentation error");
+        assert_eq!(bazel_wording("Parse error: unexpected identifier 'cc', expected new indentation block", &[]), "expected an indented block");
+        assert_eq!(bazel_wording("Parse error: unexpected integer literal '2', expected new line", &[]), "syntax error at '2': expected newline");
     }
 
     #[test]

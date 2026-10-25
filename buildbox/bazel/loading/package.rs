@@ -98,9 +98,9 @@ async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyErro
     let source = String::from_utf8(bytes).map_err(|_| SkyError::new(format!("{build_label}: not valid UTF-8")))?;
 
     let mapping = ctx.compute(&RepoMappingKey(id.repo)).await?;
-    let ast = match bazel_starlark::parse(build_label, source.clone()) {
+    let ast = match bazel_starlark::parse_reporting_all(build_label, source.clone()) {
         Ok(ast) => ast,
-        Err(error) => return Ok(LoadedPackage(failed_package(id, build_file, error.reported))),
+        Err(errors) => return Ok(LoadedPackage(failed_package(id, build_file, errors))),
     };
     let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), &mapping.0).await?;
     let repos = transitive_repos(id.repo, loaded.iter().map(|(_, module)| &**module));
@@ -132,10 +132,10 @@ async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyErro
 }
 
 /// A package whose BUILD file couldn't be parsed: it has no targets but the
-/// BUILD file, and the error.
-fn failed_package(id: PackageId, build_file: Symbol, error: bazel_packages::PackageError) -> Package {
+/// BUILD file, and the errors.
+fn failed_package(id: PackageId, build_file: Symbol, errors: Vec<bazel_packages::PackageError>) -> Package {
     let mut builder = PackageBuilder::new(id, build_file);
-    builder.errors.push(error);
+    builder.errors = errors;
     builder.finish()
 }
 

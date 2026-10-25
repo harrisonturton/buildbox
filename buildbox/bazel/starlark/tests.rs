@@ -157,6 +157,22 @@ fn failures_keep_earlier_targets_and_their_traceback() {
 }
 
 #[test]
+fn every_syntax_error_is_an_error_without_checking_names() {
+    let file = label("//pkg:BUILD");
+    let source = "filegroup(name = 'a' srcs = [])\nfilegroup(name = 'b')\ny = $\nundefined()\n";
+    let errors = bazel_starlark::parse_reporting_all(file, source.to_string()).unwrap_err();
+    let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        errors,
+        [
+            "//pkg:BUILD:1:22: syntax error at 'srcs': expected )",
+            "//pkg:BUILD:3:5: invalid character: '$'",
+            "//pkg:BUILD:3:6: syntax error at 'newline': expected expression",
+        ]
+    );
+}
+
+#[test]
 fn every_undefined_name_is_an_error() {
     let package = evaluate_build("foo()\nfilegroup(name = 'ok', srcs = bar)\n");
     let errors: Vec<String> = package.errors.iter().map(ToString::to_string).collect();

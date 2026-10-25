@@ -1,0 +1,275 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harry Turton <harrisonturton@gmail.com>
+Date: Sun, 25 Oct 2026 19:18:06 -0400
+Subject: [PATCH] Add parse_all_errors, going on past syntax and lexer errors
+
+The parser stopped at the first syntax error, and a lexer error ended the
+file. After a syntax error, parsing now goes on from the next statement
+at the file's top level, and lexing goes on past a lexer error.
+parse_all_errors fails with every error found, in the order they appear;
+parse still fails with the first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01H2KN4B9EK4GzM2uqpms4ft
+---
+ src/syntax/module.rs    |  54 +++++++++++++------
+ src/syntax/parser_rd.rs | 113 ++++++++++++++++++++++++----------------
+ 2 files changed, 108 insertions(+), 59 deletions(-)
+
+diff --git a/src/syntax/module.rs b/src/syntax/module.rs
+index 80fb809d..88d1fbfa 100644
+--- a/src/syntax/module.rs
++++ b/src/syntax/module.rs
+@@ -28,6 +28,7 @@ use crate::codemap::FileSpan;
+ use crate::codemap::Pos;
+ use crate::codemap::Span;
+ use crate::codemap::Spanned;
++use crate::eval_exception::EvalException;
+ use crate::lexer::Lexer;
+ use crate::lexer::Token;
+ use crate::syntax::AstLoad;
+@@ -100,6 +101,14 @@ impl AstModuleFields for AstModule {
+     }
+ }
+ 
++/// Errors as `crate::Error`s, in the order of where they are.
++fn in_order(errors: Vec<EvalException>) -> Vec<crate::Error> {
++    let mut errors: Vec<crate::Error> =
++        errors.into_iter().map(EvalException::into_error).collect();
++    errors.sort_by_key(|error| error.span().map(|span| span.span.begin()));
++    errors
++}
++
+ impl AstModule {
+     fn create(
+         codemap: CodeMap,
+@@ -155,6 +164,19 @@ impl AstModule {
+     /// assert_eq!(span.to_string(), "filename:2:11");
+     /// ```
+     pub fn parse(filename: &str, content: String, dialect: &Dialect) -> crate::Result<Self> {
++        Self::parse_all_errors(filename, content, dialect)
++            .map_err(|errors| errors.into_iter().next().expect("a failure has an error"))
++    }
++
++    /// Like [`parse`](Self::parse), but failing with every error found, in
++    /// the order they appear, rather than only the first: after a syntax
++    /// error, parsing goes on from the next statement at the file's top
++    /// level, and lexing goes on after a lexer error.
++    pub fn parse_all_errors(
++        filename: &str,
++        content: String,
++        dialect: &Dialect,
++    ) -> Result<Self, Vec<crate::Error>> {
+         let typecheck = content.contains("@starlark-rust: typecheck");
+         let codemap = CodeMap::new(filename.to_owned(), content);
+         let lexer = Lexer::new(codemap.source(), dialect, codemap.dupe());
+@@ -187,22 +209,24 @@ impl AstModule {
+             errors: &mut errors,
+         };
+ 
+-        match parser_rd::parse_module(&mut state, filtered) {
+-            Ok(v) => {
+-                if let Some(err) = errors.into_iter().next() {
+-                    return Err(err.into_error());
+-                }
+-                Ok(AstModule::create(
+-                    codemap,
+-                    v,
+-                    dialect,
+-                    typecheck,
+-                    lint_suppressions_builder.build(),
+-                    comment_spans,
+-                )?)
++        let parsed = parser_rd::parse_module(&mut state, filtered);
++        let statement = match parsed {
++            Ok(statement) if errors.is_empty() => statement,
++            Ok(_) => return Err(in_order(errors)),
++            Err(error) => {
++                errors.push(error);
++                return Err(in_order(errors));
+             }
+-            Err(e) => Err(e.into_error()),
+-        }
++        };
++        AstModule::create(
++            codemap,
++            statement,
++            dialect,
++            typecheck,
++            lint_suppressions_builder.build(),
++            comment_spans,
++        )
++        .map_err(|error| vec![error])
+     }
+ 
+     /// Return the file names of all the `load` statements in the module.
+diff --git a/src/syntax/parser_rd.rs b/src/syntax/parser_rd.rs
+index 87d22c65..82305937 100644
+--- a/src/syntax/parser_rd.rs
++++ b/src/syntax/parser_rd.rs
+@@ -61,8 +61,9 @@ pub(crate) struct ParserRd<'a, I: Iterator<Item = Lexeme>> {
+     tokens: I,
+     /// Current token with span, or None if EOF.
+     current: Option<(usize, Token, usize)>,
+-    /// Deferred lexer error encountered while advancing the token stream.
+-    pending_error: Option<EvalException>,
++    /// How many indented blocks the tokens consumed are in, for recovering
++    /// from a syntax error at the end of a top-level statement.
++    depth: i32,
+     /// Byte offset (into the source string) of the end of the last consumed
+     /// token, used to construct EOF spans when `current` is None.
+     last_end: usize,
+@@ -70,26 +71,44 @@ pub(crate) struct ParserRd<'a, I: Iterator<Item = Lexeme>> {
+ }
+ 
+ impl<'a, I: Iterator<Item = Lexeme>> ParserRd<'a, I> {
+-    pub(crate) fn new(mut tokens: I, state: ParserState<'a>) -> Self {
+-        let (current, pending_error) = match Self::next_from(&mut tokens) {
+-            Ok(current) => (current, None),
+-            Err(err) => (None, Some(err)),
+-        };
++    pub(crate) fn new(mut tokens: I, mut state: ParserState<'a>) -> Self {
++        let current = Self::next_from(&mut tokens, &mut state);
+         ParserRd {
+             tokens,
+             current,
+-            pending_error,
++            depth: 0,
+             last_end: 0,
+             state,
+         }
+     }
+ 
++    /// The next token, recording the lexer's errors on the way to it, past
++    /// which the lexer goes on.
++    #[inline]
++    fn next_from(tokens: &mut I, state: &mut ParserState<'_>) -> Option<(usize, Token, usize)> {
++        loop {
++            match tokens.next() {
++                Some(Ok(t)) => return Some(t),
++                Some(Err(err)) => state.errors.push(err),
++                None => return None,
++            }
++        }
++    }
++
++    /// Note leaving the current token, for `depth`.
+     #[inline]
+-    fn next_from(tokens: &mut I) -> Result<Option<(usize, Token, usize)>, EvalException> {
+-        match tokens.next() {
+-            Some(Ok(t)) => Ok(Some(t)),
+-            Some(Err(err)) => Err(err),
+-            None => Ok(None),
++    fn leave_current(&mut self) {
++        match &self.current {
++            Some((_, Token::Indent, end)) => {
++                self.depth += 1;
++                self.last_end = *end;
++            }
++            Some((_, Token::Dedent, end)) => {
++                self.depth -= 1;
++                self.last_end = *end;
++            }
++            Some((_, _, end)) => self.last_end = *end,
++            None => {}
+         }
+     }
+ 
+@@ -98,34 +117,17 @@ impl<'a, I: Iterator<Item = Lexeme>> ParserRd<'a, I> {
+     /// produce for the return value.
+     #[inline]
+     fn advance(&mut self) {
+-        if let Some((_, _, end)) = &self.current {
+-            self.last_end = *end;
+-        }
+-        match Self::next_from(&mut self.tokens) {
+-            Ok(current) => self.current = current,
+-            Err(err) => {
+-                self.current = None;
+-                self.pending_error = Some(err);
+-            }
+-        }
++        self.leave_current();
++        self.current = Self::next_from(&mut self.tokens, &mut self.state);
+     }
+ 
+     /// Advance and return the consumed token. Use only at sites that need to
+     /// extract data from the token (Identifier, Int, Float, String, FStringStart).
+     #[inline]
+     fn take_current(&mut self) -> Option<(usize, Token, usize)> {
+-        let old = self.current.take();
+-        if let Some((_, _, end)) = &old {
+-            self.last_end = *end;
+-        }
+-        match Self::next_from(&mut self.tokens) {
+-            Ok(current) => self.current = current,
+-            Err(err) => {
+-                self.current = None;
+-                self.pending_error = Some(err);
+-            }
+-        }
+-        old
++        self.leave_current();
++        let next = Self::next_from(&mut self.tokens, &mut self.state);
++        std::mem::replace(&mut self.current, next)
+     }
+ 
+     #[inline]
+@@ -177,10 +179,6 @@ impl<'a, I: Iterator<Item = Lexeme>> ParserRd<'a, I> {
+     }
+ 
+     fn error_expected(&mut self, what: &str) -> EvalException {
+-        if let Some(err) = self.pending_error.take() {
+-            return err;
+-        }
+-
+         let pos = self.pos();
+         let (span, msg) = match &self.current {
+             Some((start, tok, end)) => (
+@@ -211,14 +209,41 @@ impl<'a, I: Iterator<Item = Lexeme>> ParserRd<'a, I> {
+         let l = self.pos();
+         let mut stmts = Vec::new();
+         while self.peek().is_some() {
+-            stmts.push(self.parse_stmt()?);
++            match self.parse_stmt() {
++                Ok(stmt) => stmts.push(stmt),
++                Err(err) => {
++                    self.state.errors.push(err);
++                    self.skip_statement();
++                }
++            }
+             self.skip_newlines();
+         }
+         let r = self.last_end;
+-        if let Some(err) = self.pending_error {
+-            Err(err)
+-        } else {
+-            Ok(grammar_util::statements(stmts, l, r))
++        Ok(grammar_util::statements(stmts, l, r))
++    }
++
++    /// Skip to the end of the top-level statement a syntax error is in,
++    /// with the indented block it opens if its line ends with `:`, to go on
++    /// parsing after it.
++    fn skip_statement(&mut self) {
++        let mut opens_block = false;
++        while let Some(token) = self.peek() {
++            let ends_line = matches!(token, Token::Newline | Token::Dedent);
++            if !ends_line {
++                opens_block = matches!(token, Token::Colon);
++            }
++            self.advance();
++            if !ends_line || self.depth > 0 {
++                continue;
++            }
++            match self.peek() {
++                Some(Token::Dedent) => {}
++                Some(Token::Indent) if opens_block => {}
++                _ => {
++                    self.depth = 0;
++                    return;
++                }
++            }
+         }
+     }
+ 

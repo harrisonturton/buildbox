@@ -22,3 +22,11 @@ crate.annotation(
         "//third_party/starlark:patches/starlark/0011-Add-eval_module_all_errors-failing-with-every-name-e.patch",
     ],
 )
+
+crate.annotation(
+    crate = "starlark_syntax",
+    patch_args = ["-p1"],
+    patches = [
+        "//third_party/starlark:patches/starlark_syntax/0012-Add-parse_all_errors-going-on-past-syntax-and-lexer-.patch",
+    ],
+)

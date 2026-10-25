@@ -1,5 +1,5 @@
 {
-  "checksum": "5d9e9268400fab6c73471bdb380e6579b6639c52b55b2a1e9840df6d9f196959",
+  "checksum": "738cb990707779d5574bc7cb4f48ad932ae7650b23f0b313dc01caf10e6e2c24",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -12093,6 +12093,12 @@
       "package_url": "https://github.com/facebook/starlark-rust",
       "repository": {
         "Http": {
+          "patch_args": [
+            "-p1"
+          ],
+          "patches": [
+            "@@//third_party/starlark:patches/starlark_syntax/0012-Add-parse_all_errors-going-on-past-syntax-and-lexer-.patch"
+          ],
           "sha256": "7492c571c531e68099c911cfd909d32659f1cc0910cf3adee9fce66e39d21f14",
           "url": "https://static.crates.io/crates/starlark_syntax/0.14.2/download"
         }

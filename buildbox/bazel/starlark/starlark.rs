@@ -29,7 +29,7 @@ pub mod symbolic_macro;
 pub mod toolchain_type;
 
 pub use context::{EvalContext, FileKind, Globber};
-pub use eval::{EvalError, Loads, eval_bzl, eval_build, heap_name, loads, parse};
+pub use eval::{EvalError, Loads, eval_bzl, eval_build, heap_name, loads, parse, parse_reporting_all};
 pub use package_builder::PackageBuilder;
 
 use starlark::environment::{GlobalFrozenHeapName, Globals, GlobalsBuilder, LibraryExtension};

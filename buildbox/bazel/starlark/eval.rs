@@ -75,6 +75,18 @@ pub fn parse(file: Label, source: String) -> Result<AstModule, EvalError> {
     AstModule::parse(&file.canonical_form_for_file(), source, &dialect()).map_err(EvalError::starlark)
 }
 
+/// The most syntax errors a file reports, as Bazel limits them, so that a
+/// file that's badly broken doesn't flood the output.
+const MAX_SYNTAX_ERRORS: usize = 5;
+
+/// Parse a file, as [`parse`], failing with each of its syntax errors, up
+/// to [`MAX_SYNTAX_ERRORS`], as Bazel reports them. A file with syntax
+/// errors has its names checked only once they're fixed.
+pub fn parse_reporting_all(file: Label, source: String) -> Result<AstModule, Vec<PackageError>> {
+    AstModule::parse_all_errors(&file.canonical_form_for_file(), source, &dialect())
+        .map_err(|errors| errors.into_iter().take(MAX_SYNTAX_ERRORS).map(|error| EvalError::starlark(error).reported).collect())
+}
+
 /// The modules a file's `load` statements name, as written.
 pub fn loads(ast: &AstModule) -> Vec<String> {
     ast.loads().into_iter().map(|load| load.module_id.to_string()).collect()
