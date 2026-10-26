@@ -366,12 +366,7 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     let build_file_path = artifact::package_dir(input.label.package).join(input.build_file.name);
     set("build_file_path", heap.alloc(build_file_path.to_string()));
     set("var", heap.alloc(AllocDict(state.make_variables.iter().map(|(name, value)| (name.as_str(), value.as_str())))));
-    let options = crate::fragments::Options {
-        compilation_mode: config.options.compilation_mode.clone(),
-        action_env: config.options.action_env.clone(),
-        values: config.options.values.clone(),
-        is_exec: config.options.is_exec,
-    };
+    let options = config.options.clone();
     set("configuration", heap.alloc(crate::fragments::Configuration(options.clone())));
     set("features", heap.alloc(AllocList::EMPTY));
     set("disabled_features", heap.alloc(AllocList::EMPTY));

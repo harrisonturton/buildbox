@@ -6,7 +6,7 @@ use crate::output::Output;
 use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey};
 use crate::written::Written;
 use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Incompatibility};
-use bazel_config::{BuildOptions, ConfigId};
+use bazel_config::{BuildOptions, ConfigId, NativeOption, OptionType};
 use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
 use bazel_loading::RepoMappingKey;
@@ -27,30 +27,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
 
-/// The options `build` and the commands built on it take.
+/// The options `build` and the commands built on it take: the native
+/// options configurations are made of, and the build's own.
 pub fn build_spec() -> OptionSpec {
     use OptionKind::*;
-    OptionSpec::new(&[
-        ("compilation_mode", Value),
-        ("cpu", Value),
-        ("platforms", Value),
-        ("host_platform", Value),
-        ("define", Multi),
+    let mut options = vec![
         ("action_env", Multi),
         ("repo_env", Multi),
         ("build", Bool),
-        ("protocopt", Multi),
-        ("strict_proto_deps", Value),
-        ("strict_public_imports", Value),
-        ("proto_compiler", Value),
-        ("experimental_proto_descriptor_sets_include_source_info", Bool),
-        ("copt", Multi),
-        ("cxxopt", Multi),
-        ("conlyopt", Multi),
-        ("linkopt", Multi),
-        ("host_copt", Multi),
-        ("features", Multi),
-        ("stamp", Bool),
         ("keep_going", Bool),
         ("symlink_prefix", Value),
         ("show_result", Value),
@@ -71,8 +55,6 @@ pub fn build_spec() -> OptionSpec {
         ("cache_test_results", Bool),
         ("runs_per_test", Value),
         ("flaky_test_attempts", Value),
-        ("extra_toolchains", Multi),
-        ("extra_execution_platforms", Multi),
         ("remote_executor", Value),
         ("remote_cache", Value),
         ("disk_cache", Value),
@@ -84,7 +66,19 @@ pub fn build_spec() -> OptionSpec {
         ("enable_bzlmod", Bool),
         ("registry", Multi),
         ("lockfile_mode", Value),
-    ])
+    ];
+    options.extend(bazel_config::command_line_options().map(|option| (option.name, option_kind(option))));
+    OptionSpec::new(&options)
+}
+
+/// How the command line gives a native option.
+fn option_kind(option: &NativeOption) -> OptionKind {
+    match option.ty {
+        OptionType::Bool => OptionKind::Bool,
+        OptionType::Int => OptionKind::Int,
+        _ if option.multiple => OptionKind::Multi,
+        _ => OptionKind::Value,
+    }
 }
 
 /// What a build analyzed and built.
@@ -358,7 +352,7 @@ fn dependency_chain(reason: &Incompatibility, mapping: &RepoMappingTable) -> Str
         if index + 1 == reason.chain.len() {
             line.push_str(&format!(
                 "   <-- target platform ({}) didn't satisfy constraint {}",
-                config.options.platform, reason.constraint
+                config.platform, reason.constraint
             ));
         }
         lines.push(line);
@@ -639,41 +633,17 @@ async fn package_tests(universe: &Universe<&Session>, package: &bazel_packages::
 }
 
 /// The configuration targets are built in, from the options.
-/// Options `config_setting(values = ...)` can match that bb records as they
-/// are given.
-const VALUE_OPTIONS: [&str; 3] = ["strict_proto_deps", "strict_public_imports", "proto_compiler"];
-
-/// Boolean options `config_setting(values = ...)` can match.
-const BOOL_OPTIONS: [&str; 1] = ["experimental_proto_descriptor_sets_include_source_info"];
-
 fn configuration(context: &CommandContext<'_>, options: &ParsedOptions, main_mapping: &RepoMappingTable) -> Result<ConfigId, String> {
     let parse_label = |text: &str| {
         let label_context = LabelContext::new(bazel_label::PackageId::new(RepoName::MAIN, intern::PathId::ROOT), main_mapping);
         Label::parse(text, &label_context).map_err(|error| error.to_string())
     };
-    let host = match options.get("host_platform") {
-        Some(text) => parse_label(text)?,
-        None => Label::parse_canonical("@@platforms//host:host").map_err(|error| error.to_string())?,
-    };
-    let mut build = BuildOptions::host_default(host);
-    if let Some(platform) = options.get("platforms").and_then(|platforms| platforms.split(',').next()) {
-        build.platform = parse_label(platform)?;
-    }
-    if let Some(mode) = options.get("compilation_mode") {
-        if !["fastbuild", "dbg", "opt"].contains(&mode) {
-            return Err(format!("Not a valid compilation mode: '{mode}' (should be dbg, fastbuild or opt)"));
+    let mut build = BuildOptions::default();
+    for option in bazel_config::command_line_options() {
+        for text in options.all(option.name) {
+            build.apply(option.name, text, &parse_label).map_err(|error| error.to_string())?;
         }
-        build.compilation_mode = mode.to_string();
     }
-    if let Some(cpu) = options.get("cpu") {
-        build.cpu = cpu.to_string();
-    }
-    for define in options.all("define") {
-        let (name, value) = define.split_once('=').ok_or_else(|| format!("Variable definitions must be in the form of a 'name=value' assignment: '{define}'"))?;
-        build.defines.retain(|(existing, _)| existing != name);
-        build.defines.push((name.to_string(), value.to_string()));
-    }
-    build.defines.sort();
     build.action_env = action_env(context, options);
     for flag in options.all(bazel_options::STARLARK_FLAG) {
         let (label, value) = flag.split_once('=').unwrap_or((flag, "true"));
@@ -682,26 +652,6 @@ fn configuration(context: &CommandContext<'_>, options: &ParsedOptions, main_map
         build.starlark_flags.push((label, value.to_string()));
     }
     build.starlark_flags.sort();
-    for name in ["copt", "cxxopt", "conlyopt", "linkopt", "features", "protocopt"] {
-        let values = options.all(name);
-        if !values.is_empty() {
-            build.values.push((name.to_string(), values.join(" ")));
-        }
-    }
-    for name in VALUE_OPTIONS {
-        if let Some(value) = options.get(name) {
-            build.values.push((name.to_string(), value.to_string()));
-        }
-    }
-    for name in BOOL_OPTIONS {
-        if options.get(name).is_some() {
-            build.values.push((name.to_string(), options.flag(name, false).to_string()));
-        }
-    }
-    if options.flag("stamp", false) {
-        build.values.push(("stamp".to_string(), "true".to_string()));
-    }
-    build.values.sort();
     Ok(ConfigId::intern(&build))
 }
 

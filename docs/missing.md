@@ -7,11 +7,14 @@ roughly in order of how many real repositories each gap blocks.
 
 ## 1. Configurations and transitions
 
-- **No general options model.** `BuildOptions` (`buildbox/bazel/config/config.rs`)
-  is a fixed struct: compilation mode, cpu, platforms, `--define`s, a few
-  other values, Starlark flags and action env. Bazel's
-  `//command_line_option:*` namespace has nothing behind it, so a
-  transition has nothing to read or write. This has to come first.
+- **Few native options.** Configurations are made of native options and
+  Starlark flags (`buildbox/bazel/config/options.rs`): a registry of the
+  native options bb knows, with Bazel's types, defaults and parsing, and
+  options that hold only what differs from the defaults. bb registers the
+  options `config_setting`s match in the rule sets it has met, and those it
+  reads; a `config_setting` on any other fails rather than not matching.
+  Transitions need every option they read or write registered, and
+  Bazel's own exec transition reads about 150.
 - **Transitions are no-ops.** `dep_config` maps `Cfg::Transition` to the
   parent's configuration (`buildbox/bazel/analysis/configured.rs`).
   Incoming rule transitions (`rule(cfg = ...)`) are ignored,

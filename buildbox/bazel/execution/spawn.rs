@@ -151,7 +151,7 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
         arguments: request.arguments.clone(),
         env: request.env.clone(),
         configuration: owner.config.get().checksum.clone(),
-        execution_platform: owner.config.get().options.host_platform.to_string(),
+        execution_platform: owner.config.get().host_platform.to_string(),
     };
     let spawned = execute(backend, request).await?;
     let result = &spawned.result;

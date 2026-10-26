@@ -5,36 +5,15 @@
 //! target uses. Each configuration is interned, so configured targets refer
 //! to theirs by a 4-byte [`ConfigId`].
 
+mod options;
+
+pub use options::{BuildOptions, LabelParser, NATIVE_OPTIONS, NativeOption, OptionDefault, OptionError, OptionType, OptionValue, command_line_options, native_option};
+
 use bazel_label::Label;
 use intern::BlobTable;
 use skycodec::{Decode, Encode, Fingerprinter};
 use std::fmt;
 use std::sync::{Arc, LazyLock, Mutex};
-
-/// The options that decide how targets are built.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
-pub struct BuildOptions {
-    /// `fastbuild`, `dbg` or `opt`.
-    pub compilation_mode: String,
-    /// The target CPU, as Bazel names it: `k8`, `aarch64`.
-    pub cpu: String,
-    /// The platform targets are built for.
-    pub platform: Label,
-    /// The platform tools run on.
-    pub host_platform: Label,
-    /// Whether this is an execution configuration, for tools.
-    pub is_exec: bool,
-    /// `--define` values, sorted by name.
-    pub defines: Vec<(String, String)>,
-    /// Every other option that affects analysis, as given, sorted: what
-    /// `config_setting(values = ...)` matches against.
-    pub values: Vec<(String, String)>,
-    /// Starlark flags, `--//pkg:flag=value`, sorted by label.
-    pub starlark_flags: Vec<(Label, String)>,
-    /// The environment of actions that use the default shell environment,
-    /// sorted by name.
-    pub action_env: Vec<(String, String)>,
-}
 
 /// Identifies an interned configuration.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
@@ -49,11 +28,22 @@ struct Configs {
     decoded: Mutex<Vec<Option<Arc<BuildConfiguration>>>>,
 }
 
-/// A configuration: its options, and the names derived from them.
+/// A configuration: its options, and what's derived from them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildConfiguration {
     pub id: ConfigId,
     pub options: BuildOptions,
+    /// `fastbuild`, `dbg` or `opt`.
+    pub compilation_mode: String,
+    /// The target CPU, as Bazel names it: `k8`, `aarch64`.
+    pub cpu: String,
+    /// The platform targets are built for: the first of `--platforms`, or
+    /// the host's.
+    pub platform: Label,
+    /// The platform tools run on.
+    pub host_platform: Label,
+    /// Whether this is an execution configuration, for tools.
+    pub is_exec: bool,
     /// The name of its output directory under `bazel-out`, such as
     /// `k8-fastbuild` or `k8-opt-exec-ST-d57f47055a04`.
     pub output_directory: String,
@@ -99,16 +89,26 @@ impl BuildConfiguration {
         let mut fingerprinter = Fingerprinter::new();
         fingerprinter.bytes(format!("{options:?}").as_bytes());
         let digest = fingerprinter.finish().to_string();
-        let output_directory = if options.is_exec {
-            format!("{}-{}-exec-ST-{}", options.cpu, options.compilation_mode, &digest[..12])
+        let compilation_mode = options.string("compilation_mode").to_string();
+        let cpu = options.string("cpu").to_string();
+        let host_platform = options.label("host_platform").unwrap_or(*DEFAULT_HOST_PLATFORM);
+        let platform = options.labels("platforms").first().copied().unwrap_or(host_platform);
+        let is_exec = options.bool("is exec configuration");
+        let output_directory = if is_exec {
+            format!("{cpu}-{compilation_mode}-exec-ST-{}", &digest[..12])
         } else if options.starlark_flags.is_empty() {
-            format!("{}-{}", options.cpu, options.compilation_mode)
+            format!("{cpu}-{compilation_mode}")
         } else {
-            format!("{}-{}-ST-{}", options.cpu, options.compilation_mode, &digest[..12])
+            format!("{cpu}-{compilation_mode}-ST-{}", &digest[..12])
         };
         BuildConfiguration {
             id,
             options,
+            compilation_mode,
+            cpu,
+            platform,
+            host_platform,
+            is_exec,
             output_directory,
             checksum: digest[..7].to_string(),
         }
@@ -120,76 +120,24 @@ impl BuildConfiguration {
         format!("bazel-out/{}/bin", self.output_directory)
     }
 
-    /// The value an option has, for `config_setting(values = ...)`.
-    pub fn value(&self, name: &str) -> Option<&str> {
-        match name {
-            "compilation_mode" => Some(&self.options.compilation_mode),
-            "cpu" => Some(&self.options.cpu),
-            _ => self.options.values.iter().find(|(option, _)| option == name).map(|(_, value)| value.as_str()),
-        }
-    }
-
-    /// The value of a `--define`.
-    pub fn define(&self, name: &str) -> Option<&str> {
-        self.options.defines.iter().find(|(define, _)| define == name).map(|(_, value)| value.as_str())
-    }
-
     /// The configuration tools of targets in this one are built in: the
     /// execution platform's, optimised, as Bazel's exec transition gives.
     pub fn exec(&self) -> ConfigId {
         let mut options = self.options.clone();
-        options.is_exec = true;
-        options.compilation_mode = "opt".to_string();
-        options.platform = options.host_platform;
+        let exec_options = [
+            ("is exec configuration", OptionValue::Bool(true)),
+            ("compilation_mode", OptionValue::String("opt".to_string())),
+            ("platforms", OptionValue::Labels(vec![self.host_platform])),
+        ];
+        for (name, value) in exec_options {
+            options.set(name, value).expect("exec options are native options");
+        }
         ConfigId::intern(&options)
     }
 }
 
-impl BuildOptions {
-    /// The options Bazel uses by default on this machine, targeting the host.
-    pub fn host_default(host_platform: Label) -> BuildOptions {
-        BuildOptions {
-            compilation_mode: "fastbuild".to_string(),
-            cpu: host_cpu().to_string(),
-            platform: host_platform,
-            host_platform,
-            is_exec: false,
-            defines: Vec::new(),
-            values: Vec::new(),
-            starlark_flags: Vec::new(),
-            action_env: Vec::new(),
-        }
-    }
-}
-
-/// The defaults of the native options `config_setting`s commonly match on,
-/// for configurations that don't set them.
-const OPTION_DEFAULTS: &[(&str, &str)] = &[
-    ("apple_platform_type", "macos"),
-    ("cpu", ""),
-    ("host_cpu", ""),
-    ("crosstool_top", "@bazel_tools//tools/cpp:toolchain"),
-    ("collect_code_coverage", "false"),
-    ("stamp", "false"),
-    ("compiler", ""),
-    ("dynamic_mode", "default"),
-    ("fission", "no"),
-    ("force_pic", "false"),
-    ("incompatible_enable_cc_toolchain_resolution", "true"),
-    ("java_runtime_version", "local_jdk"),
-    ("ios_multi_cpus", ""),
-    ("macos_cpus", ""),
-    ("experimental_platform_in_output_dir", "false"),
-    ("strict_proto_deps", "error"),
-    ("strict_public_imports", "off"),
-    ("experimental_proto_descriptor_sets_include_source_info", "false"),
-    ("proto_compiler", "@bazel_tools//tools/proto:protoc"),
-];
-
-/// The default value of a native option.
-pub fn option_default(name: &str) -> Option<&'static str> {
-    OPTION_DEFAULTS.iter().find(|(option, _)| *option == name).map(|(_, value)| *value)
-}
+/// The platform tools run on when `--host_platform` doesn't say.
+static DEFAULT_HOST_PLATFORM: LazyLock<Label> = LazyLock::new(|| Label::parse_canonical("@@platforms//host:host").expect("a canonical label"));
 
 /// This machine's CPU, as Bazel's `--cpu` names it.
 pub fn host_cpu() -> &'static str {
@@ -208,7 +156,11 @@ mod tests {
     use super::*;
 
     fn options() -> BuildOptions {
-        BuildOptions::host_default(Label::parse_canonical("@@platforms//host").unwrap())
+        BuildOptions::default()
+    }
+
+    fn parse_label(text: &str) -> Result<Label, String> {
+        Label::parse_canonical(text).map_err(|error| error.to_string())
     }
 
     #[test]
@@ -224,9 +176,88 @@ mod tests {
     fn exec_configurations_are_optimised_and_named_apart() {
         let target = ConfigId::intern(&options()).get();
         let exec = target.exec().get();
-        assert!(exec.options.is_exec);
-        assert_eq!(exec.value("compilation_mode"), Some("opt"));
+        assert!(exec.is_exec);
+        assert_eq!(exec.compilation_mode, "opt");
+        assert_eq!(exec.platform, target.host_platform);
         assert!(exec.output_directory.starts_with(&format!("{}-opt-exec-ST-", host_cpu())));
         assert_eq!(exec.exec(), target.exec());
+    }
+
+    #[test]
+    fn native_options_are_sorted_and_their_defaults_parse() {
+        let names: Vec<&str> = NATIVE_OPTIONS.iter().map(|option| option.name).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+        let options = options();
+        for option in NATIVE_OPTIONS {
+            assert!(options.get(option.name).is_ok(), "{}", option.name);
+        }
+    }
+
+    #[test]
+    fn options_given_their_defaults_are_unchanged() {
+        let mut options = options();
+        options.apply("compilation_mode", "fastbuild", &parse_label).unwrap();
+        options.apply("stamp", "false", &parse_label).unwrap();
+        assert_eq!(options, BuildOptions::default());
+        options.apply("compilation_mode", "opt", &parse_label).unwrap();
+        assert_eq!(options.changed().len(), 1);
+    }
+
+    #[test]
+    fn options_parse_by_type() {
+        let mut options = options();
+        options.apply("copt", "-O2", &parse_label).unwrap();
+        options.apply("copt", "-g", &parse_label).unwrap();
+        options.apply("define", "b=1", &parse_label).unwrap();
+        options.apply("define", "a=2", &parse_label).unwrap();
+        options.apply("define", "b=3", &parse_label).unwrap();
+        options.apply("platforms", "@@a//:x,@@b//:y", &parse_label).unwrap();
+        options.apply("platforms", "@@c//:z", &parse_label).unwrap();
+        options.apply("extra_toolchains", "@@a//:t1,@@a//:t2", &parse_label).unwrap();
+        options.apply("extra_toolchains", "@@a//:t3", &parse_label).unwrap();
+        assert_eq!(options.strings("copt"), ["-O2", "-g"]);
+        assert_eq!(options.define("b"), Some("3"));
+        assert_eq!(options.get("define").unwrap(), &OptionValue::Assignments(vec![("a".into(), "2".into()), ("b".into(), "3".into())]));
+        assert_eq!(options.labels("platforms"), [Label::parse_canonical("@@c//:z").unwrap()]);
+        assert_eq!(options.strings("extra_toolchains"), ["@@a//:t1", "@@a//:t2", "@@a//:t3"]);
+    }
+
+    #[test]
+    fn bad_values_are_errors_as_bazel_words_them() {
+        let mut options = options();
+        let error = options.apply("compilation_mode", "fast", &parse_label).unwrap_err();
+        assert_eq!(error.to_string(), "While parsing option --compilation_mode=fast: Not a valid compilation mode: 'fast' (should be fastbuild, dbg or opt)");
+        let error = options.apply("define", "a", &parse_label).unwrap_err();
+        assert_eq!(error.to_string(), "While parsing option --define=a: Variable definitions must be in the form of a 'name=value' assignment");
+        let error = options.apply("strict_proto_deps", "bogus", &parse_label).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "While parsing option --strict_proto_deps=bogus: Not a valid strict dependency checking level: 'bogus' (should be off, warn, error, strict or default)"
+        );
+        let error = options.apply("stamp", "maybe", &parse_label).unwrap_err();
+        assert_eq!(error.to_string(), "While parsing option --stamp=maybe: 'maybe' is not a boolean");
+        options.apply("compilation_mode", "OPT", &parse_label).unwrap();
+        assert_eq!(options.string("compilation_mode"), "opt");
+        assert!(matches!(options.apply("nosuch", "1", &parse_label), Err(OptionError::Unknown(_))));
+    }
+
+    #[test]
+    fn config_settings_match_as_bazels_do() {
+        let mut options = options();
+        options.apply("copt", "-O2", &parse_label).unwrap();
+        options.apply("copt", "-g", &parse_label).unwrap();
+        options.apply("define", "mode=fast", &parse_label).unwrap();
+        assert!(options.matches("copt", "-g", &parse_label).unwrap());
+        assert!(!options.matches("copt", "-O3", &parse_label).unwrap());
+        assert!(options.matches("define", "mode=fast", &parse_label).unwrap());
+        assert!(!options.matches("define", "mode=slow", &parse_label).unwrap());
+        assert!(options.matches("stamp", "0", &parse_label).unwrap());
+        assert!(options.matches("experimental_platform_in_output_dir", "auto", &parse_label).unwrap());
+        assert!(!options.matches("experimental_platform_in_output_dir", "false", &parse_label).unwrap());
+        assert!(options.matches("conlyopt", "", &parse_label).is_ok_and(|matched| !matched));
+        assert!(!options.matches("compiler", "gcc", &parse_label).unwrap());
+        assert!(options.matches("nosuch", "1", &parse_label).is_err());
     }
 }

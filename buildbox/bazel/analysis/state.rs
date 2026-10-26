@@ -7,7 +7,7 @@ use crate::expand::LocationStyle;
 use crate::runfiles::Runfiles;
 use crate::inputs::InputSets;
 use crate::shared::Sharing;
-use bazel_config::BuildConfiguration;
+use bazel_config::{BuildConfiguration, OptionValue};
 use bazel_label::{Label, LabelContext, RepoMappingTable};
 use bazel_starlark::EvalContext;
 use intern::PathId;
@@ -223,11 +223,13 @@ pub fn runfiles_tree(executable: Artifact, runfiles: &Runfiles<'_>) -> Arc<Runfi
 fn default_make_variables(config: &BuildConfiguration) -> Vec<(String, String)> {
     let bin_dir = config.bin_dir();
     let mut variables = vec![
-        ("COMPILATION_MODE".to_string(), config.options.compilation_mode.clone()),
+        ("COMPILATION_MODE".to_string(), config.compilation_mode.clone()),
         ("BINDIR".to_string(), bin_dir.clone()),
         ("GENDIR".to_string(), bin_dir),
-        ("TARGET_CPU".to_string(), config.options.cpu.clone()),
+        ("TARGET_CPU".to_string(), config.cpu.clone()),
     ];
-    variables.extend(config.options.defines.iter().cloned());
+    if let Ok(OptionValue::Assignments(defines)) = config.options.get("define") {
+        variables.extend(defines.iter().cloned());
+    }
     variables
 }

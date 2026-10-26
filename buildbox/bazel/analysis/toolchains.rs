@@ -216,9 +216,9 @@ impl Key for ToolchainResolutionKey {
     async fn compute(&self, ctx: &Ctx) -> Result<ToolchainResolution, SkyError> {
         let config = self.config.get();
         let registered = ctx.compute(&RegisteredToolchainsKey).await?;
-        let target = ctx.compute(&PlatformKey(config.options.platform)).await?;
+        let target = ctx.compute(&PlatformKey(config.platform)).await?;
         let mut platforms = registered.execution_platforms.clone();
-        platforms.push(config.options.host_platform);
+        platforms.push(config.host_platform);
         for platform in platforms {
             let exec = ctx.compute(&PlatformKey(platform)).await?;
             if let Some(toolchains) = self.resolve_for(ctx, &registered, &target, &exec).await? {

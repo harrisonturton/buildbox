@@ -301,7 +301,7 @@ fn construct_cc_info<'v>(args: &Arguments<'v, '_>, eval: &mut Evaluator<'v, '_, 
 /// asks for: the compilation mode's, such as `opt`.
 fn implicit_features(eval: &Evaluator<'_, '_, '_>) -> Vec<String> {
     match RuleState::get(eval) {
-        Ok(state) => vec![state.config.options.compilation_mode.clone()],
+        Ok(state) => vec![state.config.compilation_mode.clone()],
         Err(_) => Vec::new(),
     }
 }

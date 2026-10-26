@@ -207,7 +207,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         return incompatible(ctx, key, class_ref.kind, class.test, reason);
     }
     let config = key.config.get();
-    let platform = ctx.compute(&PlatformKey(config.options.platform)).await?;
+    let platform = ctx.compute(&PlatformKey(config.platform)).await?;
     let toolchains = toolchains::resolve(ctx, &class, &config).await?;
     let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
     let mappings = match &implementation {

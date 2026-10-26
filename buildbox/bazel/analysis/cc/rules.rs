@@ -145,7 +145,7 @@ fn resolved_toolchain<'v>(input: &RuleInput, heap: Heap<'v>) -> anyhow::Result<&
 /// The features a C++ rule enables: its `features` attribute and the
 /// compilation mode's.
 fn configure(input: &RuleInput, toolchain: &CcToolchain<'_>) -> anyhow::Result<Arc<FeatureConfiguration>> {
-    let mut requested = vec![input.config.options.compilation_mode.clone()];
+    let mut requested = vec![input.config.compilation_mode.clone()];
     let mut unsupported = Vec::new();
     if let Some(AttrValue::StringList(features)) = input.attr("features") {
         for feature in features {
@@ -371,10 +371,7 @@ fn dedup(values: Vec<String>) -> Vec<String> {
 
 /// `--copt`, and so on, from the configuration.
 fn config_copts(input: &RuleInput) -> Vec<String> {
-    match input.config.value("copt") {
-        Some(copts) => copts.split(' ').filter(|copt| !copt.is_empty()).map(str::to_string).collect(),
-        None => Vec::new(),
-    }
+    input.config.options.strings("copt").to_vec()
 }
 
 fn expand(state: &RuleState, text: &str) -> anyhow::Result<String> {
@@ -609,7 +606,7 @@ fn link_executable(
         is_using_linker: true,
         is_linking_dynamic_library: false,
         // `--strip=sometimes`, the default, strips fastbuild binaries.
-        must_keep_debug: input.config.options.compilation_mode != "fastbuild",
+        must_keep_debug: input.config.compilation_mode != "fastbuild",
         libraries_to_link: Some(libraries.variables),
     };
     let variables = link.variables(&toolchain.config);
@@ -636,9 +633,7 @@ fn linkopts(input: &RuleInput, state: &RuleState) -> anyhow::Result<Vec<String>>
     for linkopt in string_list(input, "linkopts") {
         flags.extend(shell_split(&expand(state, &linkopt)?));
     }
-    if let Some(config) = input.config.value("linkopt") {
-        flags.extend(config.split(' ').filter(|flag| !flag.is_empty()).map(str::to_string));
-    }
+    flags.extend(input.config.options.strings("linkopt").iter().cloned());
     Ok(flags)
 }
 

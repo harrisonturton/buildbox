@@ -2,8 +2,8 @@
 //! rules read.
 
 use allocative::Allocative;
+use bazel_config::BuildOptions;
 use bazel_starlark::opaque::Opaque;
-use skycodec::{Decode, Encode};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
@@ -12,29 +12,12 @@ use starlark::values::list::AllocList;
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Value, ValueLike, starlark_value};
 use std::fmt;
 
-/// What rules read of the configuration, by option.
-#[derive(Debug, Clone, Default, Encode, Decode)]
-pub struct Options {
-    pub compilation_mode: String,
-    pub action_env: Vec<(String, String)>,
-    /// Each option `config_setting(values = ...)` matches, such as `copt`.
-    pub values: Vec<(String, String)>,
-    pub is_exec: bool,
-}
-
-impl Options {
-    fn words(&self, option: &str) -> Vec<String> {
-        let value = self.values.iter().find(|(name, _)| name == option).map(|(_, value)| value.as_str()).unwrap_or_default();
-        value.split(' ').filter(|word| !word.is_empty()).map(str::to_string).collect()
-    }
-}
-
 /// `ctx.fragments`.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct Fragments(
     #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
     #[allocative(skip)]
-    pub Options,
+    pub BuildOptions,
 );
 
 starlark_simple_value!(Fragments);
@@ -66,7 +49,7 @@ pub struct Fragment {
     pub name: String,
     #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
     #[allocative(skip)]
-    pub options: Options,
+    pub options: BuildOptions,
 }
 
 starlark_simple_value!(Fragment);
@@ -85,7 +68,7 @@ impl<'v> StarlarkValue<'v> for Fragment {
     }
 
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
-        let words = |option: &str| heap.alloc(AllocList(self.options.words(option)));
+        let words = |option: &str| heap.alloc(AllocList(self.options.strings(option)));
         let value = match (self.name.as_str(), attribute) {
             ("cpp", "copts") => words("copt"),
             ("cpp", "cxxopts") => words("cxxopt"),
@@ -117,7 +100,7 @@ fn fragment_methods(builder: &mut MethodsBuilder) {
     /// `cpp.compilation_mode()`: `fastbuild`, `dbg` or `opt`.
     fn compilation_mode<'v>(this: Value<'v>) -> anyhow::Result<String> {
         let fragment = this.downcast_ref::<Fragment>().ok_or_else(|| anyhow::anyhow!("expected a fragment"))?;
-        Ok(fragment.options.compilation_mode.clone())
+        Ok(fragment.options.string("compilation_mode").to_string())
     }
 
     /// `cpp.dynamic_mode()`: `--dynamic_mode`, as Bazel's enum names it.
@@ -312,7 +295,7 @@ fn fragment_methods(builder: &mut MethodsBuilder) {
 
     fn should_strip_binaries<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         let fragment = this.downcast_ref::<Fragment>().ok_or_else(|| anyhow::anyhow!("expected a fragment"))?;
-        Ok(fragment.options.compilation_mode == "fastbuild")
+        Ok(fragment.options.string("compilation_mode") == "fastbuild")
     }
 }
 
@@ -321,7 +304,7 @@ fn fragment_methods(builder: &mut MethodsBuilder) {
 pub struct Configuration(
     #[starlark_pagable(serialize_with = "bazel_starlark::paging::serialize_encoded", deserialize_with = "bazel_starlark::paging::deserialize_encoded")]
     #[allocative(skip)]
-    pub Options,
+    pub BuildOptions,
 );
 
 starlark_simple_value!(Configuration);
@@ -374,12 +357,12 @@ fn configuration_methods(builder: &mut MethodsBuilder) {
 
     fn stamp_binaries<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         let configuration = this.downcast_ref::<Configuration>().ok_or_else(|| anyhow::anyhow!("expected a configuration"))?;
-        Ok(configuration.0.values.iter().any(|(name, value)| name == "stamp" && value == "true"))
+        Ok(configuration.0.bool("stamp"))
     }
 
     fn is_tool_configuration<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         let configuration = this.downcast_ref::<Configuration>().ok_or_else(|| anyhow::anyhow!("expected a configuration"))?;
-        Ok(configuration.0.is_exec)
+        Ok(configuration.0.bool("is exec configuration"))
     }
 
     fn runfiles_enabled<'v>(this: Value<'v>) -> anyhow::Result<bool> {

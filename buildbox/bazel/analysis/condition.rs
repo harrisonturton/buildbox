@@ -2,9 +2,9 @@
 
 use crate::attrs::resolve_value;
 use crate::platform::{ConstraintValueKey, PlatformKey, labels};
-use bazel_config::{BuildConfiguration, ConfigId};
-use bazel_label::Label;
-use bazel_loading::PackageKey;
+use bazel_config::{BuildConfiguration, ConfigId, OptionError};
+use bazel_label::{Label, LabelContext};
+use bazel_loading::{PackageKey, RepoMappingKey};
 use bazel_packages::{AttrValue, Rule, Target};
 use intern::Symbol;
 use skycodec::{Decode, Encode};
@@ -40,7 +40,7 @@ impl Key for ConditionKey {
         let kind = package.0.rule_class(rule).kind;
         match kind.as_str() {
             "alias" => self.alias(ctx, rule).await,
-            "config_setting" => config_setting(ctx, rule, &self.config.get()).await,
+            "config_setting" => config_setting(ctx, self.label, rule, &self.config.get()).await,
             "constraint_value" => {
                 let matches = target_platform_has(ctx, &self.config.get(), self.label).await?;
                 Ok(Condition { matches, specificity: 1 })
@@ -68,7 +68,7 @@ impl ConditionKey {
 }
 
 pub(crate) async fn target_platform_has(ctx: &Ctx, config: &BuildConfiguration, value: Label) -> Result<bool, SkyError> {
-    let platform = ctx.compute(&PlatformKey(config.options.platform)).await?;
+    let platform = ctx.compute(&PlatformKey(config.platform)).await?;
     let value = ctx.compute(&ConstraintValueKey(value)).await?;
     Ok(platform.has(&value))
 }
@@ -80,7 +80,7 @@ fn string_dict(rule: &Rule, attr: &str) -> Vec<(String, String)> {
     }
 }
 
-async fn config_setting(ctx: &Ctx, rule: &Rule, config: &BuildConfiguration) -> Result<Condition, SkyError> {
+async fn config_setting(ctx: &Ctx, label: Label, rule: &Rule, config: &BuildConfiguration) -> Result<Condition, SkyError> {
     let values = string_dict(rule, "values");
     let defines = string_dict(rule, "define_values");
     let flags = match rule.attr(Symbol::intern("flag_values")) {
@@ -90,8 +90,8 @@ async fn config_setting(ctx: &Ctx, rule: &Rule, config: &BuildConfiguration) -> 
     let constraints = labels(rule, "constraint_values");
     let specificity = (values.len() + defines.len() + flags.len() + constraints.len()) as u32;
 
-    let mut matches = values.iter().all(|(option, value)| option_matches(config, option, value));
-    matches &= defines.iter().all(|(name, value)| config.define(name) == Some(value.as_str()));
+    let mut matches = values_match(ctx, label, config, &values).await?;
+    matches &= defines.iter().all(|(name, value)| config.options.define(name) == Some(value.as_str()));
     for (flag, expected) in &flags {
         if !matches {
             break;
@@ -107,19 +107,32 @@ async fn config_setting(ctx: &Ctx, rule: &Rule, config: &BuildConfiguration) -> 
     Ok(Condition { matches, specificity })
 }
 
-/// Whether a native option has a value, as `config_setting(values = ...)`
-/// asks. `define` matches one `--define`.
-fn option_matches(config: &BuildConfiguration, option: &str, expected: &str) -> bool {
-    if option == "define" {
-        let Some((name, value)) = expected.split_once('=') else {
-            return false;
-        };
-        return config.define(name) == Some(value);
+/// Whether the native options have the values `config_setting(values =
+/// ...)` gives. Labels in the values are relative to the `config_setting`.
+async fn values_match(ctx: &Ctx, label: Label, config: &BuildConfiguration, values: &[(String, String)]) -> Result<bool, SkyError> {
+    if values.is_empty() {
+        return Ok(true);
     }
-    match config.value(option) {
-        Some(actual) => same_option_value(actual, expected),
-        None => bazel_config::option_default(option).is_some_and(|default| same_option_value(default, expected)),
+    let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
+    let parse_label = |text: &str| {
+        let context = LabelContext::new(label.package, &mapping.0);
+        Label::parse(text, &context).map_err(|error| error.to_string())
+    };
+    for (option, expected) in values {
+        let matches = config.options.matches(option, expected, &parse_label).map_err(|error| values_error(label, error))?;
+        if !matches {
+            return Ok(false);
+        }
     }
+    Ok(true)
+}
+
+fn values_error(label: Label, error: OptionError) -> SkyError {
+    let problem = match error {
+        OptionError::Unknown(option) => format!("bb doesn't support matching the option '--{option}' yet"),
+        OptionError::Invalid(message) => message,
+    };
+    SkyError::new(format!("in values attribute of config_setting rule {label}: error while parsing configuration settings: {problem}"))
 }
 
 /// Option values compare as booleans when both are, so `1` matches `true`.
