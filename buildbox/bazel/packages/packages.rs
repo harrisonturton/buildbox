@@ -110,6 +110,17 @@ pub struct PackageGroup {
     pub includes: Vec<Label>,
 }
 
+/// A label of a target's visibility as Bazel keeps it:
+/// `//visibility:public` and `//visibility:private` mean the same in any
+/// repository, so they're kept as the main repository's.
+pub fn visibility_label(label: Label) -> Label {
+    let constant = label.package.path.to_string() == "visibility" && matches!(label.name.as_str(), "public" | "private");
+    match constant {
+        true => PackageId::new(bazel_label::RepoName::MAIN, label.package.path).label(label.name),
+        false => label,
+    }
+}
+
 impl Package {
     pub fn target(&self, name: Symbol) -> Option<&Target> {
         let index = self.targets.binary_search_by(|target| target.name().cmp(&name)).ok()?;

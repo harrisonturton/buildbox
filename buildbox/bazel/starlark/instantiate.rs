@@ -73,6 +73,9 @@ fn rule<'v>(
             continue;
         }
         match attribute(schema, attr, *value, parser, name) {
+            Ok((symbol, AttrValue::LabelList(labels))) if *attr == "visibility" => {
+                attrs.push((symbol, AttrValue::LabelList(labels.into_iter().map(bazel_packages::visibility_label).collect())));
+            }
             Ok(converted) => attrs.push(converted),
             Err(error) => errors.push(error),
         }

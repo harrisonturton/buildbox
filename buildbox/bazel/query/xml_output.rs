@@ -143,7 +143,7 @@ async fn rule_element<C: Compute>(universe: &Universe<C>, target: &TargetRef, op
             element.children.push(tests);
         }
     }
-    for dep in universe.deps_of(target).await? {
+    for dep in universe.rule_inputs(target).await? {
         element.children.push(Element::new("rule-input").with("name", display_label(dep, mapping)));
     }
     for output in &rule.outputs {

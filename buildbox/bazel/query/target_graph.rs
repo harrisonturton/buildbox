@@ -193,8 +193,10 @@ pub(crate) fn visibility_of(target: &TargetRef) -> Vec<Label> {
     }
 }
 
-/// The attributes Bazel gives a rule a macro created: the macro's name,
-/// its function, and where the BUILD file called it.
+/// The attributes Bazel gives a rule a macro created: the `name` the
+/// BUILD file gave the macro, or the rule's own, the macro's function, and
+/// where the BUILD file called it, from where the package's path first
+/// appears in that file's path, as Bazel cuts it.
 pub(crate) async fn generator_attrs<C: Compute>(universe: &Universe<C>, target: &TargetRef, rule: &bazel_packages::Rule) -> Result<Option<[(&'static str, String); 3]>, QueryError> {
     let Some(generator) = &rule.generator else {
         return Ok(None);
@@ -204,7 +206,12 @@ pub(crate) async fn generator_attrs<C: Compute>(universe: &Universe<C>, target: 
         true => rule.name.to_string(),
         false => generator.name.to_string(),
     };
-    let location = format!("{}:{}:{}", build_file.display(), generator.location.line, generator.location.column);
+    let absolute = format!("{}:{}:{}", build_file.display(), generator.location.line, generator.location.column);
+    let package = target.package().id.path.to_string();
+    let location = match absolute.find(&package) {
+        Some(start) => absolute[start..].to_string(),
+        None => String::new(),
+    };
     Ok(Some([("generator_name", name), ("generator_function", generator.function.to_string()), ("generator_location", location)]))
 }
 
@@ -269,19 +276,27 @@ fn spec_contains(spec: &str, repo: RepoName, package: PackageId) -> bool {
     }
 }
 
-/// The BUILD files of the packages of `targets`, if `include_build_files`,
-/// and the `.bzl` files they load, directly or not.
+/// The `.bzl` files the packages of `targets` load, directly or not, and
+/// for `buildfiles()`, the BUILD files of those packages and of the
+/// packages of the `.bzl` files.
 async fn build_files<C: Compute>(universe: &Universe<C>, targets: NodeSet<Label>, include_build_files: bool) -> Result<NodeSet<Label>, QueryError> {
     let mut files = NodeSet::new();
-    let mut seen = BTreeSet::new();
+    let mut loads = BTreeSet::new();
     for package in targets.iter().map(|label| label.package).collect::<BTreeSet<_>>() {
         let loaded = universe.package(package).await?;
         if include_build_files {
             files.insert(loaded.0.build_file);
         }
-        universe.loaded_files(loaded.0.loads.clone(), &mut seen).await?;
+        universe.loaded_files(loaded.0.loads.clone(), &mut loads).await?;
     }
-    files.extend(seen);
+    if include_build_files {
+        for package in loads.iter().map(|label| label.package).collect::<BTreeSet<_>>() {
+            if let Ok(loaded) = universe.package(package).await {
+                files.insert(loaded.0.build_file);
+            }
+        }
+    }
+    files.extend(loads);
     Ok(files)
 }
 

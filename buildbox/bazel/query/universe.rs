@@ -493,8 +493,27 @@ impl<C: Compute> Universe<C> {
         Ok(loaded)
     }
 
-    /// The labels a target depends on directly.
+    /// The labels a target depends on directly: what
+    /// [`Universe::rule_inputs`] gives, the package groups its visibility
+    /// names, and with implicit dependencies, the toolchain types a rule
+    /// resolves.
     pub async fn deps_of(&self, target: &TargetRef) -> Result<Vec<Label>, QueryError> {
+        let mut deps = self.rule_inputs(target).await?;
+        if !matches!(target.target(), Target::OutputFile { .. }) {
+            deps.extend(crate::target_graph::visibility_dependencies(target));
+        }
+        if let (Target::Rule(rule), true) = (target.target(), self.options.implicit_deps) {
+            let class = self.rule_class(target.package().rule_class(rule)).await?;
+            deps.extend(class.toolchain_types.iter().copied());
+        }
+        deps.sort();
+        deps.dedup();
+        Ok(deps)
+    }
+
+    /// What a target's attributes name, as `--output=xml` and
+    /// `--output=proto` list its inputs.
+    pub async fn rule_inputs(&self, target: &TargetRef) -> Result<Vec<Label>, QueryError> {
         match target.target() {
             Target::Rule(rule) => {
                 let class = self.rule_class(target.package().rule_class(rule)).await?;
@@ -503,13 +522,12 @@ impl<C: Compute> Universe<C> {
                 if class.kind.as_str() == "test_suite" {
                     deps.extend(target.package().implicit_tests(rule));
                 }
-                deps.extend(crate::target_graph::visibility_dependencies(target));
                 deps.sort();
                 deps.dedup();
                 Ok(deps)
             }
             Target::OutputFile { rule, .. } => Ok(vec![target.package().label(*rule)]),
-            Target::SourceFile(_) => Ok(crate::target_graph::visibility_dependencies(target)),
+            Target::SourceFile(_) => Ok(Vec::new()),
             Target::PackageGroup(group) => Ok(group.includes.clone()),
         }
     }
@@ -628,7 +646,6 @@ pub fn rule_deps(rule: &Rule, class: &RuleClass, options: &QueryOptions) -> Vec<
             value.labels(&mut labels);
         }
     }
-    labels.extend(class.toolchain_types.iter().copied());
     let mut conditions = Vec::new();
     for (_, value) in &rule.attrs {
         value.conditions(&mut conditions);
@@ -672,8 +689,12 @@ fn follows(attr: &AttrSchema, options: &QueryOptions) -> bool {
     if !attr.is_dependency || attr.name.as_str() == "visibility" {
         return false;
     }
-    options.tool_deps || attr.cfg != Cfg::Exec
+    options.tool_deps || (attr.cfg != Cfg::Exec && !CONSTRAINT_ATTRS.contains(&attr.name.as_str()))
 }
+
+/// The attributes Bazel marks as tools, which `--notool_deps` doesn't
+/// follow: they name constraints to check rather than dependencies.
+const CONSTRAINT_ATTRS: [&str; 3] = ["target_compatible_with", "exec_compatible_with", "exec_group_compatible_with"];
 
 fn default_labels(attr: &AttrSchema, labels: &mut Vec<Label>) {
     match &attr.default {

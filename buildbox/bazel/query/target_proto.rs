@@ -81,7 +81,7 @@ async fn rule_message<C: Compute>(universe: &Universe<C>, target: &TargetRef, va
     for (_, attribute) in attributes {
         message.repeated(4, "attribute", attribute);
     }
-    let inputs = universe.deps_of(target).await?;
+    let inputs = universe.rule_inputs(target).await?;
     message.strings(5, "rule_input", inputs.into_iter().map(|input| display_label(input, mapping)));
     message.strings(6, "rule_output", rule.outputs.iter().map(|output| display_label(package.label(*output), mapping)));
     message.strings(7, "default_setting", package.args.features.iter().cloned());

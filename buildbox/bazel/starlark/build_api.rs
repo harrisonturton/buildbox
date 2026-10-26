@@ -3,7 +3,7 @@
 
 use crate::context::EvalContext;
 use crate::convert::{self, LabelParser};
-use bazel_packages::{PackageGroup, Target};
+use bazel_packages::{PackageGroup, Target, visibility_label};
 use intern::Symbol;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
@@ -52,7 +52,7 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
         };
         for (name, value) in kwargs {
             match name.as_str() {
-                "default_visibility" => builder.args.default_visibility = labels(value, &parser)?,
+                "default_visibility" => builder.args.default_visibility = labels(value, &parser)?.into_iter().map(visibility_label).collect(),
                 "default_testonly" => builder.args.default_testonly = value.to_bool(),
                 "default_deprecation" => builder.args.default_deprecation = value.unpack_str().map(str::to_string),
                 "features" => builder.args.features = convert::strings(value).unwrap_or_default(),
@@ -83,7 +83,7 @@ pub(crate) fn build_functions(builder: &mut GlobalsBuilder) {
             mapping: &*mapping,
         };
         let visibility = match visibility.filter(|v| !v.is_none()) {
-            Some(visibility) => Some(labels(visibility, &parser)?),
+            Some(visibility) => Some(labels(visibility, &parser)?.into_iter().map(visibility_label).collect()),
             None => None,
         };
         let Some(srcs) = convert::strings(srcs) else {
