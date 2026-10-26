@@ -42,7 +42,7 @@ pub fn build_spec() -> OptionSpec {
         ("output_groups", Multi),
         ("build_tests_only", Bool),
         ("verbose_failures", Bool),
-        ("jobs", Value),
+        ("jobs", Jobs),
         ("test_output", Value),
         ("test_filter", Value),
         ("test_arg", Multi),
@@ -185,7 +185,9 @@ pub async fn run_command(
     testing: bool,
     out: &Output,
 ) -> Result<Built, i32> {
-    let tracker = context.server.workspaces().get(&context.workspace_root).progress.track();
+    let workspace = context.server.workspaces().get(&context.workspace_root);
+    workspace.jobs.set(options.get("jobs").and_then(|jobs| jobs.parse().ok()));
+    let tracker = workspace.progress.track();
     out.track(tracker).await;
     let exec_root = crate::commands::output_base_for(context.server, &context.workspace_root).join("execroot/_main");
     out.set_exec_root(exec_root).await;

@@ -72,6 +72,7 @@ impl Key for TestKey {
         let backend = ctx.global::<Backend>()?;
         let test = TestSpec::of(ctx, self.0).await?;
         let request = test.request(ctx).await?;
+        let _turn = crate::jobs::job_turn(ctx).await?;
         let shown = progress(ctx).map(|progress| progress.action_started(test_progress_id(self), Vec::new(), format!("Testing {}", self.0.label)));
         if let Some(shown) = &shown {
             shown.running(backend.runners.run);

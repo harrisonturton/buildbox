@@ -123,6 +123,7 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
         Err(NotReady::Failed(error)) => return Err(error),
     };
     let shown = progress(ctx).map(|progress| progress.action_started(action_key.progress_id(), generated_by, description(action, owner)));
+    let _turn = crate::jobs::job_turn(ctx).await?;
     let _staged = backend.stage().await?;
     if let Some(shown) = &shown {
         shown.running(backend.runners.run);

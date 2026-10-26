@@ -10,6 +10,7 @@ rust_library(
         "digest.rs",
         "execution.rs",
         "inputs.rs",
+        "jobs.rs",
         "materialize.rs",
         "source.rs",
         "spawn.rs",

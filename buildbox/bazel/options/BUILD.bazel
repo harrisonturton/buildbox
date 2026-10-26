@@ -5,6 +5,7 @@ package(default_visibility = ["//visibility:private"])
 rust_library(
     name = "options",
     srcs = [
+        "jobs.rs",
         "options.rs",
         "rc.rs",
         "tests.rs",

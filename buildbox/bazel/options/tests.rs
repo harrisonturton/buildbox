@@ -11,7 +11,35 @@ fn spec() -> OptionSpec {
         ("output", OptionKind::Value),
         ("copt", OptionKind::Multi),
         ("ui_actions_shown", OptionKind::Int),
+        ("jobs", OptionKind::Jobs),
     ])
+}
+
+#[test]
+fn jobs_are_recorded_as_a_count() {
+    let rc = RcFile::default();
+    let parsed = parse(&args("--jobs=4 //foo"), &spec(), &rc, "build").unwrap();
+    assert_eq!(parsed.get("jobs"), Some("4"));
+    let parsed = parse(&args("-j 6000 //foo"), &spec(), &rc, "build").unwrap();
+    assert_eq!(parsed.get("jobs"), Some("5000"));
+    assert_eq!(parsed.residue, ["//foo"]);
+}
+
+#[test]
+fn jobs_errors_name_the_option_as_given() {
+    let rc = RcFile::default();
+    for (given, spelled) in [("--jobs=0", "--jobs=0"), ("--jobs 0", "--jobs 0"), ("-j 0", "-j 0")] {
+        let error = parse(&args(given), &spec(), &rc, "build").unwrap_err();
+        assert_eq!(error.to_string(), format!("While parsing option {spelled}: Value '(0)' must be at least 1."));
+    }
+}
+
+#[test]
+fn j_is_a_target_where_jobs_isnt_an_option() {
+    let rc = RcFile::default();
+    let spec = OptionSpec::new(&[("output", OptionKind::Value)]);
+    let parsed = parse(&args("-j 4"), &spec, &rc, "query").unwrap();
+    assert_eq!(parsed.residue, ["-j", "4"]);
 }
 
 #[test]

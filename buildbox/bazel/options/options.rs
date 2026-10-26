@@ -2,8 +2,10 @@
 //! `.bazelrc` files and the command line, and the residue (target patterns
 //! or a query).
 
+mod jobs;
 mod rc;
 
+pub use jobs::{MAX_JOBS, convert_jobs};
 pub use rc::{RcFile, RcError, parse_rc_files};
 
 use std::collections::HashMap;
@@ -19,6 +21,9 @@ pub enum OptionKind {
     Int,
     /// `--flag=value` or `--flag value`, which may be given many times.
     Multi,
+    /// A count of jobs, as `--jobs` takes it: an integer or a keyword such
+    /// as `HOST_CPUS*.5`. It's recorded as the count it comes to.
+    Jobs,
 }
 
 /// The options a command knows, and their kinds.
@@ -95,6 +100,9 @@ pub enum OptionsError {
     #[error("While parsing option --{name}={value}: '{value}' is not an int")]
     InvalidInt { name: String, value: String },
 
+    #[error("While parsing option {spelled}: {message}")]
+    InvalidValue { spelled: String, message: String },
+
     #[error("config value '{0}' is not defined in any .rc file")]
     UnknownConfig(String),
 
@@ -141,6 +149,12 @@ fn parse_into(
                 parsed.values.push(("keep_going".into(), "true".into()));
                 continue;
             }
+            if arg == "-j" && spec.kind("jobs") == Some(OptionKind::Jobs) {
+                let value = next_value(args, &mut index, "jobs")?;
+                let jobs = jobs_value(format!("-j {value}"), &value)?;
+                parsed.values.push(("jobs".into(), jobs));
+                continue;
+            }
             if arg == "-c" {
                 let value = next_value(args, &mut index, "compilation_mode")?;
                 parsed.values.push(("compilation_mode".into(), value));
@@ -177,10 +191,18 @@ fn parse_into(
                 parsed.values.push((name.to_string(), (value != negated).to_string()));
             }
             Some((name, kind, _)) => {
-                let value = match inline {
-                    Some(value) => value,
-                    None => next_value(args, &mut index, name)?,
+                let (value, spelled) = match inline {
+                    Some(value) => (value, arg.clone()),
+                    None => {
+                        let value = next_value(args, &mut index, name)?;
+                        let spelled = format!("{arg} {value}");
+                        (value, spelled)
+                    }
                 };
+                if kind == OptionKind::Jobs {
+                    parsed.values.push((name.to_string(), jobs_value(spelled, &value)?));
+                    continue;
+                }
                 if kind == OptionKind::Int && value.parse::<i64>().is_err() {
                     return Err(OptionsError::InvalidInt {
                         name: name.to_string(),
@@ -233,6 +255,15 @@ fn option_kind<'a>(spec: &OptionSpec, name: &'a str) -> Option<(&'a str, OptionK
     match spec.kind(stripped) {
         Some(OptionKind::Bool) => Some((stripped, OptionKind::Bool, true)),
         _ => None,
+    }
+}
+
+/// The count of jobs `value` comes to, as text, or the error naming the
+/// option as it was `spelled`.
+fn jobs_value(spelled: String, value: &str) -> Result<String, OptionsError> {
+    match convert_jobs(value) {
+        Ok(jobs) => Ok(jobs.to_string()),
+        Err(message) => Err(OptionsError::InvalidValue { spelled, message }),
     }
 }
 

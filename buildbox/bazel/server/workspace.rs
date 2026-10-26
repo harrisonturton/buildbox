@@ -2,7 +2,7 @@
 
 use crate::written::Written;
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
-use bazel_execution::SourceDigestKey;
+use bazel_execution::{Jobs, SourceDigestKey};
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
 use bazel_progress::Progress;
 use skyframe::{Engine, Globals, Graph};
@@ -37,6 +37,8 @@ pub struct Workspace {
     pub written: Arc<Written>,
     /// What the graph's evaluations are doing, for progress output.
     pub progress: Arc<Progress>,
+    /// How many actions builds' `--jobs` lets run at once.
+    pub jobs: Arc<Jobs>,
 }
 
 impl Workspace {
@@ -106,13 +108,15 @@ impl Workspaces {
         let changes = FileChanges::new();
         let client_env = ClientEnv::new();
         let progress = Progress::new();
+        let jobs = Arc::new(Jobs::default());
         let globals = self
             .services
             .clone()
             .with(bazel_fs::workspace(root))
             .with(changes.clone())
             .with(client_env.clone())
-            .with(progress.clone());
+            .with(progress.clone())
+            .with(jobs.clone());
         let workspace = Arc::new(Workspace {
             root: root.to_path_buf(),
             graph: self.engine.graph(globals),
@@ -120,6 +124,7 @@ impl Workspaces {
             client_env,
             written: Arc::default(),
             progress,
+            jobs,
         });
         workspaces.insert(root.to_path_buf(), workspace.clone());
         workspace
