@@ -25,6 +25,16 @@ impl Platform {
         }
     }
 
+    /// The name of its value of `@platforms//cpu:cpu`, which Bazel calls
+    /// `$(TARGET_CPU)`, or `""` if it has none.
+    pub fn cpu(&self) -> String {
+        let Ok(cpu) = Label::parse_canonical("@@platforms//cpu:cpu") else {
+            return String::new();
+        };
+        let value = self.constraints.iter().find(|(setting, _)| *setting == cpu).map(|(_, value)| value.name);
+        value.map(|name| name.to_string()).unwrap_or_default()
+    }
+
     pub fn values(&self) -> Vec<Label> {
         self.constraints.iter().map(|(_, value)| *value).collect()
     }

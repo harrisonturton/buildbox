@@ -6,7 +6,7 @@
 //! one dict for a transition to one configuration, or a dict of them, or a
 //! list, for a split into several.
 
-use bazel_config::{BuildOptions, ConfigId, LabelParser, NativeOption, OptionType, OptionValue};
+use bazel_config::{BuildConfiguration, BuildOptions, ConfigId, LabelParser, NativeOption, OptionType, OptionValue};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName};
 use crate::configured::ConfiguredTargetKey;
 use crate::settings::BuildSetting;
@@ -36,9 +36,9 @@ pub type AttrConfigs = Vec<(Symbol, Vec<(String, ConfigId)>)>;
 /// The configurations of the dependencies through an attribute: the
 /// execution platform's for tools, those its transition gives, or else the
 /// rule's own.
-pub fn dep_configs(cfg: Cfg, attr: Symbol, config: ConfigId, attr_configs: &AttrConfigs) -> Vec<(String, ConfigId)> {
+pub fn dep_configs(cfg: Cfg, attr: Symbol, config: ConfigId, exec_config: ConfigId, attr_configs: &AttrConfigs) -> Vec<(String, ConfigId)> {
     match cfg {
-        Cfg::Exec => vec![(String::new(), config.get().exec())],
+        Cfg::Exec => vec![(String::new(), exec_config)],
         Cfg::Transition => match attr_configs.iter().find(|(name, _)| *name == attr) {
             Some((_, configs)) => configs.clone(),
             None => vec![(String::new(), config)],
@@ -59,6 +59,28 @@ pub async fn attr_configs(ctx: &Ctx, rule: &OwnedFrozenValue, attrs: &[(Symbol, 
 
 /// The configurations transitions give, each named by what it's for.
 async fn transition_configs(ctx: &Ctx, transitions: &[(Symbol, OwnedFrozenValue)], attrs: &[(Symbol, AttrValue)], config: ConfigId) -> Result<AttrConfigs, SkyError> {
+    let (settings, mappings) = transitions_context(ctx, transitions).await?;
+    let options = config.get().options.clone();
+    let mut configs = Vec::with_capacity(transitions.len());
+    for (attr, transition) in transitions {
+        let input = OwnedInput {
+            config,
+            options: &options,
+            start: &options,
+            settings: &settings,
+            mappings: &mappings,
+        };
+        let applied = Module::with_temp_heap(|module| apply_owned(transition, &input, attrs, &module));
+        let applied = applied.map_err(|error| SkyError::new(format!("in {attr} attribute: {error}")))?;
+        let applied = applied.into_iter().map(|(key, options)| (key, ConfigId::intern(&options))).collect();
+        configs.push((*attr, applied));
+    }
+    Ok(configs)
+}
+
+/// The build settings transitions read or write, and how the repositories
+/// of the `.bzl` files that define them see others.
+async fn transitions_context(ctx: &Ctx, transitions: &[(Symbol, OwnedFrozenValue)]) -> Result<(Vec<BuildSetting>, HashMap<RepoName, Arc<RepoMappingTable>>), SkyError> {
     let (labels, repos) = transitions_use(transitions);
     let settings = build_settings(ctx, &labels).await?;
     let mut mappings = HashMap::new();
@@ -66,15 +88,73 @@ async fn transition_configs(ctx: &Ctx, transitions: &[(Symbol, OwnedFrozenValue)
         let mapping = ctx.compute(&RepoMappingKey(repo)).await?;
         mappings.insert(repo, Arc::new(mapping.0.clone()));
     }
-    let options = config.get().options.clone();
-    let mut configs = Vec::with_capacity(transitions.len());
-    for (attr, transition) in transitions {
-        let applied = Module::with_temp_heap(|module| apply_owned(transition, config, &options, &settings, &mappings, attrs, &module));
-        let applied = applied.map_err(|error| SkyError::new(format!("in {attr} attribute: {error}")))?;
-        let applied = applied.into_iter().map(|(key, options)| (key, ConfigId::intern(&options))).collect();
-        configs.push((*attr, applied));
+    Ok((settings, mappings))
+}
+
+/// The exec configuration of `config`: what tools of its targets are built
+/// in, to run on `platform`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct ExecConfigKey {
+    pub config: ConfigId,
+    pub platform: Label,
+}
+
+impl Key for ExecConfigKey {
+    type Value = TransitionedConfig;
+    const KIND: &'static str = "EXEC_CONFIGURATION";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<TransitionedConfig, SkyError> {
+        let builtins = ctx.compute(&bazel_loading::BuiltinsKey).await?;
+        let Some(transition) = builtins.exec_transition.clone() else {
+            return Ok(TransitionedConfig(self.config.get().exec(self.platform)));
+        };
+        let config = self.config.get();
+        let baseline = exec_baseline(ctx, &transition, &config).await?;
+        let mut options = exec_options(ctx, &transition, self.config, &config.options, self.platform).await?;
+        options.baseline = Some(baseline);
+        Ok(TransitionedConfig(ConfigId::intern(&options)))
     }
-    Ok(configs)
+}
+
+/// The exec configuration the directories of exec configurations are
+/// named against: the exec transition of the top-level configuration, for
+/// its host platform.
+async fn exec_baseline(ctx: &Ctx, transition: &OwnedFrozenValue, config: &BuildConfiguration) -> Result<ConfigId, SkyError> {
+    if config.is_exec {
+        return Ok(config.options.baseline.unwrap_or(config.id));
+    }
+    let top = config.options.baseline.unwrap_or(config.id).get();
+    let options = exec_options(ctx, transition, top.id, &top.options, top.host_platform).await?;
+    Ok(ConfigId::intern(&options))
+}
+
+/// The options Bazel's exec transition gives, for tools that run on
+/// `platform`. As in Bazel, they start from the native options' defaults,
+/// with the Starlark flags and `--define`s of the options they come from,
+/// so only what the transition propagates or sets carries over.
+async fn exec_options(ctx: &Ctx, transition: &OwnedFrozenValue, config: ConfigId, options: &BuildOptions, platform: Label) -> Result<BuildOptions, SkyError> {
+    let transitions = [(Symbol::intern("exec"), transition.clone())];
+    let (settings, mappings) = transitions_context(ctx, &transitions).await?;
+    let mut start = BuildOptions::default();
+    start.starlark_flags = options.starlark_flags.clone();
+    start.action_env = options.action_env.clone();
+    let defines = options.get("define").map_err(|error| SkyError::new(error.to_string()))?.clone();
+    start.set("define", defines).map_err(|error| SkyError::new(error.to_string()))?;
+    let input = OwnedInput {
+        config,
+        options,
+        start: &start,
+        settings: &settings,
+        mappings: &mappings,
+    };
+    let applied = Module::with_temp_heap(|module| apply_owned(transition, &input, &[], &module));
+    let applied = applied.map_err(|error| SkyError::new(format!("applying the exec transition: {error}")))?;
+    let Some((_, mut exec)) = applied.into_iter().next() else {
+        return Err(SkyError::new("the exec transition gave no configuration"));
+    };
+    exec.baseline = None;
+    exec.set("platforms", OptionValue::Labels(vec![platform])).map_err(|error| SkyError::new(error.to_string()))?;
+    Ok(exec)
 }
 
 /// The key of a target requested in a configuration: in the configuration
@@ -203,28 +283,32 @@ async fn build_settings(ctx: &Ctx, labels: &[Label]) -> Result<Vec<BuildSetting>
     Ok(settings)
 }
 
+/// What a transition kept in a `.bzl` file's heap is applied to: a
+/// [`TransitionInput`], with the mappings of every repository involved.
+struct OwnedInput<'a> {
+    config: ConfigId,
+    options: &'a BuildOptions,
+    start: &'a BuildOptions,
+    settings: &'a [BuildSetting],
+    mappings: &'a HashMap<RepoName, Arc<RepoMappingTable>>,
+}
+
 /// Apply a transition kept in a `.bzl` file's heap, with the rule's
 /// attributes as `attr`.
-fn apply_owned(
-    transition: &OwnedFrozenValue,
-    config: ConfigId,
-    options: &BuildOptions,
-    settings: &[BuildSetting],
-    mappings: &HashMap<RepoName, Arc<RepoMappingTable>>,
-    attrs: &[(Symbol, AttrValue)],
-    module: &Module,
-) -> anyhow::Result<Vec<(String, BuildOptions)>> {
+fn apply_owned(transition: &OwnedFrozenValue, input: &OwnedInput<'_>, attrs: &[(Symbol, AttrValue)], module: &Module) -> anyhow::Result<Vec<(String, BuildOptions)>> {
     let heap = module.heap();
     let value = heap.access_owned_frozen_value(transition);
     let transition = Transition::from_value(value).ok_or_else(|| anyhow::anyhow!("not a transition"))?;
-    let mapping = mappings.get(&transition.definition.repo()).ok_or_else(|| anyhow::anyhow!("no repository mapping for {}", transition.definition))?;
+    let definition = transition.definition;
+    let mapping = input.mappings.get(&definition.repo()).ok_or_else(|| anyhow::anyhow!("no repository mapping for {definition}"))?;
     let attr = attr_struct(attrs, heap);
-    let mut context = EvalContext::new(FileKind::Bzl, transition.definition);
-    context.mappings = mappings.clone();
+    let mut context = EvalContext::new(FileKind::Bzl, definition);
+    context.mappings = input.mappings.clone();
     let input = TransitionInput {
-        config,
-        options,
-        settings,
+        config: input.config,
+        options: input.options,
+        start: input.start,
+        settings: input.settings,
         mapping,
     };
     let mut eval = Evaluator::new(module);
@@ -245,7 +329,11 @@ fn attr_struct<'v>(attrs: &[(Symbol, AttrValue)], heap: Heap<'v>) -> Value<'v> {
 /// What a transition is applied to.
 pub struct TransitionInput<'a> {
     pub config: ConfigId,
+    /// The options the transition reads.
     pub options: &'a BuildOptions,
+    /// The options it writes its outputs to: `options`, except for the
+    /// exec transition.
+    pub start: &'a BuildOptions,
     /// The Starlark build settings among the transition's inputs and
     /// outputs.
     pub settings: &'a [BuildSetting],
@@ -352,7 +440,7 @@ fn dict(value: Value<'_>) -> anyhow::Result<DictRef<'_>> {
 /// are the same as those without it.
 fn transitioned(transition: &Transition<'_>, input: &TransitionInput<'_>, values: DictRef<'_>) -> anyhow::Result<BuildOptions> {
     if values.len() == 0 {
-        return Ok(input.options.clone());
+        return Ok(input.start.clone());
     }
     let values = declared_outputs(transition, values).map_err(|error| anyhow::anyhow!("invalid result from transition function: {error}"))?;
     let package = transition.definition.package;
@@ -360,14 +448,14 @@ fn transitioned(transition: &Transition<'_>, input: &TransitionInput<'_>, values
         let context = LabelContext::new(package, input.mapping);
         Label::parse(text, &context).map_err(|error| error.to_string())
     };
-    let mut options = input.options.clone();
+    let mut options = input.start.clone();
     for (setting, value) in values {
         match setting {
             Setting::Native(name) => set_native(&mut options, name, value, &parse_label)?,
             Setting::Starlark(label) => set_flag(&mut options, build_setting(input, *label)?, value, &parse_label)?,
         }
     }
-    if options == *input.options {
+    if options == *input.start {
         return Ok(options);
     }
     options.baseline = input.options.baseline.or(Some(input.config));
@@ -544,10 +632,12 @@ mod tests {
                 inputs: inputs.iter().map(|given| setting(given)).collect(),
                 outputs: outputs.iter().map(|given| setting(given)).collect(),
                 definition,
+                exec: false,
             };
             let input = TransitionInput {
                 config,
                 options,
+                start: options,
                 settings: std::slice::from_ref(&flag),
                 mapping: &mapping,
             };

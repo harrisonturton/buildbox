@@ -101,10 +101,13 @@ impl BuildConfiguration {
         let host_platform = options.label("host_platform").unwrap_or(*DEFAULT_HOST_PLATFORM);
         let platform = options.labels("platforms").first().copied().unwrap_or(host_platform);
         let is_exec = options.bool("is exec configuration");
-        let output_directory = match (is_exec, options.baseline) {
-            (true, _) => format!("{cpu}-{compilation_mode}-exec-ST-{}", &digest[..12]),
-            (false, None) => format!("{cpu}-{compilation_mode}"),
-            (false, Some(baseline)) => transitioned_directory(&format!("{cpu}-{compilation_mode}"), &options, &baseline.get().options),
+        let mnemonic = match is_exec {
+            true => format!("{cpu}-{compilation_mode}-exec"),
+            false => format!("{cpu}-{compilation_mode}"),
+        };
+        let output_directory = match options.baseline {
+            None => mnemonic,
+            Some(baseline) => transitioned_directory(&mnemonic, &options, &baseline.get().options),
         };
         BuildConfiguration {
             id,
@@ -125,15 +128,16 @@ impl BuildConfiguration {
         format!("bazel-out/{}/bin", self.output_directory)
     }
 
-    /// The configuration tools of targets in this one are built in: the
-    /// execution platform's, optimised, as Bazel's exec transition gives.
-    pub fn exec(&self) -> ConfigId {
+    /// A configuration for tools that run on `platform`, built optimised:
+    /// what Bazel's exec transition gives where bb has no builtins to run
+    /// it.
+    pub fn exec(&self, platform: Label) -> ConfigId {
         let mut options = self.options.clone();
         options.baseline = None;
         let exec_options = [
             ("is exec configuration", OptionValue::Bool(true)),
             ("compilation_mode", OptionValue::String("opt".to_string())),
-            ("platforms", OptionValue::Labels(vec![self.host_platform])),
+            ("platforms", OptionValue::Labels(vec![platform])),
         ];
         for (name, value) in exec_options {
             options.set(name, value).expect("exec options are native options");
@@ -246,12 +250,12 @@ mod tests {
     #[test]
     fn exec_configurations_are_optimised_and_named_apart() {
         let target = ConfigId::intern(&options()).get();
-        let exec = target.exec().get();
+        let exec = target.exec(target.host_platform).get();
         assert!(exec.is_exec);
         assert_eq!(exec.compilation_mode, "opt");
         assert_eq!(exec.platform, target.host_platform);
-        assert!(exec.output_directory.starts_with(&format!("{}-opt-exec-ST-", host_cpu())));
-        assert_eq!(exec.exec(), target.exec());
+        assert_eq!(exec.output_directory, format!("{}-opt-exec", host_cpu()));
+        assert_eq!(exec.exec(target.host_platform), target.exec(target.host_platform));
     }
 
     #[test]

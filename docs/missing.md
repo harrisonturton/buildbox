@@ -7,14 +7,14 @@ roughly in order of how many real repositories each gap blocks.
 
 ## 1. Configurations and transitions
 
-- **Few native options.** Configurations are made of native options and
+- **Native options.** Configurations are made of native options and
   Starlark flags (`buildbox/bazel/config/options.rs`): a registry of the
-  native options bb knows, with Bazel's types, defaults and parsing, and
-  options that hold only what differs from the defaults. bb registers the
-  options `config_setting`s match in the rule sets it has met, and those it
-  reads; a `config_setting` on any other fails rather than not matching.
-  Transitions need every option they read or write registered, and
-  Bazel's own exec transition reads about 150.
+  native options bb knows, with Bazel 9.3.1's types, defaults and parsing.
+  It has those `config_setting`s match in the rule sets bb has met, and
+  every one Bazel's exec transition reads or writes; a `config_setting` or
+  transition on any other fails rather than misbehaving. Most of them only
+  carry their values: `--extra_execution_platforms` and `--extra_toolchains`,
+  for example, don't yet take part in toolchain resolution.
 - **Transitions are partly there.** Starlark transitions work on
   attributes and on rules (`rule(cfg = ...)`), including splits and
   `ctx.split_attr` (`buildbox/bazel/analysis/transition.rs`), and their
@@ -24,9 +24,12 @@ roughly in order of how many real repositories each gap blocks.
     transition, and without Bazel's second "on dependency edge" error.
   - `analysis_test_transition`, and Bazel's own transitions that bb only
     stands in for, such as Apple's splits.
-- **The exec configuration is the host's.** `BuildConfiguration::exec()`
-  sets the platform to `host_platform` rather than to the execution
-  platform toolchain resolution chose.
+- **The exec configuration** comes from Bazel's own Starlark exec
+  transition, run for the execution platform toolchain resolution chooses
+  for each rule, and its output directories are named as Bazel names them.
+  Toolchains are analyzed in the rule's configuration rather than through
+  Bazel's toolchain transition, so their own tools use their own execution
+  platform rather than the rule's.
 
 rules_go, rules_rust, rules_oci, rules_python, platform-specific binary
 wrappers and multi-arch images all rely on transitions, and most of them on
@@ -129,8 +132,7 @@ Bazel rejects.
 
 ## Suggested order
 
-1. The exec configuration from the resolved execution platform, through
-   Bazel's own Starlark exec transition. cquery largely follows.
+1. cquery, now that configurations are Bazel's.
 2. Aspects, which much of the remaining ecosystem depends on.
 
 ## Not yet audited

@@ -171,18 +171,28 @@ pub fn register_builtins_internal(internal: fn(&mut GlobalsBuilder)) {
 }
 
 /// `_builtins`, as `@_builtins` sees it: `internal` with the registered
-/// members, and everything else opaque.
-fn builtins_object(builder: &mut GlobalsBuilder, name: &'static str) -> FrozenValue {
+/// members and `py_internal`, `toplevel` with `exec_transition`, and
+/// everything else opaque.
+fn builtins_object(builder: &mut GlobalsBuilder, names: (&'static str, &'static str)) -> FrozenValue {
     let internals = BUILTINS_INTERNALS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
     let mut members = GlobalsBuilder::new();
+    transition::register_py_internal(&mut members);
     for internal in internals {
         internal(&mut members);
     }
-    let members = members.build_named(GlobalFrozenHeapName { name });
+    let internal = namespace(builder, "_builtins.internal", members, names.0);
+    let toplevel = namespace(builder, "_builtins.toplevel", GlobalsBuilder::new().with(transition::exec_transition_function), names.1);
+    let members = vec![("internal".to_string(), internal), ("toplevel".to_string(), toplevel)];
+    builder.alloc(opaque::Namespace::new("_builtins", members))
+}
+
+/// A namespace of `_builtins` with `members`, which are kept in a heap of
+/// their own named `heap`.
+fn namespace(builder: &mut GlobalsBuilder, name: &str, members: GlobalsBuilder, heap: &'static str) -> FrozenValue {
+    let members = members.build_named(GlobalFrozenHeapName { name: heap });
     builder.frozen_heap().add_reference(members.heap());
-    let internal_members = members.iter().map(|(name, value)| (name.to_string(), value)).collect();
-    let internal = builder.alloc(opaque::Namespace::new("_builtins.internal", internal_members));
-    builder.alloc(opaque::Namespace::new("_builtins", vec![("internal".to_string(), internal)]))
+    let members = members.iter().map(|(name, value)| (name.to_string(), value)).collect();
+    builder.alloc(opaque::Namespace::new(name, members))
 }
 
 fn bzl_globals_builder() -> GlobalsBuilder {
@@ -231,7 +241,11 @@ pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
             native_rules::register(native);
             native_values(native, legacy);
         });
-        let value = builtins_object(&mut builder, pass_name(legacy, "bb builtins internal", "bb builtins internal without legacy_globals"));
+        let heaps = (
+            pass_name(legacy, "bb builtins internal", "bb builtins internal without legacy_globals"),
+            pass_name(legacy, "bb builtins toplevel", "bb builtins toplevel without legacy_globals"),
+        );
+        let value = builtins_object(&mut builder, heaps);
         builder.set("_builtins", value);
         add_extensions(&mut builder);
         builder.build_named(GlobalFrozenHeapName {

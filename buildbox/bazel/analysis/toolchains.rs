@@ -29,13 +29,14 @@ use std::sync::Arc;
 #[derive(Default)]
 pub struct ResolvedToolchains {
     pub resolved: Vec<(Label, Option<Arc<ConfiguredTarget>>)>,
+    /// The execution platform chosen for the rule's actions and tools.
+    pub exec_platform: Option<Label>,
 }
 
-/// Resolve and analyze the toolchains a rule class needs.
-pub async fn resolve(ctx: &Ctx, class: &RuleClass, config: &BuildConfiguration) -> Result<ResolvedToolchains, SkyError> {
-    if class.toolchain_types.is_empty() {
-        return Ok(ResolvedToolchains::default());
-    }
+/// Choose the execution platform for a rule, whose `exec_compatible_with`
+/// is `exec_constraints`, and resolve and analyze the toolchains its class
+/// needs for it.
+pub async fn resolve(ctx: &Ctx, class: &RuleClass, config: &BuildConfiguration, exec_constraints: &[Label]) -> Result<ResolvedToolchains, SkyError> {
     let mut types = Vec::with_capacity(class.toolchain_types.len());
     for toolchain_type in &class.toolchain_types {
         types.push(crate::platform::actual(ctx, *toolchain_type).await?);
@@ -44,10 +45,15 @@ pub async fn resolve(ctx: &Ctx, class: &RuleClass, config: &BuildConfiguration) 
     for toolchain_type in &class.optional_toolchain_types {
         optional.push(crate::platform::actual(ctx, *toolchain_type).await?);
     }
+    let mut constraints = Vec::with_capacity(exec_constraints.len());
+    for constraint in exec_constraints {
+        constraints.push(crate::platform::actual(ctx, *constraint).await?);
+    }
     let key = ToolchainResolutionKey {
         config: config.id,
         types,
         optional,
+        exec_constraints: constraints,
     };
     let resolution = ctx.compute(&key).await?;
     let keys: Vec<ConfiguredTargetKey> = resolution
@@ -67,7 +73,10 @@ pub async fn resolve(ctx: &Ctx, class: &RuleClass, config: &BuildConfiguration) 
         // an alias.
         resolved.push((*requested, target));
     }
-    Ok(ResolvedToolchains { resolved })
+    Ok(ResolvedToolchains {
+        resolved,
+        exec_platform: Some(resolution.exec_platform),
+    })
 }
 
 /// A `toolchain` target: what it's for, and where it applies.
@@ -199,14 +208,16 @@ pub struct ToolchainResolution {
 
 encoded_value!(ToolchainResolution);
 
-/// Chooses toolchains: the first execution platform for which every
-/// mandatory type has a toolchain, and for each type the first registered
-/// toolchain compatible with it and the target platform.
+/// Chooses toolchains: the first execution platform that has the
+/// constraints and for which every mandatory type has a toolchain, and for
+/// each type the first registered toolchain compatible with it and the
+/// target platform.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct ToolchainResolutionKey {
     pub config: ConfigId,
     pub types: Vec<Label>,
     pub optional: Vec<Label>,
+    pub exec_constraints: Vec<Label>,
 }
 
 impl Key for ToolchainResolutionKey {
@@ -221,6 +232,9 @@ impl Key for ToolchainResolutionKey {
         platforms.push(config.host_platform);
         for platform in platforms {
             let exec = ctx.compute(&PlatformKey(platform)).await?;
+            if !satisfies(ctx, &exec, &self.exec_constraints).await? {
+                continue;
+            }
             if let Some(toolchains) = self.resolve_for(ctx, &registered, &target, &exec).await? {
                 return Ok(ToolchainResolution {
                     exec_platform: platform,
@@ -229,6 +243,9 @@ impl Key for ToolchainResolutionKey {
             }
         }
         let missing: Vec<String> = self.types.iter().filter(|label| !self.optional.contains(label)).map(Label::to_string).collect();
+        if missing.is_empty() {
+            return Err(SkyError::new("No matching execution platform found: no execution platform has the rule's exec_compatible_with constraints"));
+        }
         Err(SkyError::new(format!(
             "No matching toolchains found for types {}.\nTo debug, rerun with --toolchain_resolution_debug='{}'",
             missing.join(", "),

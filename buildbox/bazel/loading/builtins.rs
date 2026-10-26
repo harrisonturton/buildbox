@@ -35,6 +35,9 @@ pub struct Builtins {
     pub bzl: Globals,
     pub build: Globals,
     pub rule_classes: HashMap<Symbol, Arc<RuleClass>>,
+    /// The transition to the exec configuration, which Bazel's builtins
+    /// define in Starlark.
+    pub exec_transition: Option<OwnedFrozenValue>,
     fingerprint: Fingerprint,
     _exports: Option<FrozenModule>,
 }
@@ -71,6 +74,7 @@ impl Key for BuiltinsKey {
                 bzl: BZL_GLOBALS.clone(),
                 build: bazel_starlark::BUILD_GLOBALS.clone(),
                 rule_classes: HashMap::new(),
+                exec_transition: None,
                 fingerprint: Fingerprint::of(b"no builtins"),
                 _exports: None,
             });
@@ -108,6 +112,10 @@ fn evaluate(dir: &Path, mapping: RepoMappingTable) -> anyhow::Result<Builtins> {
             rule_classes.insert(Symbol::intern(name), class.clone());
         }
     }
+    let exec_platforms = loader.load(builtins_label("common/builtin_exec_platforms.bzl")?)?;
+    let exec_transition = exec_platforms
+        .get("bazel_exec_transition")
+        .map_err(|_| anyhow::anyhow!("common/builtin_exec_platforms.bzl doesn't define bazel_exec_transition"))?;
     let fingerprint = Fingerprint::of(dir.display().to_string().as_bytes());
     let starlark_builtins = StarlarkBuiltins {
         rules,
@@ -119,6 +127,7 @@ fn evaluate(dir: &Path, mapping: RepoMappingTable) -> anyhow::Result<Builtins> {
         bzl: bazel_starlark::bzl_globals(&starlark_builtins),
         build: bazel_starlark::build_globals(&starlark_builtins),
         rule_classes,
+        exec_transition: Some(exec_transition),
         fingerprint,
         _exports: Some(exports),
     })

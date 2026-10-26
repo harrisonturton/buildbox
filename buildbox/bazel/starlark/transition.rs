@@ -45,6 +45,11 @@ pub struct TransitionGen<V: ValueLifetimeless> {
     #[freeze(identity)]
     #[allocative(skip)]
     pub definition: Label,
+    /// Whether it's an exec transition, which starts from the native
+    /// options' defaults rather than the configuration's.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    pub exec: bool,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<TransitionGen<To>> for TransitionGen<From> {}
@@ -91,6 +96,24 @@ fn settings(list: Value<'_>, what: &str, parser: &LabelParser<'_>) -> anyhow::Re
     Ok(settings)
 }
 
+/// A transition `transition()` or `exec_transition()` makes.
+fn new_transition<'v>(implementation: Value<'v>, inputs: Value<'v>, outputs: Value<'v>, exec: bool, eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<Transition<'v>> {
+    let context = EvalContext::get(eval)?;
+    let definition = context.caller_file(eval);
+    let mapping = context.mapping_for(definition.repo());
+    let parser = LabelParser {
+        package: definition.package,
+        mapping: &*mapping,
+    };
+    Ok(TransitionGen {
+        implementation,
+        inputs: settings(inputs, "inputs", &parser)?,
+        outputs: settings(outputs, "outputs", &parser)?,
+        definition,
+        exec,
+    })
+}
+
 #[starlark_module]
 pub(crate) fn transition_function(builder: &mut GlobalsBuilder) {
     /// `transition(*, implementation, inputs, outputs)`.
@@ -100,18 +123,37 @@ pub(crate) fn transition_function(builder: &mut GlobalsBuilder) {
         #[starlark(require = named)] outputs: Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Transition<'v>> {
-        let context = EvalContext::get(eval)?;
-        let definition = context.caller_file(eval);
-        let mapping = context.mapping_for(definition.repo());
-        let parser = LabelParser {
-            package: definition.package,
-            mapping: &*mapping,
-        };
-        Ok(TransitionGen {
-            implementation,
-            inputs: settings(inputs, "inputs", &parser)?,
-            outputs: settings(outputs, "outputs", &parser)?,
-            definition,
+        new_transition(implementation, inputs, outputs, false, eval)
+    }
+}
+
+#[starlark_module]
+pub(crate) fn exec_transition_function(builder: &mut GlobalsBuilder) {
+    /// `_builtins.toplevel.exec_transition(*, implementation, inputs,
+    /// outputs)`: the transition `@_builtins` defines for the exec
+    /// configuration.
+    fn exec_transition<'v>(
+        #[starlark(require = named)] implementation: Value<'v>,
+        #[starlark(require = named)] inputs: Value<'v>,
+        #[starlark(require = named)] outputs: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Transition<'v>> {
+        new_transition(implementation, inputs, outputs, true, eval)
+    }
+}
+
+#[starlark_module]
+fn py_internal_functions(builder: &mut GlobalsBuilder) {
+    /// The name of the OS bb runs on, as Bazel names it.
+    fn get_current_os_name() -> anyhow::Result<&'static str> {
+        Ok(match std::env::consts::OS {
+            "macos" => "osx",
+            other => other,
         })
     }
+}
+
+/// Add `py_internal`, of which the exec transition reads the OS's name.
+pub(crate) fn register_py_internal(builder: &mut GlobalsBuilder) {
+    builder.namespace("py_internal", py_internal_functions);
 }

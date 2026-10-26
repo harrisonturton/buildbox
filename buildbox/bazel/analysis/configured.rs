@@ -9,12 +9,12 @@ use crate::build_ctx::{self, Dep, RuleInput};
 use crate::platform::PlatformKey;
 use crate::providers;
 use crate::toolchains::{self, ResolvedToolchains};
-use crate::transition::{AttrConfigs, configured_key, dep_configs};
+use crate::transition::{AttrConfigs, ExecConfigKey, configured_key, dep_configs};
 use bazel_config::ConfigId;
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule, PackageKey, RepoMappingKey};
 use bazel_progress::{Event, Progress};
-use bazel_packages::{AttrType, AttrValue, Package, Rule, RuleClass, RuleClassRef, Target};
+use bazel_packages::{AttrType, AttrValue, Cfg, Package, Rule, RuleClass, RuleClassRef, Target};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode, Fingerprint, Fingerprinter};
 use skyframe::{Ctx, Key, SkyError, Storage, Value};
@@ -212,16 +212,19 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         Ok(attr_configs) => attr_configs,
         Err(error) => return Err(located(ctx, label, format!("{}, of {} rule {label}", error.message(), class_ref.kind)).await),
     };
+    let config = key.config.get();
+    let toolchains = toolchains::resolve(ctx, &class, &config, &attr_labels(&attrs, "exec_compatible_with")).await;
+    let exec_platform = toolchains.as_ref().ok().and_then(|toolchains| toolchains.exec_platform).unwrap_or(config.host_platform);
+    let exec_config = exec_config(ctx, &class, key.config, exec_platform).await?;
     let deps = match is_stub(&implementation) {
         true => BTreeMap::new(),
-        false => analyze_deps(ctx, label, &class, &attrs, key.config, &attr_configs).await?,
+        false => analyze_deps(ctx, label, &class, &attrs, key.config, exec_config, &attr_configs).await?,
     };
     if let Some(reason) = incompatible_dep(key, &deps) {
         return incompatible(ctx, key, class_ref.kind, class.test, reason);
     }
-    let config = key.config.get();
+    let toolchains = toolchains?;
     let platform = ctx.compute(&PlatformKey(config.platform)).await?;
-    let toolchains = toolchains::resolve(ctx, &class, &config).await?;
     let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
     let mappings = match &implementation {
         Implementation::Starlark { module, .. } => bazel_loading::mappings(ctx, &module.repos).await?,
@@ -235,12 +238,14 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         class: class.clone(),
         attrs,
         attr_configs,
+        exec_config,
         deps,
         build_file: package.build_file,
         implementation,
         mapping: Arc::new(mapping.0.clone()),
         mappings,
         target_constraints: platform.values(),
+        target_cpu: platform.cpu(),
         toolchains,
     };
     let name = heap_name("target", key, fingerprint);
@@ -251,6 +256,25 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         Err(message) => return Err(located(ctx, label, message).await),
     };
     Ok(configured(ctx, key, class_ref.kind, class.test, analyzed, fingerprint))
+}
+
+/// The labels a label list attribute has, such as `exec_compatible_with`.
+fn attr_labels(attrs: &[(Symbol, AttrValue)], name: &str) -> Vec<Label> {
+    let name = Symbol::intern(name);
+    match attrs.iter().find(|(attr, _)| *attr == name) {
+        Some((_, AttrValue::LabelList(labels))) => labels.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// The configuration of a rule's tools, which run on `platform`: its exec
+/// configuration, if it has attributes for tools.
+async fn exec_config(ctx: &Ctx, class: &RuleClass, config: ConfigId, platform: Label) -> Result<ConfigId, SkyError> {
+    if !class.attrs.iter().any(|schema| schema.cfg == Cfg::Exec) {
+        return Ok(config);
+    }
+    let exec = ctx.compute(&ExecConfigKey { config, platform }).await?;
+    Ok(exec.0)
 }
 
 /// An error in analyzing a rule, at where the rule was declared, as Bazel
@@ -306,6 +330,7 @@ async fn analyze_deps(
     class: &RuleClass,
     attrs: &[(Symbol, AttrValue)],
     config: ConfigId,
+    exec_config: ConfigId,
     attr_configs: &AttrConfigs,
 ) -> Result<BTreeMap<(Label, ConfigId), Dep>, SkyError> {
     let mut wanted = Vec::new();
@@ -316,7 +341,7 @@ async fn analyze_deps(
         let mut labels = Vec::new();
         value.labels(&mut labels);
         let known: Vec<Label> = labels.iter().copied().filter(|label| !label.repo().is_unknown()).collect();
-        for (_, dep_config) in dep_configs(schema.cfg, schema.name, config, attr_configs) {
+        for (_, dep_config) in dep_configs(schema.cfg, schema.name, config, exec_config, attr_configs) {
             wanted.extend(known.iter().map(|label| (*label, dep_config)));
         }
         for label in labels_of_unknown_repos(value) {

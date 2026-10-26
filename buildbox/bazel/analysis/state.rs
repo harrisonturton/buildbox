@@ -63,6 +63,12 @@ impl RuleState {
         }
     }
 
+    /// Set a make variable every rule has.
+    pub fn set_make_variable(&mut self, name: &str, value: &str) {
+        self.make_variables.retain(|(variable, _)| variable != name);
+        self.make_variables.push((name.to_string(), value.to_string()));
+    }
+
     /// The state of the rule `eval` is analyzing.
     pub fn get<'a>(eval: &Evaluator<'_, 'a, '_>) -> anyhow::Result<&'a RuleState> {
         let context = EvalContext::get(eval)?;
