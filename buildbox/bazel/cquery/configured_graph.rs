@@ -24,6 +24,9 @@ pub struct ConfiguredOptions {
     pub implicit_deps: bool,
     /// Follow dependencies built for the execution platform.
     pub tool_deps: bool,
+    /// Include what aspects applied to targets' dependencies depend on and
+    /// do, `--include_aspects`.
+    pub include_aspects: bool,
 }
 
 /// The query language a configured graph is queried in: `cquery`'s, with
@@ -56,19 +59,29 @@ pub struct ConfiguredGraph<C> {
     pub top_level_config: ConfigId,
     /// The universe's top-level targets, as analyzed.
     roots: Vec<ConfiguredNode>,
+    /// The applications of `--aspects` to the top-level targets.
+    top_level_aspects: Vec<ConfiguredTargetKey>,
     /// The universe's nodes, by label, once they're needed.
     nodes: OnceLock<HashMap<Label, Vec<ConfiguredNode>>>,
     targets: Mutex<HashMap<ConfiguredTargetKey, Option<Arc<ConfiguredTarget>>>>,
 }
 
 impl<C: Compute> ConfiguredGraph<C> {
-    pub fn new(packages: Universe<C>, options: ConfiguredOptions, language: Language, top_level_config: ConfigId, roots: Vec<ConfiguredNode>) -> ConfiguredGraph<C> {
+    pub fn new(
+        packages: Universe<C>,
+        options: ConfiguredOptions,
+        language: Language,
+        top_level_config: ConfigId,
+        roots: Vec<ConfiguredNode>,
+        top_level_aspects: Vec<ConfiguredTargetKey>,
+    ) -> ConfiguredGraph<C> {
         ConfiguredGraph {
             packages,
             options,
             language,
             top_level_config,
             roots,
+            top_level_aspects,
             nodes: OnceLock::new(),
             targets: Mutex::new(HashMap::new()),
         }
@@ -94,10 +107,7 @@ impl<C: Compute> ConfiguredGraph<C> {
         let mut seen: NodeSet<ConfiguredNode> = self.roots.iter().copied().collect();
         let mut pending: VecDeque<ConfiguredNode> = self.roots.iter().copied().collect();
         while let Some(node) = pending.pop_front() {
-            let Some(target) = self.configured(&node).await else {
-                continue;
-            };
-            for dep in &target.deps {
+            for dep in self.all_deps(&node).await {
                 let dep = ConfiguredNode { label: dep.label, config: dep.config };
                 if seen.insert(dep) {
                     pending.push_back(dep);
@@ -112,6 +122,59 @@ impl<C: Compute> ConfiguredGraph<C> {
             configured.sort();
         }
         self.nodes.get_or_init(|| nodes)
+    }
+
+    /// A node's dependencies, and with `--include_aspects`, those of the
+    /// aspects applied to its dependencies, which Bazel counts as its own.
+    async fn all_deps(&self, node: &ConfiguredNode) -> Vec<bazel_analysis::ConfiguredDep> {
+        let Some(target) = self.configured(node).await else {
+            return Vec::new();
+        };
+        let mut deps = target.deps.clone();
+        if !self.options.include_aspects {
+            return deps;
+        }
+        for application in &target.aspects {
+            let application = ConfiguredNode { label: application.label, config: Some(application.config) };
+            let Some(applied) = self.configured(&application).await else {
+                continue;
+            };
+            for dep in &applied.deps {
+                if !deps.contains(dep) {
+                    deps.push(*dep);
+                }
+            }
+        }
+        deps
+    }
+
+    /// The applications of aspects to each target of the universe, by the
+    /// target, as `aquery` lists their actions: those its dependents
+    /// applied, transitively, and `--aspects`'.
+    pub async fn aspect_applications(&self) -> HashMap<ConfiguredTargetKey, Vec<ConfiguredTargetKey>> {
+        let mut pending: Vec<ConfiguredTargetKey> = self.top_level_aspects.clone();
+        for node in self.universe().await.values().flatten() {
+            if let Some(target) = self.configured(node).await {
+                pending.extend(target.aspects.iter().copied());
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut applications: HashMap<ConfiguredTargetKey, Vec<ConfiguredTargetKey>> = HashMap::new();
+        while let Some(application) = pending.pop() {
+            if !seen.insert(application) {
+                continue;
+            }
+            let base = ConfiguredTargetKey { label: application.label, config: application.config.get().without_aspects() };
+            applications.entry(base).or_default().push(application);
+            let node = ConfiguredNode { label: application.label, config: Some(application.config) };
+            if let Some(applied) = self.configured(&node).await {
+                pending.extend(applied.aspects.iter().copied());
+            }
+        }
+        for keys in applications.values_mut() {
+            keys.sort();
+        }
+        applications
     }
 
     /// Whether a dependency is followed, as the options say: a tool, built
@@ -184,11 +247,9 @@ impl<C: Compute> QueryEnvironment for ConfiguredGraph<C> {
     }
 
     async fn fwd_deps(&self, node: &ConfiguredNode) -> Result<Vec<ConfiguredNode>, QueryError> {
-        let Some(target) = self.configured(node).await else {
-            return Ok(Vec::new());
-        };
-        let deps = target.deps.iter().filter(|dep| self.follows(node, dep));
-        Ok(deps.map(|dep| ConfiguredNode { label: dep.label, config: dep.config }).collect())
+        let deps = self.all_deps(node).await;
+        let followed = deps.iter().filter(|dep| self.follows(node, dep));
+        Ok(followed.map(|dep| ConfiguredNode { label: dep.label, config: dep.config }).collect())
     }
 
     async fn target_of(&self, node: &ConfiguredNode) -> Result<TargetRef, QueryError> {

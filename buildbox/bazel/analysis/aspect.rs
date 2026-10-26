@@ -439,7 +439,11 @@ async fn apply(
     propagate(&mut setup, &config.aspects, aspects, &edges);
     let mut deps = analyze_deps(ctx, key.label, &setup.class, &setup.attrs, setup.deps_config, setup.exec_config, &setup.attr_configs).await?;
     let own = own_setup(ctx, key.label, aspect, descriptor, setup.deps_config).await?;
-    deps.extend(analyze_deps(ctx, key.label, &own.class, &own.attrs, own.deps_config, own.exec_config, &own.attr_configs).await?);
+    let own_deps = analyze_deps(ctx, key.label, &own.class, &own.attrs, own.deps_config, own.exec_config, &own.attr_configs).await?;
+    let edges = configured::aspect_edges(&own, &own_deps)?;
+    let exec_platform = own.toolchains.exec_platform.unwrap_or(config.host_platform);
+    deps.extend(own_deps);
+    let applications = configured::aspect_applications(&deps);
     let fingerprint = fingerprint(key, rule, &own.implementation, &deps, &targets, &toolchains, &own.toolchains);
     let view = rule_input(ctx, plain_key, package, setup, BTreeMap::new()).await?;
     let mut input = rule_input(ctx, key, package, own, deps).await?;
@@ -452,7 +456,11 @@ async fn apply(
     if let Ok(progress) = ctx.global::<Progress>() {
         progress.aspect_applied();
     }
-    Ok(configured(ctx, key, kind, false, analyzed, fingerprint))
+    let mut applied = configured(ctx, key, kind, false, analyzed, fingerprint);
+    applied.deps = edges;
+    applied.aspects = applications;
+    applied.exec_platform = Some(exec_platform);
+    Ok(applied)
 }
 
 /// Where each aspect propagates from a target, if a function of it

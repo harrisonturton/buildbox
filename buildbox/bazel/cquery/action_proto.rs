@@ -2,7 +2,7 @@
 //! configuration, file and path written once, by id, the first time an
 //! action refers to it, as Bazel writes them.
 
-use crate::action_output::{AqueryOutput, Ids, Owned, action_key, exec_platform};
+use crate::action_output::{AqueryOutput, Ids, Owned, action_key, aspect_name, aspect_parameters, exec_platform};
 use bazel_analysis::{Action, ActionKind, Artifact, ConfiguredTarget};
 use bazel_config::ConfigId;
 use bazel_label::{Label, RepoMappingTable};
@@ -17,6 +17,7 @@ struct Entries {
     rule_classes: Ids<String>,
     targets: Ids<Label>,
     configs: Ids<ConfigId>,
+    aspects: Ids<String>,
     paths: Ids<PathId>,
     artifacts: Ids<PathId>,
     dep_sets: u32,
@@ -29,6 +30,7 @@ impl Entries {
             rule_classes: Ids::new(),
             targets: Ids::new(),
             configs: Ids::new(),
+            aspects: Ids::new(),
             paths: Ids::new(),
             artifacts: Ids::new(),
             dep_sets: 0,
@@ -97,12 +99,27 @@ impl Entries {
         self.dep_sets
     }
 
+    fn aspect(&mut self, aspect: &bazel_config::AspectDescriptor, mapping: &RepoMappingTable) -> u32 {
+        let (id, new) = self.aspects.id(&aspect.to_string());
+        if new {
+            let mut message = Message::new();
+            message.int3(1, "id", id.into()).string3(2, "name", aspect_name(aspect, mapping));
+            for (name, value) in aspect_parameters(aspect) {
+                message.repeated(3, "parameters", pair(&name, &value));
+            }
+            self.push(6, "aspect_descriptors", message);
+        }
+        id
+    }
+
     fn action(&mut self, owned: &Owned, output: &AqueryOutput, mapping: &RepoMappingTable) {
-        let Owned { target, action, arguments } = owned;
+        let Owned { target, action, arguments, aspects } = owned;
         let target_id = self.target(target, mapping);
-        let config = self.configuration(target.config);
+        let aspect_ids: Vec<i64> = aspects.iter().map(|aspect| i64::from(self.aspect(aspect, mapping))).collect();
+        let config = self.configuration(target.config.get().without_aspects());
         let mut message = Message::new();
-        message.int3(1, "target_id", target_id.into()).string3(3, "action_key", action_key(action)).string3(4, "mnemonic", action.mnemonic.to_string());
+        message.int3(1, "target_id", target_id.into()).packed(2, "aspect_descriptor_ids", aspect_ids);
+        message.string3(3, "action_key", action_key(action)).string3(4, "mnemonic", action.mnemonic.to_string());
         message.int3(5, "configuration_id", config.into());
         if output.include_artifacts {
             let inputs = owned.inputs();

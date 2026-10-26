@@ -5,6 +5,7 @@ use crate::build::{self, Built, Purpose};
 use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
 use bazel_cquery::{AqueryFormat, AqueryOutput, ConfiguredGraph, ConfiguredNode, ConfiguredOptions, CqueryFormat, CqueryOutput, Formatter, Language, Printed};
+use bazel_analysis::ConfiguredTargetKey;
 use bazel_label::RepoName;
 use bazel_loading::RepoMappingKey;
 use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
@@ -352,9 +353,11 @@ fn configured_graph<'a>(context: &CommandContext<'_>, session: &'a Session, opti
     let configured = ConfiguredOptions {
         implicit_deps: options.flag("implicit_deps", true),
         tool_deps: options.flag("tool_deps", true) && options.flag("host_deps", true),
+        include_aspects: options.flag("include_aspects", true),
     };
     let roots = built.targets.iter().map(|(_, target, _)| ConfiguredNode { label: target.label, config: Some(target.config) }).collect();
-    ConfiguredGraph::new(packages, configured, language, built.config, roots)
+    let aspects = built.aspects.iter().map(|aspect| ConfiguredTargetKey { label: aspect.target.label, config: aspect.target.config }).collect();
+    ConfiguredGraph::new(packages, configured, language, built.config, roots, aspects)
 }
 
 /// The options `aquery` takes: those of a build, and its own.

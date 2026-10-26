@@ -228,25 +228,28 @@ impl Message {
     /// The message in text format.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
-        self.write_text(&mut out, 0, "  ");
+        self.write_text(&mut out, 0, 0);
         out
     }
 
-    /// The message in text format, its nested messages not indented, as
-    /// `aquery` writes them.
+    /// The message in text format, the fields of its messages not
+    /// indented, but those of messages within them, as `aquery` writes
+    /// each entry of its graph.
     pub fn to_flat_text(&self) -> String {
         let mut out = String::new();
-        self.write_text(&mut out, 0, "");
+        self.write_text(&mut out, 0, 1);
         out
     }
 
-    fn write_text(&self, out: &mut String, depth: usize, unit: &str) {
-        let indent = unit.repeat(depth);
+    /// Write the fields of a message `depth` messages deep, indented by
+    /// two spaces for each level but the first `unindented`.
+    fn write_text(&self, out: &mut String, depth: usize, unindented: usize) {
+        let indent = "  ".repeat(depth.saturating_sub(unindented));
         for field in self.in_order() {
             match &field.value {
                 Value::Message(message) => {
                     writeln!(out, "{indent}{} {{", field.name).ok();
-                    message.write_text(out, depth + 1, unit);
+                    message.write_text(out, depth + 1, unindented);
                     writeln!(out, "{indent}}}").ok();
                 }
                 Value::Packed(values) => {

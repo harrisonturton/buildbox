@@ -4,7 +4,7 @@
 use crate::configured_graph::ConfiguredGraph;
 use crate::node::ConfiguredNode;
 use bazel_analysis::{Action, ActionKind, Artifact, ConfiguredTarget};
-use bazel_config::ConfigId;
+use bazel_config::{AspectDescriptor, ConfigId};
 use bazel_label::{Label, RepoMappingTable};
 use bazel_query::proto::Message;
 use bazel_query::{Arg, Expr, NodeSet, QueryError, display_label};
@@ -125,6 +125,9 @@ pub(crate) struct Owned {
     pub target: Arc<ConfiguredTarget>,
     pub action: Action,
     pub arguments: Vec<String>,
+    /// For an action of aspects applied to the target: the aspects, in the
+    /// order they apply.
+    pub aspects: Vec<AspectDescriptor>,
 }
 
 impl Owned {
@@ -146,21 +149,43 @@ impl Owned {
 async fn actions<C: Compute>(graph: &ConfiguredGraph<C>, result: &NodeSet<ConfiguredNode>, filters: &ActionFilters) -> Result<Vec<Owned>, QueryError> {
     let mut nodes: Vec<ConfiguredNode> = result.iter().copied().collect();
     nodes.sort();
+    let applications = match graph.options.include_aspects {
+        true => graph.aspect_applications().await,
+        false => HashMap::new(),
+    };
     let mut owned = Vec::new();
     for node in nodes {
         let Some(target) = graph.configured(&node).await else {
             continue;
         };
-        let actions: Vec<Action> = target.actions.iter().map(|stored| stored.load()).collect::<Result<_, _>>()?;
-        let params = params_files(&actions);
-        for action in actions {
-            let writes_params = action.outputs.iter().any(|output| params.contains_key(&output.exec_path));
-            if writes_params || !filters.matches(&action) {
-                continue;
+        owned.extend(target_actions(&target, filters)?);
+        let Some(key) = node.key() else {
+            continue;
+        };
+        for application in applications.get(&key).into_iter().flatten() {
+            let node = ConfiguredNode { label: application.label, config: Some(application.config) };
+            if let Some(applied) = graph.configured(&node).await {
+                owned.extend(target_actions(&applied, filters)?);
             }
-            let arguments = expanded_arguments(&action, &params);
-            owned.push(Owned { target: target.clone(), action, arguments });
         }
+    }
+    Ok(owned)
+}
+
+/// A configured target's actions that `filters` match, but for those
+/// writing its commands' params files.
+fn target_actions(target: &Arc<ConfiguredTarget>, filters: &ActionFilters) -> Result<Vec<Owned>, QueryError> {
+    let actions: Vec<Action> = target.actions.iter().map(|stored| stored.load()).collect::<Result<_, _>>()?;
+    let params = params_files(&actions);
+    let aspects = target.config.get().aspects.clone();
+    let mut owned = Vec::new();
+    for action in actions {
+        let writes_params = action.outputs.iter().any(|output| params.contains_key(&output.exec_path));
+        if writes_params || !filters.matches(&action) {
+            continue;
+        }
+        let arguments = expanded_arguments(&action, &params);
+        owned.push(Owned { target: target.clone(), action, arguments, aspects: aspects.clone() });
     }
     Ok(owned)
 }
@@ -221,6 +246,27 @@ fn container(owned: &[Owned], output: &AqueryOutput, mapping: &RepoMappingTable)
     crate::action_proto::container(owned, output, mapping)
 }
 
+/// An aspect as `aquery` describes it: its class, then its parameters.
+pub fn aspect_description(aspect: &AspectDescriptor, mapping: &RepoMappingTable) -> String {
+    let parameters: Vec<String> = aspect_parameters(aspect).iter().map(|(name, value)| format!("{name}='{value}'")).collect();
+    format!("{}({})", aspect_name(aspect, mapping), parameters.join(", "))
+}
+
+/// An aspect's class, as Bazel names it: `//pkg:defs.bzl%name`.
+pub fn aspect_name(aspect: &AspectDescriptor, mapping: &RepoMappingTable) -> String {
+    format!("{}%{}", display_label(aspect.file, mapping), aspect.name)
+}
+
+/// An aspect's parameters, with their values as Bazel's Java writes them.
+pub fn aspect_parameters(aspect: &AspectDescriptor) -> Vec<(String, String)> {
+    let value = |text: &str| match text {
+        "True" => "true".to_string(),
+        "False" => "false".to_string(),
+        _ => bazel_config::unquoted(text).unwrap_or_else(|| text.to_string()),
+    };
+    aspect.params.iter().map(|(name, text)| (name.clone(), value(text))).collect()
+}
+
 /// An action's key: a hash of what it does, which identifies it.
 pub fn action_key(action: &Action) -> String {
     let identity = format!("{}\0{:?}\0{:?}\0{:?}", action.mnemonic, action.all_inputs(), action.outputs, action.kind);
@@ -235,7 +281,7 @@ pub fn exec_platform(target: &ConfiguredTarget) -> Label {
 
 /// An action as `--output=text` shows it.
 fn text(owned: &Owned, output: &AqueryOutput, mapping: &RepoMappingTable) -> String {
-    let Owned { target, action, arguments } = owned;
+    let Owned { target, action, arguments, aspects } = owned;
     let config = target.config.get();
     let platform = exec_platform(target);
     let mut out = String::new();
@@ -245,6 +291,10 @@ fn text(owned: &Owned, output: &AqueryOutput, mapping: &RepoMappingTable) -> Str
     writeln!(out, "  Target: {}", display_label(target.label, mapping)).ok();
     writeln!(out, "  Configuration: {}", config.output_directory).ok();
     writeln!(out, "  Execution platform: {}", display_label(platform, mapping)).ok();
+    if !aspects.is_empty() {
+        let described: Vec<String> = aspects.iter().rev().map(|aspect| aspect_description(aspect, mapping)).collect();
+        writeln!(out, "  AspectDescriptors: [{}]", described.join("\n    -> ")).ok();
+    }
     writeln!(out, "  ActionKey: {}", action_key(action)).ok();
     if output.include_artifacts {
         writeln!(out, "  Inputs: [{}]", sorted_paths(&owned.inputs()).join(", ")).ok();
@@ -297,14 +347,18 @@ fn command(owned: &Owned) -> Option<String> {
     Some(format!("{}\n", escaped.join(" ")))
 }
 
-/// How many actions there are, and of each mnemonic, configuration and
-/// execution platform, fewest first.
+/// How many actions there are, and of each mnemonic, configuration,
+/// execution platform and aspect, fewest first.
 fn summary(owned: &[Owned], mapping: &RepoMappingTable) -> String {
     let mut mnemonics: HashMap<String, usize> = HashMap::new();
     let mut configurations: HashMap<String, usize> = HashMap::new();
+    let mut aspects: HashMap<String, usize> = HashMap::new();
     let mut platforms: HashMap<String, usize> = HashMap::new();
-    for Owned { target, action, .. } in owned {
+    for Owned { target, action, aspects: applied, .. } in owned {
         *mnemonics.entry(action.mnemonic.to_string()).or_default() += 1;
+        for aspect in applied {
+            *aspects.entry(aspect_name(aspect, mapping)).or_default() += 1;
+        }
         *configurations.entry(target.config.get().output_directory.clone()).or_default() += 1;
         *platforms.entry(display_label(exec_platform(target), mapping)).or_default() += 1;
     }
@@ -313,7 +367,7 @@ fn summary(owned: &[Owned], mapping: &RepoMappingTable) -> String {
         1 => "1 total action.\n".to_string(),
         count => format!("{count} total actions.\n"),
     };
-    for (title, counts) in [("Mnemonics:", mnemonics), ("Configurations:", configurations), ("Execution Platforms:", platforms)] {
+    for (title, counts) in [("Mnemonics:", mnemonics), ("Configurations:", configurations), ("Execution Platforms:", platforms), ("Aspects:", aspects)] {
         if counts.is_empty() {
             continue;
         }

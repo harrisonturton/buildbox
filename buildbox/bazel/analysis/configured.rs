@@ -56,6 +56,9 @@ pub struct ConfiguredTarget {
     pub incompatible: Option<Arc<Incompatibility>>,
     /// The targets it depends on directly, as `cquery` follows them.
     pub deps: Vec<ConfiguredDep>,
+    /// The applications of aspects to its dependencies, whose own
+    /// dependencies and actions `cquery` and `aquery` include.
+    pub aspects: Vec<ConfiguredTargetKey>,
     /// The platform its actions run on, for a rule.
     pub exec_platform: Option<Label>,
     size: usize,
@@ -260,12 +263,14 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     }
     let fingerprint = fingerprint(key, rule, &setup.implementation, &deps, &setup.toolchains);
     let edges = dependency_edges(ctx, key, package, rule, &setup, &deps).await?;
+    let applications = aspect_applications(&deps);
     let exec_platform = setup.toolchains.exec_platform.unwrap_or(key.config.get().host_platform);
     let input = rule_input(ctx, key, package, setup, deps).await?;
     let analyzed = evaluate_reporting(ctx, label, input, heap_name("target", key, fingerprint)).await?;
     let mut target = configured(ctx, key, class_ref.kind, is_test, analyzed, fingerprint);
     target.deps = edges;
     target.exec_platform = Some(exec_platform);
+    target.aspects = applications;
     Ok(target)
 }
 
@@ -575,6 +580,32 @@ async fn dependency_edges(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package
     Ok(edges)
 }
 
+/// The applications of aspects to a target's dependencies: each but the
+/// first of what a dependency with aspects applied is.
+pub(crate) fn aspect_applications(deps: &BTreeMap<(Label, ConfigId), Dep>) -> Vec<ConfiguredTargetKey> {
+    let mut applications = Vec::new();
+    for dep in deps.values() {
+        if let Dep::Aspect(applied) = dep {
+            applications.extend(applied.iter().skip(1).map(|target| ConfiguredTargetKey { label: target.label, config: target.config }));
+        }
+    }
+    applications.sort();
+    applications.dedup();
+    applications
+}
+
+/// The edges to the dependencies an aspect's own attributes name, which
+/// are implicit: the BUILD file doesn't name them.
+pub(crate) fn aspect_edges(own: &RuleSetup, deps: &BTreeMap<(Label, ConfigId), Dep>) -> Result<Vec<ConfiguredDep>, SkyError> {
+    let mut edges = Vec::new();
+    for (label, config, _) in wanted_deps(&own.class, &own.attrs, own.deps_config, own.exec_config, &own.attr_configs)? {
+        if let Some(dep) = deps.get(&(label, config)) {
+            add_edge(&mut edges, dep_edge(label, config, dep, true));
+        }
+    }
+    Ok(edges)
+}
+
 /// The conditions of the `select()`s of a rule's attributes, as given or
 /// by default, but for `//conditions:default`.
 fn conditions(rule: &Rule, class: &RuleClass) -> Vec<Label> {
@@ -830,6 +861,7 @@ pub(crate) fn forwarded(key: ConfiguredTargetKey, target: &ConfiguredTarget) -> 
             implicit: false,
         }],
         exec_platform: target.exec_platform,
+        aspects: Vec::new(),
         size: 64,
     })
 }
@@ -864,6 +896,7 @@ pub(crate) fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_t
         incompatible: None,
         deps: Vec::new(),
         exec_platform: None,
+        aspects: Vec::new(),
         size,
     }
 }

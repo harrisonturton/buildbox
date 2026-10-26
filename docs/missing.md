@@ -63,8 +63,9 @@ Starlark aspects work as Bazel's do:
 Bazel 9 has no native aspects that users apply, only its validation
 aspect, which bb doesn't have.
 
-Still missing: aspects in `cquery` and `aquery` (`--include_aspects`),
-which neither shows yet.
+`cquery` counts what an aspect's own attributes depend on as dependencies
+of the rule that attaches it, and `aquery` lists aspects' actions with
+the aspects that made them, as Bazel's do with `--include_aspects`.
 
 ## 3. Execution platforms and exec groups
 
