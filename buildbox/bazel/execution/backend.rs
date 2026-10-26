@@ -1,11 +1,14 @@
 //! Where actions run and their results are kept.
 
+use crate::digest::BlobDigest;
 use actioncache::ActionCache;
 use cas::Cas;
 use executor::Executor;
 use skyframe::SkyError;
-use std::sync::Arc;
-use tokio::sync::{Semaphore, SemaphorePermit};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
+use tokio::sync::{OnceCell, Semaphore, SemaphorePermit};
 use tracing::Instrument;
 
 /// The stores and executor actions use, as a graph service: those of this
@@ -16,6 +19,9 @@ pub struct Backend {
     pub executor: Arc<dyn Executor>,
     pub runners: Runners,
     staging: Semaphore,
+    /// Source files being put in the CAS, by digest, so that actions that
+    /// need the same file at once put it there once.
+    uploads: Mutex<HashMap<BlobDigest, Arc<OnceCell<()>>>>,
 }
 
 /// What Bazel would call the ways a backend gets an action's result, for
@@ -60,7 +66,21 @@ impl Backend {
             executor,
             runners,
             staging: Semaphore::new(max_staged.max(1)),
+            uploads: Mutex::default(),
         }
+    }
+
+    /// Put the source file at `source` in the CAS as `digest`, or wait for
+    /// the upload of it already under way.
+    pub async fn upload_source(&self, digest: BlobDigest, source: PathBuf) -> Result<(), cas::CasError> {
+        let upload = self.uploads().entry(digest).or_default().clone();
+        let uploaded = upload.get_or_try_init(|| async { self.cas.put_file(&source).await.map(|_| ()) }).await;
+        self.uploads().remove(&digest);
+        uploaded.copied()
+    }
+
+    fn uploads(&self) -> MutexGuard<'_, HashMap<BlobDigest, Arc<OnceCell<()>>>> {
+        self.uploads.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Wait for a turn to prepare and run an action. Actions whose inputs

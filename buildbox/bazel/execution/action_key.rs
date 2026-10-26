@@ -4,7 +4,7 @@ use crate::backend::Backend;
 use crate::digest::BlobDigest;
 use crate::source::{SourceDigestKey, SourceTree, SourceTreeKey};
 use bazel_analysis::{Action, ActionKind, Artifact, ConfiguredTargetKey};
-use bazel_fs::{FileState, FileStateKey, RootedPath};
+use bazel_fs::{FileState, FileStateKey, RootedPath, Workspace};
 use futures::StreamExt;
 use bazel_loading::RepoRootKey;
 use bazel_progress::Progress;
@@ -141,7 +141,7 @@ pub struct Input {
     pub digest: BlobDigest,
     pub executable: bool,
     pub is_directory: bool,
-    pub source: Option<PathBuf>,
+    pub source: Option<SourceLocation>,
     /// A source directory's contents, which go in the input tree file by
     /// file.
     pub tree: Option<Arc<SourceTree>>,
@@ -150,14 +150,65 @@ pub struct Input {
 impl Input {
     /// The source files to upload for this input, if it's in the CAS as
     /// `digest`: itself, or each file of its source tree.
-    fn sources(&self) -> Vec<(cas::Digest, Option<PathBuf>)> {
+    fn sources(&self) -> Vec<(BlobDigest, Option<SourceFile<'_>>)> {
         let Some(tree) = &self.tree else {
-            return vec![(self.digest.to_cas(), self.source.clone())];
+            let file = self.source.as_ref().map(|location| SourceFile { location, within: None });
+            return vec![(self.digest, file)];
         };
-        let Some(dir) = &self.source else {
+        let Some(location) = &self.source else {
             return Vec::new();
         };
-        tree.files.iter().map(|(path, digest, _)| (digest.to_cas(), Some(dir.join(path)))).collect()
+        let files = tree.files.iter().map(|(path, digest, _)| {
+            let file = SourceFile { location, within: Some(path.as_str()) };
+            (*digest, Some(file))
+        });
+        files.collect()
+    }
+}
+
+/// Where a source file or directory is. Actions hold one for each source
+/// input while they're prepared, so it's resolved to a path on disk only
+/// when it's uploaded.
+#[derive(Clone)]
+pub struct SourceLocation {
+    workspace: Arc<Workspace>,
+    path: RootedPath,
+}
+
+impl SourceLocation {
+    fn new(ctx: &Ctx, path: RootedPath) -> Result<SourceLocation, SkyError> {
+        let workspace = ctx.global::<Workspace>()?;
+        Ok(SourceLocation { workspace, path })
+    }
+
+    /// The path on disk.
+    fn resolve(&self) -> PathBuf {
+        self.path.resolve_in(&self.workspace.root)
+    }
+}
+
+impl std::fmt::Debug for SourceLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.path)
+    }
+}
+
+/// A source file to upload: a source input, or a file in a source
+/// directory.
+#[derive(Clone, Copy)]
+struct SourceFile<'a> {
+    location: &'a SourceLocation,
+    /// The file's path in the directory, if it's in one.
+    within: Option<&'a str>,
+}
+
+impl SourceFile<'_> {
+    fn resolve(&self) -> PathBuf {
+        let path = self.location.resolve();
+        match self.within {
+            Some(within) => path.join(within),
+            None => path,
+        }
     }
 }
 
@@ -210,7 +261,7 @@ async fn source_input(ctx: &Ctx, artifact: Artifact) -> Result<Input, SkyError> 
         digest: blob,
         executable: digest.executable,
         is_directory: false,
-        source: Some(rooted.resolve(ctx)?),
+        source: Some(SourceLocation::new(ctx, rooted)?),
         tree: None,
     })
 }
@@ -227,7 +278,7 @@ async fn source_directory_input(ctx: &Ctx, rooted: RootedPath, label: bazel_labe
         digest: tree.digest(),
         executable: false,
         is_directory: true,
-        source: Some(rooted.resolve(ctx)?),
+        source: Some(SourceLocation::new(ctx, rooted)?),
         tree: Some(tree),
     })
 }
@@ -237,24 +288,52 @@ pub const MISSING_INPUT: &str = "missing input file ";
 
 /// Make sure an input is in the CAS, uploading it if it's a source file.
 pub async fn upload(backend: &Backend, inputs: &[&Input]) -> Result<(), SkyError> {
-    let by_digest: HashMap<cas::Digest, Option<PathBuf>> = inputs.iter().flat_map(|input| input.sources()).collect();
-    let digests: Vec<cas::Digest> = by_digest.keys().cloned().collect();
-    let missing = backend.cas.find_missing(&digests).await.map_err(cas_error)?;
-    let mut uploads = Vec::with_capacity(missing.len());
+    let by_digest: HashMap<BlobDigest, Option<SourceFile<'_>>> = inputs.iter().flat_map(|input| input.sources()).collect();
+    let missing = find_missing(backend, by_digest.keys()).await?;
+    let mut sources = Vec::with_capacity(missing.len());
     for digest in missing {
         let Some(source) = by_digest.get(&digest) else {
             continue;
         };
         let Some(source) = source else {
-            return Err(SkyError::transient(format!("an action's output {digest} is no longer in the CAS")));
+            return Err(SkyError::transient(format!("an action's output {} is no longer in the CAS", digest.to_cas())));
         };
-        uploads.push(backend.cas.put_file(source));
+        sources.push((digest, *source));
     }
-    let results: Vec<_> = futures::stream::iter(uploads).buffer_unordered(UPLOADS).collect().await;
-    for result in results {
-        result.map_err(cas_error)?;
+    upload_sources(backend, sources).await
+}
+
+/// Upload source files, [`UPLOADS`] at a time, resolving each one's path
+/// only as its upload starts.
+async fn upload_sources(backend: &Backend, sources: Vec<(BlobDigest, SourceFile<'_>)>) -> Result<(), SkyError> {
+    let mut pending = sources.into_iter();
+    let mut running = futures::stream::FuturesUnordered::new();
+    let mut failed = None;
+    loop {
+        while running.len() < UPLOADS {
+            let Some((digest, source)) = pending.next() else {
+                break;
+            };
+            running.push(backend.upload_source(digest, source.resolve()));
+        }
+        let Some(result) = running.next().await else {
+            break;
+        };
+        if let Err(error) = result {
+            failed.get_or_insert(error);
+        }
     }
-    Ok(())
+    match failed {
+        Some(error) => Err(cas_error(error)),
+        None => Ok(()),
+    }
+}
+
+/// Which of `digests` the CAS lacks.
+async fn find_missing(backend: &Backend, digests: impl Iterator<Item = &BlobDigest>) -> Result<Vec<BlobDigest>, SkyError> {
+    let digests: Vec<cas::Digest> = digests.map(BlobDigest::to_cas).collect();
+    let missing = backend.cas.find_missing(&digests).await.map_err(cas_error)?;
+    Ok(missing.iter().map(BlobDigest::from_cas).collect())
 }
 
 /// How many blobs an action uploads at once.

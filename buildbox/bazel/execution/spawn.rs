@@ -16,6 +16,7 @@ use futures::StreamExt;
 use persist::PersistedMap;
 use skycodec::{Fingerprint, Fingerprinter};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt::{self, Write};
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -25,7 +26,7 @@ const MAX_OUTPUT_IN_ERROR: usize = 64 * 1024;
 /// A command to run through the backend.
 pub struct SpawnRequest {
     /// The files of the input tree, by path.
-    pub inputs: BTreeMap<String, Input>,
+    pub inputs: BTreeMap<TreePath, Input>,
     pub arguments: Vec<String>,
     /// Sorted by name.
     pub env: Vec<(String, String)>,
@@ -37,6 +38,29 @@ pub struct SpawnRequest {
     pub timeout: Option<std::time::Duration>,
     /// What to call the command in messages.
     pub description: String,
+}
+
+/// Where an input goes in an action's input tree. Actions hold one for each
+/// input while they're prepared, so most are interned paths, written out
+/// only as the tree is built.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TreePath {
+    /// A path relative to the execution root.
+    Exec(PathId),
+    /// An entry of a runfiles tree: the tree's directory, and the entry's
+    /// path in it.
+    Runfile(PathId, PathId),
+    Text(String),
+}
+
+impl fmt::Display for TreePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TreePath::Exec(path) => write!(f, "{path}"),
+            TreePath::Runfile(dir, path) => write!(f, "{dir}/{path}"),
+            TreePath::Text(path) => f.write_str(path),
+        }
+    }
 }
 
 /// What running a command produced.
@@ -91,7 +115,7 @@ struct Prepared {
 
 /// Build a request's input tree, and upload it with the inputs and the
 /// command.
-async fn prepare(backend: &Backend, inputs: BTreeMap<String, Input>, request: &SpawnRequest) -> Result<Prepared, SkyError> {
+async fn prepare(backend: &Backend, inputs: BTreeMap<TreePath, Input>, request: &SpawnRequest) -> Result<Prepared, SkyError> {
     let span = tracing::info_span!("input_tree", inputs = inputs.len());
     let tree = input_tree(backend, &inputs, &request.output_directories).instrument(span).await?;
     let command = command_proto(request);
@@ -316,7 +340,7 @@ impl LocalActionCache {
 /// input's path and digest.
 fn local_key(request: &SpawnRequest) -> Fingerprint {
     let mut fingerprinter = Fingerprinter::new();
-    fingerprinter.bytes(b"bb local action v1");
+    fingerprinter.bytes(b"bb local action v2");
     let mut strings = |strings: &[String]| {
         fingerprinter.u64(strings.len() as u64);
         for string in strings {
@@ -331,7 +355,10 @@ fn local_key(request: &SpawnRequest) -> Fingerprint {
     }
     fingerprinter.u64(request.timeout.map_or(0, |timeout| timeout.as_millis() as u64));
     fingerprinter.u64(request.inputs.len() as u64);
-    for (path, input) in &request.inputs {
+    let mut path = String::new();
+    for (tree_path, input) in &request.inputs {
+        path.clear();
+        write!(path, "{tree_path}").expect("writing to a String can't fail");
         fingerprinter.u64(path.len() as u64).bytes(path.as_bytes());
         fingerprinter.bytes(input.digest.to_cas().hash().as_bytes()).u64(input.digest.to_cas().size_bytes() as u64);
         fingerprinter.u64(input.executable as u64 | (input.is_directory as u64) << 1);
@@ -402,16 +429,14 @@ async fn owner_actions(ctx: &Ctx, owner: ConfiguredTargetKey, mut paths: Vec<Pat
 
 /// Every input, by its path in the input tree: the action's inputs, and
 /// the entries of its tools' runfiles trees.
-async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<String, Input>, NotReady> {
+async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<TreePath, Input>, NotReady> {
     let unique = action.all_inputs();
     let results = futures::future::join_all(unique.iter().map(|artifact| input(ctx, *artifact))).await;
-    let mut by_artifact: BTreeMap<Artifact, Input> = BTreeMap::new();
+    let mut found = Vec::with_capacity(unique.len());
     let mut missing = Vec::new();
-    for (artifact, result) in unique.into_iter().zip(results) {
+    for result in results {
         match result {
-            Ok(input) => {
-                by_artifact.insert(artifact, input);
-            }
+            Ok(input) => found.push(input),
             Err(error) => match error.message().strip_prefix(MISSING_INPUT) {
                 Some(label) => missing.push(label.trim_matches('\'').to_string()),
                 None => return Err(NotReady::Failed(error)),
@@ -421,13 +446,17 @@ async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<String, Input>, N
     if !missing.is_empty() {
         return Err(NotReady::MissingInputs(missing));
     }
-    let mut paths: BTreeMap<String, Input> = BTreeMap::new();
+    let input_of = |artifact: &Artifact| {
+        let index = unique.binary_search(artifact).expect("all_inputs lists every input");
+        found[index].clone()
+    };
+    let mut paths: BTreeMap<TreePath, Input> = BTreeMap::new();
     action.inputs.for_each(|artifact| {
-        paths.insert(artifact.exec_path.to_string(), by_artifact[&artifact].clone());
+        paths.insert(TreePath::Exec(artifact.exec_path), input_of(&artifact));
     });
     for tree in &action.runfiles {
         for (path, artifact) in &tree.entries {
-            paths.insert(format!("{}/{path}", tree.dir), by_artifact[artifact].clone());
+            paths.insert(TreePath::Runfile(tree.dir, *path), input_of(artifact));
         }
     }
     Ok(paths)
@@ -437,7 +466,7 @@ async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<String, Input>, N
 /// other actions are spliced in from their `Tree`s. The action's output
 /// directories are in it, empty, as Bazel gives them, since tools expect
 /// them to exist and workers don't create them.
-async fn input_tree(backend: &Backend, inputs: &BTreeMap<String, Input>, output_directories: &[String]) -> Result<crate::inputs::MerkleTree, SkyError> {
+async fn input_tree(backend: &Backend, inputs: &BTreeMap<TreePath, Input>, output_directories: &[String]) -> Result<crate::inputs::MerkleTree, SkyError> {
     let mut tree = InputTree::default();
     let mut blobs = Vec::new();
     if !output_directories.is_empty() {
@@ -448,6 +477,7 @@ async fn input_tree(backend: &Backend, inputs: &BTreeMap<String, Input>, output_
         }
     }
     for (path, input) in inputs {
+        let path = &path.to_string();
         if let Some(source_tree) = &input.tree {
             add_source_tree(&mut tree, &mut blobs, path, source_tree)?;
             continue;

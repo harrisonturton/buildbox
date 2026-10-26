@@ -3,7 +3,7 @@
 use crate::action_key::{Input, cas_error, input, progress};
 use crate::backend::Backend;
 use crate::digest::BlobDigest;
-use crate::spawn::{SpawnRequest, execute, finish};
+use crate::spawn::{SpawnRequest, TreePath, execute, finish};
 use bazel_analysis::{Artifact, ConfiguredTargetKey, FileValue, Runfiles, runfiles_repo_name};
 use bazel_label::{Label, RepoName};
 use bazel_loading::{PackageKey, RepoMappingKey};
@@ -218,14 +218,14 @@ impl TestSpec {
     async fn request(&self, ctx: &Ctx) -> Result<SpawnRequest, SkyError> {
         let setup = Artifact::source(Label::parse_canonical(TEST_SETUP).map_err(|error| SkyError::new(error.to_string()))?);
         let mut inputs = BTreeMap::new();
-        inputs.insert(setup.exec_path.to_string(), input(ctx, setup).await?);
-        inputs.insert(self.executable.exec_path.to_string(), input(ctx, self.executable).await?);
+        inputs.insert(TreePath::Exec(setup.exec_path), input(ctx, setup).await?);
+        inputs.insert(TreePath::Exec(self.executable.exec_path), input(ctx, self.executable).await?);
         let srcdir = self.srcdir();
         for (path, artifact) in &self.runfiles {
-            inputs.insert(format!("{srcdir}/{path}"), input(ctx, *artifact).await?);
+            inputs.insert(TreePath::Text(format!("{srcdir}/{path}")), input(ctx, *artifact).await?);
         }
         let mapping = repo_mapping(ctx, &self.runfiles).await?;
-        inputs.insert(format!("{srcdir}/_repo_mapping"), blob_input(ctx, mapping.as_bytes()).await?);
+        inputs.insert(TreePath::Text(format!("{srcdir}/_repo_mapping")), blob_input(ctx, mapping.as_bytes()).await?);
 
         let mut arguments = vec![setup.exec_path.to_string(), self.executable.short_path()];
         arguments.extend(self.args.iter().cloned());
