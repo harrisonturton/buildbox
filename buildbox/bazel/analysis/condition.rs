@@ -151,12 +151,9 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-/// Whether a Starlark flag has a value: the command line's, or its default.
-async fn flag_matches(ctx: &Ctx, config: &BuildConfiguration, flag: Label, expected: &str) -> Result<bool, SkyError> {
-    let flag = crate::platform::actual(ctx, flag).await?;
-    if let Some((_, value)) = config.options.starlark_flags.iter().find(|(label, _)| *label == flag) {
-        return Ok(flag_value_matches(value, expected));
-    }
+/// The default of the build setting `flag`, which must be the target
+/// itself rather than an alias.
+pub(crate) async fn build_setting_default(ctx: &Ctx, flag: Label) -> Result<AttrValue, SkyError> {
     let package = ctx.compute(&PackageKey(flag.package)).await?;
     let Some(Target::Rule(rule)) = package.0.target(flag.name) else {
         return Err(SkyError::new(format!("{flag} isn't a build setting")));
@@ -167,6 +164,16 @@ async fn flag_matches(ctx: &Ctx, config: &BuildConfiguration, flag: Label, expec
         .or_else(|| rule.attr(Symbol::intern("default_value")))
         .cloned()
         .unwrap_or(AttrValue::None);
+    Ok(default)
+}
+
+/// Whether a Starlark flag has a value: the command line's, or its default.
+async fn flag_matches(ctx: &Ctx, config: &BuildConfiguration, flag: Label, expected: &str) -> Result<bool, SkyError> {
+    let flag = crate::platform::actual(ctx, flag).await?;
+    if let Some((_, value)) = config.options.starlark_flags.iter().find(|(label, _)| *label == flag) {
+        return Ok(flag_value_matches(value, expected));
+    }
+    let default = build_setting_default(ctx, flag).await?;
     let default = match default {
         AttrValue::Bool(value) => value.to_string(),
         AttrValue::Int(value) => value.to_string(),

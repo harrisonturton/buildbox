@@ -15,18 +15,25 @@ roughly in order of how many real repositories each gap blocks.
   reads; a `config_setting` on any other fails rather than not matching.
   Transitions need every option they read or write registered, and
   Bazel's own exec transition reads about 150.
-- **Transitions are no-ops.** `dep_config` maps `Cfg::Transition` to the
-  parent's configuration (`buildbox/bazel/analysis/configured.rs`).
-  Incoming rule transitions (`rule(cfg = ...)`) are ignored,
-  `ctx.split_attr` is always empty, and `transition()` and
-  `analysis_test_transition()` return opaque values
-  (`buildbox/bazel/starlark/bzl_api.rs`).
+- **Transitions are partly there.** Starlark transitions work on
+  attributes and on rules (`rule(cfg = ...)`), including splits and
+  `ctx.split_attr` (`buildbox/bazel/analysis/transition.rs`), and their
+  output directories are named as Bazel names them, against the top-level
+  configuration. Still missing:
+  - Starlark flags are held as text, so the output directories of
+    transitions that set `string_list` flags hash differently from Bazel's,
+    and the command line doesn't check a flag's type.
+  - Errors in transitions are reported at the target, not at the
+    transition, and without Bazel's second "on dependency edge" error.
+  - `analysis_test_transition`, and Bazel's own transitions that bb only
+    stands in for, such as Apple's splits.
 - **The exec configuration is the host's.** `BuildConfiguration::exec()`
   sets the platform to `host_platform` rather than to the execution
   platform toolchain resolution chose.
 
 rules_go, rules_rust, rules_oci, rules_python, platform-specific binary
-wrappers and multi-arch images all rely on transitions.
+wrappers and multi-arch images all rely on transitions, and most of them on
+the exec configuration being right.
 
 ## 2. Aspects
 
@@ -125,8 +132,8 @@ Bazel rejects.
 
 ## Suggested order
 
-1. A general options model, then transitions, then the exec configuration
-   from the resolved execution platform. cquery largely follows.
+1. The exec configuration from the resolved execution platform, through
+   Bazel's own Starlark exec transition. cquery largely follows.
 2. Aspects, which much of the remaining ecosystem depends on.
 
 ## Not yet audited

@@ -235,6 +235,7 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     class.toolchain_types = toolchain_types;
     class.optional_toolchain_types = optional;
     class.exec_groups = exec_groups(rule)?;
+    class.incoming_transition = rule.option("cfg").is_some_and(|cfg| crate::transition::Transition::from_value(cfg).is_some());
     Ok(class)
 }
 

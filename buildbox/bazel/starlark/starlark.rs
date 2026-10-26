@@ -27,6 +27,7 @@ pub mod select;
 pub mod subrule;
 pub mod symbolic_macro;
 pub mod toolchain_type;
+pub mod transition;
 
 pub use context::{EvalContext, FileKind, Globber};
 pub use eval::{EvalError, Loads, eval_bzl, eval_build, heap_name, loads, parse, parse_reporting_all};
@@ -189,6 +190,7 @@ fn bzl_globals_builder() -> GlobalsBuilder {
         .with(label_value::label_constructor)
         .with(rule_value::rule_function)
         .with(subrule::subrule_function)
+        .with(transition::transition_function)
         .with(provider::provider_function)
         .with(bzl_api::bzl_functions)
         .with(bzl_api::macro_function)

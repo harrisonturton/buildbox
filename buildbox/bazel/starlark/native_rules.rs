@@ -97,6 +97,7 @@ pub fn rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool
         toolchain_types: Vec::new(),
         optional_toolchain_types: Vec::new(),
         exec_groups: Vec::new(),
+        incoming_transition: false,
     }
 }
 

@@ -45,7 +45,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
         .targets
         .iter()
         .filter(|(_, target, _)| target.is_test && target.incompatible.is_none())
-        .map(|(label, _, _)| TestKey(ConfiguredTargetKey { label: *label, config: built.config }))
+        .map(|(label, target, _)| TestKey(ConfiguredTargetKey { label: *label, config: target.config }))
         .collect();
     let skipped: Vec<Label> = built
         .targets

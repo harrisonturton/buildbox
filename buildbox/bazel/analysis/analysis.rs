@@ -32,6 +32,7 @@ mod runfiles;
 mod state;
 mod target_value;
 mod toolchains;
+pub mod transition;
 mod workspace_status;
 
 pub use action::{Action, ActionKind, RunfilesTree, Spawn, StoredAction};

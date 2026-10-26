@@ -6,7 +6,7 @@ use crate::output::Output;
 use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey};
 use crate::written::Written;
 use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Incompatibility};
-use bazel_config::{BuildOptions, ConfigId, NativeOption, OptionType};
+use bazel_config::{BuildOptions, ConfigId, NativeOption, OptionType, OptionValue};
 use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
 use bazel_loading::RepoMappingKey;
@@ -632,7 +632,8 @@ async fn package_tests(universe: &Universe<&Session>, package: &bazel_packages::
     tests
 }
 
-/// The configuration targets are built in, from the options.
+/// The configuration targets are built in, from the options. As in Bazel,
+/// targets are built for the host platform unless `--platforms` says.
 fn configuration(context: &CommandContext<'_>, options: &ParsedOptions, main_mapping: &RepoMappingTable) -> Result<ConfigId, String> {
     let parse_label = |text: &str| {
         let label_context = LabelContext::new(bazel_label::PackageId::new(RepoName::MAIN, intern::PathId::ROOT), main_mapping);
@@ -643,6 +644,10 @@ fn configuration(context: &CommandContext<'_>, options: &ParsedOptions, main_map
         for text in options.all(option.name) {
             build.apply(option.name, text, &parse_label).map_err(|error| error.to_string())?;
         }
+    }
+    if build.labels("platforms").is_empty() {
+        let host = build.label("host_platform").into_iter().collect();
+        build.set("platforms", OptionValue::Labels(host)).map_err(|error| error.to_string())?;
     }
     build.action_env = action_env(context, options);
     for flag in options.all(bazel_options::STARLARK_FLAG) {
@@ -714,6 +719,7 @@ async fn analyze_one(
     key: ConfiguredTargetKey,
     analyzed: Option<UnboundedSender<Arc<ConfiguredTarget>>>,
 ) -> Result<Arc<ConfiguredTarget>, skyframe::SkyError> {
+    let key = bazel_analysis::transition::configured_key(session, key.label, key.config).await?;
     let result = session.evaluate(&key).await;
     if let (Ok(target), Some(analyzed)) = (&result, analyzed) {
         if target.incompatible.is_none() {

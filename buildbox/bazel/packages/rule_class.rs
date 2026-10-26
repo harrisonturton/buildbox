@@ -36,6 +36,9 @@ pub struct RuleClass {
     /// The exec groups the rule's actions can run in, by name: those
     /// `rule(exec_groups = ...)` declares, and `test` for test rules.
     pub exec_groups: Vec<Symbol>,
+    /// Whether `rule(cfg = ...)` gives the rule a transition, which changes
+    /// the configuration its targets are analyzed in.
+    pub incoming_transition: bool,
 }
 
 /// One attribute a rule class takes.

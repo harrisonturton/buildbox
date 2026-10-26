@@ -28,12 +28,6 @@ pub(crate) fn bzl_functions(builder: &mut GlobalsBuilder) {
         Ok(crate::opaque::Opaque::new("Aspect"))
     }
 
-    /// `transition(implementation, inputs, outputs)`.
-    fn transition<'v>(#[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> anyhow::Result<crate::opaque::Opaque> {
-        let _ = kwargs;
-        Ok(crate::opaque::Opaque::new("transition"))
-    }
-
     fn analysis_test_transition<'v>(#[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> anyhow::Result<crate::opaque::Opaque> {
         let _ = kwargs;
         Ok(crate::opaque::Opaque::new("transition"))

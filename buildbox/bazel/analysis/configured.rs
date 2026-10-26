@@ -9,11 +9,12 @@ use crate::build_ctx::{self, Dep, RuleInput};
 use crate::platform::PlatformKey;
 use crate::providers;
 use crate::toolchains::{self, ResolvedToolchains};
+use crate::transition::{AttrConfigs, configured_key, dep_configs};
 use bazel_config::ConfigId;
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule, PackageKey, RepoMappingKey};
 use bazel_progress::{Event, Progress};
-use bazel_packages::{AttrType, AttrValue, Cfg, Package, Rule, RuleClass, RuleClassRef, Target};
+use bazel_packages::{AttrType, AttrValue, Package, Rule, RuleClass, RuleClassRef, Target};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode, Fingerprint, Fingerprinter};
 use skyframe::{Ctx, Key, SkyError, Storage, Value};
@@ -166,8 +167,12 @@ async fn no_such_target(ctx: &Ctx, label: Label, package: &Package) -> String {
 
 /// What implements a rule class.
 pub enum Implementation {
-    /// A function in a `.bzl` file.
-    Starlark { module: Arc<BzlModule>, implementation: OwnedFrozenValue },
+    /// A function in a `.bzl` file, and the rule it implements.
+    Starlark {
+        module: Arc<BzlModule>,
+        rule: OwnedFrozenValue,
+        implementation: OwnedFrozenValue,
+    },
     /// A rule of Bazel's builtins, defined in `file`, whose Starlark
     /// implementation bb runs.
     Builtin { file: Label, implementation: OwnedFrozenValue },
@@ -199,9 +204,17 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         Ok(implementation) => implementation,
         Err(message) => return Err(located(ctx, label, message).await),
     };
+    let attr_configs = match &implementation {
+        Implementation::Starlark { rule, .. } => crate::transition::attr_configs(ctx, rule, &attrs, key.config).await,
+        Implementation::Builtin { .. } | Implementation::Native(_) => Ok(Vec::new()),
+    };
+    let attr_configs = match attr_configs {
+        Ok(attr_configs) => attr_configs,
+        Err(error) => return Err(located(ctx, label, format!("{}, of {} rule {label}", error.message(), class_ref.kind)).await),
+    };
     let deps = match is_stub(&implementation) {
         true => BTreeMap::new(),
-        false => analyze_deps(ctx, label, &class, &attrs, key.config).await?,
+        false => analyze_deps(ctx, label, &class, &attrs, key.config, &attr_configs).await?,
     };
     if let Some(reason) = incompatible_dep(key, &deps) {
         return incompatible(ctx, key, class_ref.kind, class.test, reason);
@@ -221,6 +234,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         config,
         class: class.clone(),
         attrs,
+        attr_configs,
         deps,
         build_file: package.build_file,
         implementation,
@@ -285,14 +299,6 @@ fn is_stub(implementation: &Implementation) -> bool {
     matches!(implementation, Implementation::Native(kind) if crate::native::STUBBED_BUILTINS.contains(&kind.as_str()))
 }
 
-/// The configuration a dependency through an attribute is analyzed in.
-fn dep_config(cfg: Cfg, config: ConfigId) -> ConfigId {
-    match cfg {
-        Cfg::Exec => config.get().exec(),
-        Cfg::Target | Cfg::Transition => config,
-    }
-}
-
 /// Analyze every dependency the rule's attributes name.
 async fn analyze_deps(
     ctx: &Ctx,
@@ -300,6 +306,7 @@ async fn analyze_deps(
     class: &RuleClass,
     attrs: &[(Symbol, AttrValue)],
     config: ConfigId,
+    attr_configs: &AttrConfigs,
 ) -> Result<BTreeMap<(Label, ConfigId), Dep>, SkyError> {
     let mut wanted = Vec::new();
     for (schema, (_, value)) in class.attrs.iter().zip(attrs) {
@@ -308,8 +315,10 @@ async fn analyze_deps(
         }
         let mut labels = Vec::new();
         value.labels(&mut labels);
-        let dep_config = dep_config(schema.cfg, config);
-        wanted.extend(labels.into_iter().filter(|label| !label.repo().is_unknown()).map(|label| (label, dep_config)));
+        let known: Vec<Label> = labels.iter().copied().filter(|label| !label.repo().is_unknown()).collect();
+        for (_, dep_config) in dep_configs(schema.cfg, schema.name, config, attr_configs) {
+            wanted.extend(known.iter().map(|label| (*label, dep_config)));
+        }
         for label in labels_of_unknown_repos(value) {
             return Err(SkyError::new(format!(
                 "attribute '{}': no repository visible as '@{}'",
@@ -375,11 +384,14 @@ async fn dep(ctx: &Ctx, label: Label, config: ConfigId) -> Result<Dep, DepError>
         None => Err(DepError::Missing(report_no_such_target(ctx, label, &package.0).await)),
         Some(Target::SourceFile(_)) => Ok(Dep::File(label, Artifact::source(label))),
         Some(Target::OutputFile { rule, .. }) => {
-            let owner = label.sibling(*rule);
-            analyzed(ConfiguredTargetKey { label: owner, config }).await?;
-            Ok(Dep::File(label, Artifact::derived(owner, &config.get(), artifact::name_path(label), false)))
+            let owner = configured_key(ctx, label.sibling(*rule), config).await.map_err(DepError::Failed)?;
+            analyzed(owner).await?;
+            Ok(Dep::File(label, Artifact::derived(owner.label, &owner.config.get(), artifact::name_path(label), false)))
         }
-        Some(_) => Ok(Dep::Target(analyzed(ConfiguredTargetKey { label, config }).await?)),
+        Some(_) => {
+            let key = configured_key(ctx, label, config).await.map_err(DepError::Failed)?;
+            Ok(Dep::Target(analyzed(key).await?))
+        }
     }
 }
 
@@ -420,12 +432,13 @@ async fn implementation(ctx: &Ctx, class: &RuleClassRef) -> Result<Implementatio
     let missing = || SkyError::new(format!("{bzl} doesn't export a rule named '{name}'"));
     let rule = module.module.get_any_visibility(name.as_str()).map_err(|_| missing())?.0;
     let implementation = rule
+        .clone()
         .try_map(|value| {
             let rule = bazel_starlark::rule_value::StarlarkRule::from_value(value.to_value()).ok_or(())?;
             rule.implementation.to_value().unpack_frozen().ok_or(())
         })
         .map_err(|()| missing())?;
-    Ok(Implementation::Starlark { module, implementation })
+    Ok(Implementation::Starlark { module, rule, implementation })
 }
 
 /// Identifies what a rule's analysis depends on.

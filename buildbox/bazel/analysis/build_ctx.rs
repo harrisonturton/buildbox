@@ -13,6 +13,7 @@ use crate::runfiles::{FilesToRun, Runfiles};
 use crate::state::RuleState;
 use crate::target_value::TargetValue;
 use crate::toolchains::{ResolvedToolchains, ToolchainContext};
+use crate::transition::AttrConfigs;
 use bazel_config::{BuildConfiguration, ConfigId};
 use bazel_label::{Label, RepoMappingTable, RepoName};
 use bazel_packages::{AttrSchema, AttrType, AttrValue, Cfg, RuleClass};
@@ -56,6 +57,9 @@ pub struct RuleInput {
     pub class: Arc<RuleClass>,
     /// Every attribute's value, in the class's order.
     pub attrs: Vec<(Symbol, AttrValue)>,
+    /// The configurations transitions give the dependencies through
+    /// attributes.
+    pub attr_configs: AttrConfigs,
     pub deps: BTreeMap<(Label, ConfigId), Dep>,
     pub build_file: Label,
     pub implementation: Implementation,
@@ -84,6 +88,12 @@ impl RuleInput {
 
     pub fn bool(&self, name: &str) -> bool {
         matches!(self.attr(name), Some(AttrValue::Bool(true)))
+    }
+
+    /// The configurations of the dependencies through an attribute, keyed
+    /// as a split transition names them.
+    pub fn dep_configs(&self, schema: &AttrSchema) -> Vec<(String, ConfigId)> {
+        crate::transition::dep_configs(schema.cfg, schema.name, self.config.id, &self.attr_configs)
     }
 }
 
@@ -126,10 +136,13 @@ impl<'v> Prepared<'v> {
         let Some(value) = input.attr(attr) else {
             return Vec::new();
         };
-        let config = dep_config(schema.cfg, input.config.id);
         let mut labels = Vec::new();
         value.labels(&mut labels);
-        labels.iter().filter_map(|label| self.deps.get(&(*label, config)).copied()).collect()
+        let mut targets = Vec::new();
+        for (_, config) in input.dep_configs(schema) {
+            targets.extend(labels.iter().filter_map(|label| self.deps.get(&(*label, config)).copied()));
+        }
+        targets
     }
 
     /// The files of the targets an attribute names.
@@ -139,13 +152,6 @@ impl<'v> Prepared<'v> {
             files.extend(target_files(target)?);
         }
         Ok(files)
-    }
-}
-
-fn dep_config(cfg: Cfg, config: ConfigId) -> ConfigId {
-    match cfg {
-        Cfg::Exec => config.get().exec(),
-        Cfg::Target | Cfg::Transition => config,
     }
 }
 
@@ -375,7 +381,7 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     set("toolchains", heap.alloc(ToolchainContext::new(&input.toolchains, definition_mapping(input), heap)));
     set("fragments", heap.alloc(crate::fragments::Fragments(options)));
     set("exec_groups", heap.alloc(exec_groups(input)));
-    set("split_attr", heap.alloc(AllocStruct(Vec::<(&str, Value<'v>)>::new())));
+    set("split_attr", split_attr_struct(input, prepared, heap));
     set("aspect_ids", heap.alloc(AllocList::EMPTY));
     set("build_setting_value", build_setting_value(input, heap));
     Ok(fields)
@@ -469,12 +475,13 @@ fn attr_value<'v>(input: &RuleInput, prepared: &Prepared<'v>, schema: &AttrSchem
     if APPLE_LATE_BOUND_ATTRS.contains(&schema.name.as_str()) && matches!(value, AttrValue::None) {
         return heap.alloc(Opaque::lenient(schema.name.as_str()));
     }
-    let config = dep_config(schema.cfg, input.config.id);
+    if schema.is_dependency && schema.cfg == Cfg::Transition && schema.ty.has_labels() && !schema.ty.is_output() {
+        return transitioned_value(input, prepared, schema, heap);
+    }
+    let config = input.dep_configs(schema).first().map(|(_, config)| *config).unwrap_or(input.config.id);
     let target = |label: &Label| prepared.deps.get(&(*label, config)).copied().unwrap_or_else(Value::new_none);
     match (schema.ty, value) {
         (AttrType::Output | AttrType::OutputList, _) => output_value(schema, &prepared.outputs, heap),
-        // A Starlark transition can split, so its attribute is a list.
-        (_, AttrValue::Label(label)) if schema.is_dependency && schema.cfg == Cfg::Transition => heap.alloc(AllocList([target(label)])),
         (_, AttrValue::Label(label)) if schema.is_dependency => target(label),
         (_, AttrValue::LabelList(labels)) if schema.is_dependency => heap.alloc(AllocList(labels.iter().map(target))),
         (_, AttrValue::LabelKeyedStringDict(entries)) if schema.is_dependency => {
@@ -485,6 +492,43 @@ fn attr_value<'v>(input: &RuleInput, prepared: &Prepared<'v>, schema: &AttrSchem
         }
         _ => bazel_starlark::convert::to_starlark(value, heap),
     }
+}
+
+/// The targets of an attribute with a Starlark transition, which may split
+/// them into several configurations: a list, as in Bazel, even of one.
+fn transitioned_value<'v>(input: &RuleInput, prepared: &Prepared<'v>, schema: &AttrSchema, heap: Heap<'v>) -> Value<'v> {
+    let targets = prepared.targets(input, schema.name.as_str());
+    heap.alloc(AllocList(targets))
+}
+
+/// `ctx.split_attr`: for each attribute with a transition, its targets in
+/// each configuration, by the configuration's name, or `None` for a
+/// transition to one.
+fn split_attr_struct<'v>(input: &RuleInput, prepared: &Prepared<'v>, heap: Heap<'v>) -> Value<'v> {
+    let mut fields = Vec::new();
+    for (attr, configs) in &input.attr_configs {
+        let Some(schema) = input.schema(*attr) else {
+            continue;
+        };
+        let mut labels = Vec::new();
+        if let Some(value) = input.attr(attr.as_str()) {
+            value.labels(&mut labels);
+        }
+        let mut by_key = Vec::new();
+        if !labels.is_empty() {
+            for (key, config) in configs {
+                let targets: Vec<Value<'v>> = labels.iter().filter_map(|label| prepared.deps.get(&(*label, *config)).copied()).collect();
+                let targets = match schema.ty {
+                    AttrType::Label => targets.first().copied().unwrap_or_else(Value::new_none),
+                    _ => heap.alloc(AllocList(targets)),
+                };
+                let key = if key.is_empty() { Value::new_none() } else { heap.alloc(key.as_str()) };
+                by_key.push((key, targets));
+            }
+        }
+        fields.push((attr.as_str(), heap.alloc(AllocDict(by_key))));
+    }
+    heap.alloc(AllocStruct(fields))
 }
 
 fn output_value<'v>(schema: &AttrSchema, outputs: &Predeclared, heap: Heap<'v>) -> Value<'v> {
