@@ -20,6 +20,7 @@ use starlark::values::{
     Freeze, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, StringValue, Trace, Value,
     ValueLifetimeless, ValueLike, starlark_value,
 };
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::fmt;
 use std::sync::Arc;
@@ -179,10 +180,12 @@ fn computed_defaults<'v, V: ValueLike<'v>>(
 
 /// The names of a Starlark function's parameters.
 fn parameter_names(function: Value<'_>) -> Vec<String> {
-    let starlark::docs::DocItem::Member(starlark::docs::DocMember::Function(doc)) = function.documentation() else {
+    let Some(parameters) = function.parameters_spec() else {
         return Vec::new();
     };
-    doc.params.pos_or_named.iter().chain(&doc.params.named_only).map(|param| param.name.clone()).collect()
+    let types = vec![starlark::typing::Ty::any(); parameters.len()];
+    let params = parameters.documentation(types, HashMap::new());
+    params.pos_or_named.into_iter().chain(params.named_only).map(|param| param.name).collect()
 }
 
 /// An attribute's plain default value, for a computed default to read.
@@ -439,5 +442,25 @@ pub(crate) fn rule_function(builder: &mut GlobalsBuilder) {
             exported: OnceLock::new(),
             exported_from: OnceLock::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parameter_names;
+    use starlark::environment::{Globals, Module};
+    use starlark::eval::Evaluator;
+    use starlark::syntax::{AstModule, Dialect};
+    use starlark::values::Value;
+
+    #[test]
+    fn names_the_parameters_that_can_be_passed_by_name() {
+        let names = Module::with_temp_heap(|module| {
+            let ast = AstModule::parse("test.bzl", "def f(a, b = 1, *args, c, **kwargs): pass\nf".to_owned(), &Dialect::Extended).unwrap();
+            let function = Evaluator::new(&module).eval_module(ast, &Globals::standard()).unwrap();
+            parameter_names(function)
+        });
+        assert_eq!(names, ["a", "b", "c"]);
+        assert!(parameter_names(Value::new_none()).is_empty());
     }
 }

@@ -124,16 +124,7 @@ fn format(template: Option<&str>, value: &str) -> anyhow::Result<String> {
 /// Whether a `map_each` function takes a directory expander as well as the
 /// item, as Bazel decides: by having two parameters or more.
 fn wants_directory_expander(function: Value<'_>) -> bool {
-    use starlark::docs::{DocItem, DocMember};
-    if function.get_type() != "function" {
-        return false;
-    }
-    let DocItem::Member(DocMember::Function(function)) = function.documentation() else {
-        return false;
-    };
-    let params = &function.params;
-    let count = params.pos_only.len() + params.pos_or_named.len() + params.named_only.len() + usize::from(params.args.is_some()) + usize::from(params.kwargs.is_some());
-    count >= 2
+    function.parameters_spec().is_some_and(|parameters| parameters.len() >= 2)
 }
 
 /// What `map_each` functions are given to expand directories with. bb
@@ -457,7 +448,23 @@ fn template_dict_methods(builder: &mut MethodsBuilder) {
 
 #[cfg(test)]
 mod tests {
-    use super::format;
+    use super::{format, wants_directory_expander};
+    use starlark::environment::{Globals, Module};
+    use starlark::eval::Evaluator;
+    use starlark::syntax::{AstModule, Dialect};
+    use starlark::values::{FrozenHeapName, Value};
+
+    fn eval(code: &str) -> starlark::environment::FrozenModule {
+        Module::with_temp_heap(|module| {
+            let ast = AstModule::parse("test.bzl", code.to_owned(), &Dialect::Extended).unwrap();
+            Evaluator::new(&module).eval_module(ast, &Globals::standard()).unwrap();
+            module.freeze_named(FrozenHeapName::User(Box::new("test".to_owned()))).unwrap()
+        })
+    }
+
+    fn wants_expander(module: &starlark::environment::FrozenModule, name: &str) -> bool {
+        wants_directory_expander(module.get(name).unwrap().value())
+    }
 
     #[test]
     fn formats_with_escaped_percents() {
@@ -465,5 +472,16 @@ mod tests {
         assert_eq!(format(Some("%%s is %s, 100%%"), "b").unwrap(), "%s is b, 100%");
         assert!(format(Some("%s%s"), "c").is_err());
         assert!(format(Some("%d"), "c").is_err());
+    }
+
+    #[test]
+    fn gives_a_directory_expander_to_functions_of_two_parameters_or_more() {
+        let module = eval("def one(x): pass\ndef two(x, y = 1): pass\ndef named(x, *, y): pass\ndef rest(*args): pass\nshort = lambda x, y: x\n");
+        assert!(!wants_expander(&module, "one"));
+        assert!(wants_expander(&module, "two"));
+        assert!(wants_expander(&module, "named"));
+        assert!(!wants_expander(&module, "rest"));
+        assert!(wants_expander(&module, "short"));
+        assert!(!wants_directory_expander(Value::new_none()));
     }
 }
