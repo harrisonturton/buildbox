@@ -9,6 +9,7 @@
 use bazel_config::{BuildOptions, ConfigId, LabelParser, NativeOption, OptionType, OptionValue};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName};
 use crate::configured::ConfiguredTargetKey;
+use crate::settings::BuildSetting;
 use bazel_loading::{BzlLoadKey, PackageKey, RepoMappingKey};
 use bazel_packages::{AttrValue, Cfg, RuleClassRef, Target};
 use bazel_starlark::attr_module::Attribute;
@@ -190,13 +191,14 @@ fn transitions_use(transitions: &[(Symbol, OwnedFrozenValue)]) -> (Vec<Label>, V
     (labels, repos)
 }
 
-/// Each build setting, resolved through aliases, with its default.
+/// Each build setting, resolved through aliases.
 async fn build_settings(ctx: &Ctx, labels: &[Label]) -> Result<Vec<BuildSetting>, SkyError> {
     let mut settings = Vec::with_capacity(labels.len());
     for label in labels {
-        let actual = crate::platform::actual(ctx, *label).await?;
-        let default = crate::condition::build_setting_default(ctx, actual).await?;
-        settings.push(BuildSetting { label: *label, actual, default });
+        let Some(setting) = crate::settings::build_setting(ctx, *label).await? else {
+            return Err(SkyError::new(format!("transition setting '{label}' isn't a build setting")));
+        };
+        settings.push(setting);
     }
     Ok(settings)
 }
@@ -240,15 +242,6 @@ fn attr_struct<'v>(attrs: &[(Symbol, AttrValue)], heap: Heap<'v>) -> Value<'v> {
     heap.alloc(AllocStruct(fields))
 }
 
-/// A Starlark build setting a transition reads or writes: the target it
-/// resolves to, through aliases, and its default.
-#[derive(Clone, Debug)]
-pub struct BuildSetting {
-    pub label: Label,
-    pub actual: Label,
-    pub default: AttrValue,
-}
-
 /// What a transition is applied to.
 pub struct TransitionInput<'a> {
     pub config: ConfigId,
@@ -290,7 +283,7 @@ fn settings_dict<'v>(transition: &Transition<'v>, input: &TransitionInput<'_>, h
             Setting::Native(name) => native_value(input.options, name, heap)?,
             Setting::Starlark(label) => {
                 let setting = build_setting(input, *label)?;
-                flag_value(input.options, setting, heap)
+                crate::settings::starlark_value(setting.value(input.options), heap)
             }
         };
         entries.push((given.as_str(), value));
@@ -323,29 +316,6 @@ fn native_value<'v>(options: &BuildOptions, name: &str, heap: Heap<'v>) -> anyho
 
 fn unsupported_option(name: &str) -> anyhow::Error {
     anyhow::anyhow!("transitions on '{COMMAND_LINE_OPTION_PREFIX}{name}' aren't supported by bb yet")
-}
-
-/// A Starlark flag's value: as the options set it, or its default.
-fn flag_value<'v>(options: &BuildOptions, setting: &BuildSetting, heap: Heap<'v>) -> Value<'v> {
-    let given = options.starlark_flags.iter().find(|(label, _)| *label == setting.actual).map(|(_, value)| value);
-    match given {
-        Some(text) => flag_text_value(text, &setting.default, heap),
-        None => bazel_starlark::convert::to_starlark(&setting.default, heap),
-    }
-}
-
-/// A flag's value given as text, typed as its default is.
-fn flag_text_value<'v>(text: &str, default: &AttrValue, heap: Heap<'v>) -> Value<'v> {
-    match default {
-        AttrValue::Bool(_) => Value::new_bool(matches!(text, "true" | "True" | "1" | "yes")),
-        AttrValue::Int(_) => text.parse::<i32>().map(|value| heap.alloc(value)).unwrap_or_else(|_| heap.alloc(text)),
-        AttrValue::StringList(_) => heap.alloc(AllocList(text.split(',').filter(|item| !item.is_empty()))),
-        AttrValue::Label(_) => match Label::parse_canonical(text) {
-            Ok(label) => heap.alloc(LabelValue(label)),
-            Err(_) => heap.alloc(text),
-        },
-        _ => heap.alloc(text),
-    }
 }
 
 /// The dicts of settings an implementation returned, keyed by the name of
@@ -385,8 +355,9 @@ fn transitioned(transition: &Transition<'_>, input: &TransitionInput<'_>, values
         return Ok(input.options.clone());
     }
     let values = declared_outputs(transition, values).map_err(|error| anyhow::anyhow!("invalid result from transition function: {error}"))?;
+    let package = transition.definition.package;
     let parse_label = |text: &str| {
-        let context = LabelContext::new(transition.definition.package, input.mapping);
+        let context = LabelContext::new(package, input.mapping);
         Label::parse(text, &context).map_err(|error| error.to_string())
     };
     let mut options = input.options.clone();
@@ -514,55 +485,21 @@ fn value_text(value: Value<'_>) -> String {
     value.to_str()
 }
 
-/// Set a Starlark flag, leaving it out of the options when it's set to its
-/// default, as Bazel does.
+/// Set a Starlark build setting to a value of its type.
 fn set_flag(options: &mut BuildOptions, setting: &BuildSetting, value: Value<'_>, parse_label: LabelParser<'_>) -> anyhow::Result<()> {
-    let text = flag_text(setting, value, parse_label)?;
-    options.starlark_flags.retain(|(label, _)| *label != setting.actual);
-    if text != default_text(&setting.default) {
-        options.starlark_flags.push((setting.actual, text));
-        options.starlark_flags.sort();
-    }
+    let converted = crate::settings::from_starlark(value, &setting.default, parse_label)
+        .map_err(|error| anyhow::anyhow!("Error parsing value for option '{}': {error}", setting.label))?;
+    let Some(converted) = converted else {
+        anyhow::bail!("Invalid value type for option '{}': want {}, got {}", setting.label, setting.default.type_name(), value.get_type());
+    };
+    options.set_flag(setting.actual, converted, &setting.default);
     Ok(())
-}
-
-/// A flag's value as the options hold it.
-fn flag_text(setting: &BuildSetting, value: Value<'_>, parse_label: LabelParser<'_>) -> anyhow::Result<String> {
-    let wrong_type = || anyhow::anyhow!("Invalid value type for option '{}': got {}", setting.label, value.get_type());
-    match &setting.default {
-        AttrValue::Bool(_) => value.unpack_bool().map(|value| value.to_string()).ok_or_else(wrong_type),
-        AttrValue::Int(_) => value.unpack_i32().map(|value| value.to_string()).ok_or_else(wrong_type),
-        AttrValue::StringList(_) => {
-            let items = bazel_starlark::convert::strings(value).ok_or_else(wrong_type)?;
-            Ok(items.join(","))
-        }
-        AttrValue::Label(_) => {
-            if let Some(label) = value.downcast_ref::<LabelValue>() {
-                return Ok(label.0.to_string());
-            }
-            let text = value.unpack_str().ok_or_else(wrong_type)?;
-            let label = parse_label(text).map_err(|error| anyhow::anyhow!("Error parsing value for option '{}': {error}", setting.label))?;
-            Ok(label.to_string())
-        }
-        _ => value.unpack_str().map(str::to_string).ok_or_else(wrong_type),
-    }
-}
-
-/// A flag's default as the options would hold it.
-fn default_text(default: &AttrValue) -> String {
-    match default {
-        AttrValue::Bool(value) => value.to_string(),
-        AttrValue::Int(value) => value.to_string(),
-        AttrValue::String(value) => value.clone(),
-        AttrValue::Label(label) => label.to_string(),
-        AttrValue::StringList(values) => values.join(","),
-        _ => String::new(),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bazel_config::FlagValue;
     use bazel_starlark::transition::TransitionGen;
     use starlark::environment::Globals;
     use starlark::syntax::{AstModule, Dialect};
@@ -592,7 +529,8 @@ mod tests {
         let flag = BuildSetting {
             label: label("//:flag"),
             actual: label("//:flag"),
-            default: AttrValue::String("default".to_string()),
+            default: FlagValue::String("default".to_string()),
+            spec: bazel_packages::BuildSettingSpec { flag: true, multiple: false },
         };
         let config = ConfigId::intern(options);
         let mapping = RepoMappingTable::new(definition.repo(), Vec::new());
@@ -628,7 +566,7 @@ mod tests {
         };
         assert_eq!(key, "");
         assert_eq!(options.strings("copt"), ["-DX"]);
-        assert_eq!(options.starlark_flags, [(label("//:flag"), "default!".to_string())]);
+        assert_eq!(options.starlark_flags, [(label("//:flag"), FlagValue::String("default!".to_string()))]);
         assert!(options.baseline.is_some());
     }
 

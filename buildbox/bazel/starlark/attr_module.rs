@@ -1,5 +1,6 @@
 //! The `attr` module: attribute descriptors for `rule()`.
 
+use crate::config_module::{ConfigChoice, ConfigKind};
 use allocative::Allocative;
 use bazel_packages::AttrType;
 use starlark::coerce::Coerce;
@@ -50,25 +51,21 @@ impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for AttributeGen<V> where Self: Pro
 
 impl<'v, V: ValueLike<'v>> AttributeGen<V> {
     /// Whether the dependency is built for the execution platform: `cfg =
-    /// "exec"`, or `config.exec(...)`, which bb only stands in for.
+    /// "exec"`, or `config.exec(...)`.
     pub fn is_exec(&self) -> bool {
         self.cfg.is_some_and(|cfg| {
             let cfg = cfg.to_value();
-            let opaque_exec = cfg.downcast_ref::<crate::opaque::Opaque>().is_some_and(|opaque| opaque.type_name == "config.exec()");
-            opaque_exec || matches!(cfg.unpack_str(), Some("exec") | Some("host"))
+            let config_exec = cfg.downcast_ref::<ConfigChoice>().is_some_and(|choice| choice.kind == ConfigKind::Exec);
+            config_exec || matches!(cfg.unpack_str(), Some("exec") | Some("host"))
         })
     }
 
     /// Whether the dependency's configuration is one a transition gives: a
-    /// Starlark transition, or one of Bazel's that bb only stands in for,
-    /// other than `config.exec()`, `config.target()` and `config.none()`.
+    /// Starlark transition, or one of Bazel's that bb only stands in for.
     pub fn has_transition(&self) -> bool {
         self.cfg.is_some_and(|cfg| {
             let cfg = cfg.to_value();
-            let other_opaque = cfg
-                .downcast_ref::<crate::opaque::Opaque>()
-                .is_some_and(|opaque| !matches!(opaque.type_name.as_str(), "config.exec()" | "config.target()" | "config.none()"));
-            other_opaque || crate::transition::Transition::from_value(cfg).is_some()
+            cfg.downcast_ref::<crate::opaque::Opaque>().is_some() || crate::transition::Transition::from_value(cfg).is_some()
         })
     }
 }

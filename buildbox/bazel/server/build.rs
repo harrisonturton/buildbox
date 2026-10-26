@@ -6,7 +6,8 @@ use crate::output::Output;
 use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey};
 use crate::written::Written;
 use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Incompatibility};
-use bazel_config::{BuildOptions, ConfigId, NativeOption, OptionType, OptionValue};
+use bazel_analysis::settings::BuildSetting;
+use bazel_config::{BuildOptions, ConfigId, FlagValue, LabelParser, NativeOption, OptionType, OptionValue};
 use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
 use bazel_loading::RepoMappingKey;
@@ -247,7 +248,7 @@ async fn analyze_and_build(
         Ok(requested) => requested,
         Err(code) => return Err(code),
     };
-    let config = match configuration(context, options, &main_mapping) {
+    let config = match configuration(context, session, options, &main_mapping).await {
         Ok(config) => config,
         Err(message) => {
             out.error(&message).await;
@@ -634,7 +635,7 @@ async fn package_tests(universe: &Universe<&Session>, package: &bazel_packages::
 
 /// The configuration targets are built in, from the options. As in Bazel,
 /// targets are built for the host platform unless `--platforms` says.
-fn configuration(context: &CommandContext<'_>, options: &ParsedOptions, main_mapping: &RepoMappingTable) -> Result<ConfigId, String> {
+async fn configuration(context: &CommandContext<'_>, session: &Session, options: &ParsedOptions, main_mapping: &RepoMappingTable) -> Result<ConfigId, String> {
     let parse_label = |text: &str| {
         let label_context = LabelContext::new(bazel_label::PackageId::new(RepoName::MAIN, intern::PathId::ROOT), main_mapping);
         Label::parse(text, &label_context).map_err(|error| error.to_string())
@@ -650,14 +651,66 @@ fn configuration(context: &CommandContext<'_>, options: &ParsedOptions, main_map
         build.set("platforms", OptionValue::Labels(host)).map_err(|error| error.to_string())?;
     }
     build.action_env = action_env(context, options);
-    for flag in options.all(bazel_options::STARLARK_FLAG) {
-        let (label, value) = flag.split_once('=').unwrap_or((flag, "true"));
-        let label = parse_label(label)?;
-        build.starlark_flags.retain(|(existing, _)| *existing != label);
-        build.starlark_flags.push((label, value.to_string()));
-    }
-    build.starlark_flags.sort();
+    set_starlark_flags(context, session, &mut build, options, main_mapping, &parse_label).await?;
     Ok(ConfigId::intern(&build))
+}
+
+/// Set the Starlark build settings the command line gives, `--//pkg:flag=value`,
+/// as their types read them. Each use of a setting that takes many values
+/// adds to it; for others, the last use wins.
+async fn set_starlark_flags(
+    context: &CommandContext<'_>,
+    session: &Session,
+    build: &mut BuildOptions,
+    options: &ParsedOptions,
+    main_mapping: &RepoMappingTable,
+    parse_label: LabelParser<'_>,
+) -> Result<(), String> {
+    let mut given: Vec<(BuildSetting, FlagValue)> = Vec::new();
+    for flag in options.all(bazel_options::STARLARK_FLAG) {
+        let (name, text) = flag.split_once('=').unwrap_or((flag, "true"));
+        let label = parse_label(name)?;
+        let Ok(Some(setting)) = bazel_analysis::settings::build_setting(session, label).await else {
+            return Err(unrecognized_flag(context, session, main_mapping, name, label).await);
+        };
+        if !setting.spec.flag {
+            return Err(format!("Unrecognized option: {name}={text}"));
+        }
+        let parsed = FlagValue::parse(text, &setting.default, setting.spec.multiple, parse_label);
+        let value = parsed.map_err(|_| format!("While parsing option {name}={text}: '{text}' is not a {}", setting.default.type_name()))?;
+        add_flag(&mut given, setting, value);
+    }
+    for (setting, value) in given {
+        build.set_flag(setting.actual, value, &setting.default);
+    }
+    Ok(())
+}
+
+/// The error for a flag that names no build setting: why the target it
+/// names doesn't exist, or that it isn't one, as Bazel says.
+async fn unrecognized_flag(context: &CommandContext<'_>, session: &Session, main_mapping: &RepoMappingTable, name: &str, label: Label) -> String {
+    let package = working_package(&context.workspace_root, &context.working_directory);
+    let query_options = QueryOptions {
+        implicit_deps: true,
+        tool_deps: true,
+        keep_going: false,
+    };
+    let universe = Universe::new(session, query_options, package, Arc::new(main_mapping.clone()), context.workspace_root.clone());
+    match universe.target(label).await {
+        Err(error) => format!("Skipping '{name}': {}", error.0),
+        Ok(_) => format!("Unrecognized option: {name}"),
+    }
+}
+
+/// Give a build setting another value: added to its others if it takes
+/// many, or else replacing them.
+fn add_flag(given: &mut Vec<(BuildSetting, FlagValue)>, setting: BuildSetting, value: FlagValue) {
+    let existing = given.iter_mut().find(|(existing, _)| existing.actual == setting.actual);
+    match (existing, value) {
+        (Some((existing, FlagValue::Strings(values))), FlagValue::Strings(more)) if existing.spec.multiple => values.extend(more),
+        (Some((_, current)), value) => *current = value,
+        (None, value) => given.push((setting, value)),
+    }
 }
 
 /// The environment of actions that use the default shell environment:

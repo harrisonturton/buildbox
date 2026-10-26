@@ -5,7 +5,7 @@ use bazel_loading::PackageKey;
 use bazel_packages::{AttrValue, Package, Rule, Target};
 use intern::Symbol;
 use skycodec::{Decode, Encode};
-use skyframe::{Ctx, Key, SkyError, encoded_value};
+use skyframe::{Compute, Ctx, Key, SkyError, encoded_value};
 
 /// A platform: the constraint values it has, each with its setting.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
@@ -104,7 +104,7 @@ pub async fn load_rule(ctx: &Ctx, label: Label, kind: &str) -> Result<Rule, SkyE
 
 /// The target an alias stands for, following aliases; other targets stand
 /// for themselves.
-pub async fn actual(ctx: &Ctx, label: Label) -> Result<Label, SkyError> {
+pub async fn actual(ctx: &impl Compute, label: Label) -> Result<Label, SkyError> {
     let mut label = label;
     for _ in 0..16 {
         let package = ctx.compute(&PackageKey(label.package)).await?;

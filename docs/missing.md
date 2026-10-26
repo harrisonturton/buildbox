@@ -20,9 +20,6 @@ roughly in order of how many real repositories each gap blocks.
   `ctx.split_attr` (`buildbox/bazel/analysis/transition.rs`), and their
   output directories are named as Bazel names them, against the top-level
   configuration. Still missing:
-  - Starlark flags are held as text, so the output directories of
-    transitions that set `string_list` flags hash differently from Bazel's,
-    and the command line doesn't check a flag's type.
   - Errors in transitions are reported at the target, not at the
     transition, and without Bazel's second "on dependency edge" error.
   - `analysis_test_transition`, and Bazel's own transitions that bb only

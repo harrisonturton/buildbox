@@ -29,6 +29,7 @@ mod providers;
 mod rule_ctx;
 mod shared;
 mod runfiles;
+pub mod settings;
 mod state;
 mod target_value;
 mod toolchains;

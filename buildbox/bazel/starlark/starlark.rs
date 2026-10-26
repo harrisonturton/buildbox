@@ -4,6 +4,7 @@
 pub mod attr_module;
 pub mod build_api;
 pub mod bzl_api;
+pub mod config_module;
 pub mod context;
 pub mod convert;
 pub mod depset;
@@ -198,6 +199,7 @@ fn bzl_globals_builder() -> GlobalsBuilder {
         .with(repo_api::repo_functions);
     attr_module::register(&mut builder);
     toolchain_type::register(&mut builder);
+    config_module::register(&mut builder);
     for name in opaque::BUILTIN_NAMESPACES {
         let value = builder.alloc(opaque::Opaque::new(name));
         builder.set(name, value);

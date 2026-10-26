@@ -88,7 +88,7 @@ pub enum OptionError {
 
 /// Parses a label given on the command line or in a `config_setting`,
 /// relative to the main repository.
-pub type LabelParser<'a> = &'a dyn Fn(&str) -> Result<Label, String>;
+pub type LabelParser<'a> = &'a (dyn Fn(&str) -> Result<Label, String> + Sync);
 
 const fn option(name: &'static str, ty: OptionType, default: OptionDefault) -> NativeOption {
     NativeOption {
@@ -354,13 +354,83 @@ fn english_list(words: &[&str]) -> String {
     }
 }
 
+/// The value of a Starlark build setting, of the type its rule declares.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub enum FlagValue {
+    Bool(bool),
+    Int(i64),
+    String(String),
+    /// A `string_list` or `string_set`, or a string flag each use adds to.
+    Strings(Vec<String>),
+    Label(Label),
+}
+
+impl FlagValue {
+    /// What Bazel calls the value's type, in errors.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            FlagValue::Bool(_) => "boolean",
+            FlagValue::Int(_) => "int",
+            FlagValue::String(_) => "string",
+            FlagValue::Strings(_) => "list(string)",
+            FlagValue::Label(_) => "label",
+        }
+    }
+
+    /// The value as Bazel prints it when it hashes the settings a
+    /// transition changed into an output directory's name. Lists are those
+    /// transitions make, which print as Starlark lists.
+    pub fn java_text(&self) -> String {
+        match self {
+            FlagValue::Bool(value) => value.to_string(),
+            FlagValue::Int(value) => value.to_string(),
+            FlagValue::String(value) => value.clone(),
+            FlagValue::Strings(values) => format!("[{}]", values.iter().map(|value| starlark_repr(value)).collect::<Vec<_>>().join(", ")),
+            FlagValue::Label(label) => label.to_string(),
+        }
+    }
+
+    /// The value `text` gives a setting of `like`'s type, as the command
+    /// line gives it: lists separated by commas. A setting each use adds to
+    /// takes one string.
+    pub fn parse(text: &str, like: &FlagValue, multiple: bool, parse_label: LabelParser<'_>) -> Result<FlagValue, String> {
+        match like {
+            FlagValue::Bool(_) => parse_bool(text).map(FlagValue::Bool).ok_or_else(|| "not a boolean".to_string()),
+            FlagValue::Int(_) => text.parse().map(FlagValue::Int).map_err(|_| "not an int".to_string()),
+            FlagValue::String(_) => Ok(FlagValue::String(text.to_string())),
+            FlagValue::Strings(_) if multiple => Ok(FlagValue::Strings(vec![text.to_string()])),
+            FlagValue::Strings(_) => Ok(FlagValue::Strings(comma_separated(text).map(str::to_string).collect())),
+            FlagValue::Label(_) => parse_label(text).map(FlagValue::Label),
+        }
+    }
+}
+
+/// A string as Starlark's `repr()` writes it.
+fn starlark_repr(text: &str) -> String {
+    let mut repr = String::with_capacity(text.len() + 2);
+    repr.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => repr.push_str("\\\""),
+            '\\' => repr.push_str("\\\\"),
+            '\n' => repr.push_str("\\n"),
+            '\r' => repr.push_str("\\r"),
+            '\t' => repr.push_str("\\t"),
+            c => repr.push(c),
+        }
+    }
+    repr.push('"');
+    repr
+}
+
 /// The options that decide how targets are built.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct BuildOptions {
     /// The native options that differ from their defaults, sorted by name.
     native: Vec<(String, OptionValue)>,
-    /// Starlark flags, `--//pkg:flag=value`, sorted by label.
-    pub starlark_flags: Vec<(Label, String)>,
+    /// Starlark build settings that differ from their defaults, by the
+    /// label of the setting, not an alias of it, sorted by label.
+    pub starlark_flags: Vec<(Label, FlagValue)>,
     /// For options a transition made: the top-level configuration they
     /// came from, which their output directory is named against.
     pub baseline: Option<crate::ConfigId>,
@@ -469,6 +539,21 @@ impl BuildOptions {
     /// The native options that differ from their defaults.
     pub fn changed(&self) -> &[(String, OptionValue)] {
         &self.native
+    }
+
+    /// A Starlark build setting's value, if it differs from its default.
+    pub fn flag(&self, label: Label) -> Option<&FlagValue> {
+        self.starlark_flags.iter().find(|(flag, _)| *flag == label).map(|(_, value)| value)
+    }
+
+    /// Set a Starlark build setting, leaving it out when it's `default`, as
+    /// Bazel does.
+    pub fn set_flag(&mut self, label: Label, value: FlagValue, default: &FlagValue) {
+        self.starlark_flags.retain(|(flag, _)| *flag != label);
+        if value != *default {
+            self.starlark_flags.push((label, value));
+            self.starlark_flags.sort_by(|(a, _), (b, _)| a.cmp(b));
+        }
     }
 }
 

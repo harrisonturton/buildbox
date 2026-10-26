@@ -39,6 +39,16 @@ pub struct RuleClass {
     /// Whether `rule(cfg = ...)` gives the rule a transition, which changes
     /// the configuration its targets are analyzed in.
     pub incoming_transition: bool,
+    /// For build setting rules: how their targets' values are set.
+    pub build_setting: Option<BuildSettingSpec>,
+}
+
+/// How a build setting is set: whether it's a flag, which the command line
+/// can set, and whether each use of the flag adds a value to a list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct BuildSettingSpec {
+    pub flag: bool,
+    pub multiple: bool,
 }
 
 /// One attribute a rule class takes.

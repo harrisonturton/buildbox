@@ -10,7 +10,7 @@ mod rule_class;
 
 pub use attr::{AttrType, AttrValue, Select, SelectorPart, DEFAULT_CONDITION};
 pub use error::{PackageError, SourcePosition, TraceFrame};
-pub use rule_class::{AttrDefault, AttrSchema, Cfg, RuleClass, RuleClassRef};
+pub use rule_class::{AttrDefault, AttrSchema, BuildSettingSpec, Cfg, RuleClass, RuleClassRef};
 
 use bazel_label::{Label, PackageId};
 use intern::Symbol;

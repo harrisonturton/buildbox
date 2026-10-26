@@ -260,7 +260,6 @@ pub const BUILTIN_NAMESPACES: &[&str] = &[
     "apple_common",
     "cc_common",
     "proto_common_do_not_use",
-    "config",
     "proto",
     "CcInfo",
     "CcToolchainConfigInfo",

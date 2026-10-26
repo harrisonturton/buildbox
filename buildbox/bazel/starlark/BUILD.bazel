@@ -8,6 +8,7 @@ rust_library(
         "attr_module.rs",
         "build_api.rs",
         "bzl_api.rs",
+        "config_module.rs",
         "context.rs",
         "convert.rs",
         "depset.rs",

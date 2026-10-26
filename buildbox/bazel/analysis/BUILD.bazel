@@ -38,6 +38,7 @@ rust_library(
         "providers.rs",
         "rule_ctx.rs",
         "runfiles.rs",
+        "settings.rs",
         "shared.rs",
         "state.rs",
         "target_value.rs",

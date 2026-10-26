@@ -225,8 +225,8 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     for subrule in crate::subrule::subrules(rule.option("subrules"))? {
         own.extend(subrule_attrs(subrule, context)?);
     }
-    if let Some(ty) = build_setting_type(rule) {
-        own.push(AttrSchema::new("build_setting_default", ty).mandatory().nonconfigurable());
+    if let Some(setting) = build_setting(rule) {
+        own.push(AttrSchema::new("build_setting_default", build_setting_type(setting)).mandatory().nonconfigurable());
     }
     own.sort_by(|a, b| a.name.cmp(&b.name));
     let mut class = native_rules::rule_class(kind, own, rule.test, rule.executable);
@@ -236,6 +236,7 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     class.optional_toolchain_types = optional;
     class.exec_groups = exec_groups(rule)?;
     class.incoming_transition = rule.option("cfg").is_some_and(|cfg| crate::transition::Transition::from_value(cfg).is_some());
+    class.build_setting = build_setting(rule).map(crate::config_module::BuildSettingType::spec);
     Ok(class)
 }
 
@@ -323,20 +324,22 @@ fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelParser<'_>) 
     })
 }
 
-/// The type of a build setting rule's value, from its
-/// `build_setting = config.<type>(...)`.
-fn build_setting_type<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> Option<AttrType> {
+/// A build setting rule's `build_setting = config.<type>(...)`, if it has
+/// one.
+fn build_setting<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> Option<&'v crate::config_module::BuildSettingType> {
     let setting = rule.option("build_setting").filter(|value| !value.is_none())?;
-    let opaque = setting.downcast_ref::<crate::opaque::Opaque>()?;
-    let ty = match opaque.type_name.trim_end_matches("()") {
-        "config.bool" => AttrType::Bool,
-        "config.int" => AttrType::Int,
-        "config.string" => AttrType::String,
-        "config.string_list" | "config.string_set" => AttrType::StringList,
-        "config.label" | "config.label_flag" => AttrType::Label,
+    setting.downcast_ref::<crate::config_module::BuildSettingType>()
+}
+
+/// The type of a build setting's value, which its `build_setting_default`
+/// has too. A setting that each use adds to still has one default value.
+fn build_setting_type(setting: &crate::config_module::BuildSettingType) -> AttrType {
+    match setting.name.as_str() {
+        "bool" => AttrType::Bool,
+        "int" => AttrType::Int,
+        "string_list" | "string_set" => AttrType::StringList,
         _ => AttrType::String,
-    };
-    Some(ty)
+    }
 }
 
 fn is_late_bound(value: Value<'_>) -> bool {

@@ -400,15 +400,12 @@ fn build_setting_value<'v>(input: &RuleInput, heap: Heap<'v>) -> Value<'v> {
     let Some(default) = input.attr("build_setting_default") else {
         return Value::new_none();
     };
-    let given = input.config.options.starlark_flags.iter().find(|(label, _)| *label == input.label).map(|(_, value)| value);
-    let Some(given) = given else {
-        return bazel_starlark::convert::to_starlark(default, heap);
-    };
-    match default {
-        AttrValue::Bool(_) => Value::new_bool(matches!(given.as_str(), "true" | "True" | "1" | "yes")),
-        AttrValue::Int(_) => heap.alloc(given.parse::<i32>().unwrap_or(0)),
-        AttrValue::StringList(_) => heap.alloc(AllocList(given.split(',').filter(|value| !value.is_empty()))),
-        _ => heap.alloc(given.as_str()),
+    if let Some(value) = input.config.options.flag(input.label) {
+        return crate::settings::starlark_value(value, heap);
+    }
+    match input.class.build_setting.and_then(|spec| crate::settings::flag_value(default, spec)) {
+        Some(default) => crate::settings::starlark_value(&default, heap),
+        None => bazel_starlark::convert::to_starlark(default, heap),
     }
 }
 

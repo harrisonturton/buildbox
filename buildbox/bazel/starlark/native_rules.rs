@@ -2,7 +2,7 @@
 
 use crate::instantiate::instantiate;
 use allocative::Allocative;
-use bazel_packages::{AttrSchema, AttrType, AttrValue, RuleClass, RuleClassRef};
+use bazel_packages::{AttrSchema, AttrType, AttrValue, BuildSettingSpec, RuleClass, RuleClassRef};
 use intern::Symbol;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::{Arguments, Evaluator};
@@ -75,6 +75,13 @@ pub fn executable_attrs() -> Vec<AttrSchema> {
 /// Make a rule class from its own attributes and the common ones. The
 /// common attributes come first, then the class's own in the order given,
 /// which is the order `query --output=build` prints them in.
+/// `label_flag` or `label_setting`: a build setting whose value is a label.
+fn label_setting(kind: &str, flag: bool) -> RuleClass {
+    let mut class = rule_class(kind, vec![AttrSchema::new("build_setting_default", AttrType::Label).mandatory()], false, false);
+    class.build_setting = Some(BuildSettingSpec { flag, multiple: false });
+    class
+}
+
 pub fn rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool) -> RuleClass {
     let mut attrs = common_attrs();
     if test {
@@ -98,6 +105,7 @@ pub fn rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool
         optional_toolchain_types: Vec::new(),
         exec_groups: Vec::new(),
         incoming_transition: false,
+        build_setting: None,
     }
 }
 
@@ -199,8 +207,8 @@ fn native_classes() -> Vec<RuleClass> {
             false,
             false,
         ),
-        rule_class("label_flag", vec![a("build_setting_default", Label).mandatory()], false, false),
-        rule_class("label_setting", vec![a("build_setting_default", Label).mandatory()], false, false),
+        label_setting("label_flag", true),
+        label_setting("label_setting", false),
         rule_class(
             "environment_group",
             vec![a("environments", LabelList).mandatory().not_dependency(), a("defaults", LabelList).mandatory().not_dependency()],

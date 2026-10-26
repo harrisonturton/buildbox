@@ -7,7 +7,7 @@
 
 mod options;
 
-pub use options::{BuildOptions, LabelParser, NATIVE_OPTIONS, NativeOption, OptionDefault, OptionError, OptionType, OptionValue, command_line_options, native_option};
+pub use options::{BuildOptions, FlagValue, LabelParser, NATIVE_OPTIONS, NativeOption, OptionDefault, OptionError, OptionType, OptionValue, command_line_options, native_option};
 
 use bazel_label::Label;
 use intern::BlobTable;
@@ -176,12 +176,11 @@ fn changed_settings(options: &BuildOptions, baseline: &BuildOptions) -> Vec<Stri
             changed.insert(format!("//command_line_option:{}", option.name), option.java_text(value));
         }
     }
-    let flag = |options: &BuildOptions, label: &Label| options.starlark_flags.iter().find(|(flag, _)| flag == label).map(|(_, value)| value.clone());
     let labels: std::collections::BTreeSet<Label> = options.starlark_flags.iter().chain(&baseline.starlark_flags).map(|(label, _)| *label).collect();
     for label in labels {
-        let value = flag(options, &label);
-        if value != flag(baseline, &label) {
-            changed.insert(label.to_string(), value);
+        let value = options.flag(label);
+        if value != baseline.flag(label) {
+            changed.insert(label.to_string(), value.map(FlagValue::java_text));
         }
     }
     changed
@@ -265,8 +264,14 @@ mod tests {
         assert_eq!(ConfigId::intern(&transitioned).get().output_directory, format!("{}-opt", host_cpu()));
         transitioned.apply("compilation_mode", "fastbuild", &parse_label).unwrap();
         transitioned.apply("copt", "-DX", &parse_label).unwrap();
-        transitioned.starlark_flags.push((Label::parse_canonical("//:flag").unwrap(), "b".to_string()));
+        transitioned.starlark_flags.push((Label::parse_canonical("//:flag").unwrap(), FlagValue::String("b".to_string())));
         assert_eq!(ConfigId::intern(&transitioned).get().output_directory, format!("{}-fastbuild-ST-b4b1d2ee8ba0", host_cpu()));
+        let mut listed = options();
+        listed.baseline = Some(baseline);
+        let label = Label::parse_canonical("//:l").unwrap();
+        listed.set_flag(label, FlagValue::Strings(vec!["p".into(), "q".into()]), &FlagValue::Strings(vec!["a".into()]));
+        listed.set_flag(Label::parse_canonical("//:b").unwrap(), FlagValue::Bool(true), &FlagValue::Bool(false));
+        assert_eq!(ConfigId::intern(&listed).get().output_directory, format!("{}-fastbuild-ST-045eccb39967", host_cpu()));
     }
 
     #[test]

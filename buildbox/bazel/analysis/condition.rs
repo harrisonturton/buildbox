@@ -2,7 +2,7 @@
 
 use crate::attrs::resolve_value;
 use crate::platform::{ConstraintValueKey, PlatformKey, labels};
-use bazel_config::{BuildConfiguration, ConfigId, OptionError};
+use bazel_config::{BuildConfiguration, ConfigId, FlagValue, OptionError};
 use bazel_label::{Label, LabelContext};
 use bazel_loading::{PackageKey, RepoMappingKey};
 use bazel_packages::{AttrValue, Rule, Target};
@@ -96,7 +96,7 @@ async fn config_setting(ctx: &Ctx, label: Label, rule: &Rule, config: &BuildConf
         if !matches {
             break;
         }
-        matches &= flag_matches(ctx, config, *flag, expected).await?;
+        matches &= flag_matches(ctx, label, config, *flag, expected).await?;
     }
     for constraint in constraints {
         if !matches {
@@ -135,62 +135,48 @@ fn values_error(label: Label, error: OptionError) -> SkyError {
     SkyError::new(format!("in values attribute of config_setting rule {label}: error while parsing configuration settings: {problem}"))
 }
 
-/// Option values compare as booleans when both are, so `1` matches `true`.
-fn same_option_value(actual: &str, expected: &str) -> bool {
-    match (parse_bool(actual), parse_bool(expected)) {
-        (Some(a), Some(b)) => a == b,
-        _ => actual == expected,
+/// Whether a build setting has a value, as `config_setting(flag_values =
+/// ...)` asks: the value as its type reads it, or for lists, one value the
+/// list contains.
+async fn flag_matches(ctx: &Ctx, label: Label, config: &BuildConfiguration, flag: Label, expected: &str) -> Result<bool, SkyError> {
+    let Some(setting) = crate::settings::build_setting(ctx, flag).await? else {
+        return feature_flag_matches(ctx, flag, expected).await;
+    };
+    let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
+    let parse_label = |text: &str| {
+        let context = LabelContext::new(label.package, &mapping.0);
+        Label::parse(text, &context).map_err(|error| error.to_string())
+    };
+    let error = |problem: String| SkyError::new(format!("in flag_values attribute of config_setting rule {label}: {problem}"));
+    let Ok(wanted) = FlagValue::parse(expected, &setting.default, setting.spec.multiple, &parse_label) else {
+        return Err(error(format!(
+            "error while parsing user-defined configuration values: '{expected}' cannot be converted to {flag} type {}",
+            setting.default.type_name()
+        )));
+    };
+    match (setting.value(&config.options), wanted) {
+        (FlagValue::Strings(actual), FlagValue::Strings(wanted)) => {
+            let [wanted] = wanted.as_slice() else {
+                return Err(error(format!(
+                    "\"{expected}\" not a valid value for flag {flag}. Only single, exact values are allowed. If you want to match multiple values, consider Skylib's selects.config_setting_group"
+                )));
+            };
+            Ok(actual.contains(wanted))
+        }
+        (actual, wanted) => Ok(*actual == wanted),
     }
 }
 
-fn parse_bool(value: &str) -> Option<bool> {
-    match value {
-        "true" | "True" | "1" | "yes" => Some(true),
-        "false" | "False" | "0" | "no" => Some(false),
-        _ => None,
-    }
-}
-
-/// The default of the build setting `flag`, which must be the target
-/// itself rather than an alias.
-pub(crate) async fn build_setting_default(ctx: &Ctx, flag: Label) -> Result<AttrValue, SkyError> {
+/// Whether a `config_feature_flag`, which bb only ever has at its default,
+/// has a value.
+async fn feature_flag_matches(ctx: &Ctx, flag: Label, expected: &str) -> Result<bool, SkyError> {
+    let flag = crate::platform::actual(ctx, flag).await?;
     let package = ctx.compute(&PackageKey(flag.package)).await?;
     let Some(Target::Rule(rule)) = package.0.target(flag.name) else {
         return Err(SkyError::new(format!("{flag} isn't a build setting")));
     };
-    // A `config_feature_flag` names its default `default_value`.
-    let default = rule
-        .attr(Symbol::intern("build_setting_default"))
-        .or_else(|| rule.attr(Symbol::intern("default_value")))
-        .cloned()
-        .unwrap_or(AttrValue::None);
-    Ok(default)
-}
-
-/// Whether a Starlark flag has a value: the command line's, or its default.
-async fn flag_matches(ctx: &Ctx, config: &BuildConfiguration, flag: Label, expected: &str) -> Result<bool, SkyError> {
-    let flag = crate::platform::actual(ctx, flag).await?;
-    if let Some((_, value)) = config.options.starlark_flags.iter().find(|(label, _)| *label == flag) {
-        return Ok(flag_value_matches(value, expected));
+    match rule.attr(Symbol::intern("default_value")) {
+        Some(AttrValue::String(default)) => Ok(default == expected),
+        _ => Err(SkyError::new(format!("{flag} isn't a build setting"))),
     }
-    let default = build_setting_default(ctx, flag).await?;
-    let default = match default {
-        AttrValue::Bool(value) => value.to_string(),
-        AttrValue::Int(value) => value.to_string(),
-        AttrValue::String(value) => value,
-        AttrValue::Label(label) => label.to_string(),
-        AttrValue::StringList(values) => values.join(","),
-        _ => String::new(),
-    };
-    Ok(flag_value_matches(&default, expected))
-}
-
-fn flag_value_matches(actual: &str, expected: &str) -> bool {
-    if same_option_value(actual, expected) {
-        return true;
-    }
-    // Labels compare by what they name, not how they're written.
-    let actual = actual.trim_start_matches('@');
-    let expected = expected.trim_start_matches('@');
-    actual == expected
 }
