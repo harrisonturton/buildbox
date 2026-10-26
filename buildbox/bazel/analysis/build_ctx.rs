@@ -13,10 +13,10 @@ use crate::rule_ctx::RuleCtx;
 use crate::runfiles::{FilesToRun, Runfiles};
 use crate::state::RuleState;
 use crate::target_value::TargetValue;
-use crate::toolchains::{ResolvedToolchains, ToolchainContext};
+use crate::toolchains::{ResolvedToolchains, ToolchainAspectsProviders, ToolchainContext};
 use crate::transition::AttrConfigs;
 use bazel_config::{BuildConfiguration, ConfigId};
-use bazel_label::{Label, RepoMappingTable, RepoName};
+use bazel_label::{Label, PackageId, RepoMappingTable, RepoName};
 use bazel_packages::{AttrSchema, AttrType, AttrValue, Cfg, RuleClass};
 use bazel_starlark::attr_module::Attribute;
 use bazel_starlark::label_value::LabelValue;
@@ -70,6 +70,16 @@ pub struct AspectView {
     /// The target, then the aspects applied to it before this one, whose
     /// providers the implementation's `target` has.
     pub targets: Vec<Arc<ConfiguredTarget>>,
+    /// The target's toolchains, as the aspect sees them.
+    pub toolchains: Vec<AspectToolchain>,
+}
+
+/// A toolchain of the target an aspect is applied to: its type, as the
+/// target's rule asks for it, and if one was found, its target's label
+/// with the applications to it of the aspects that propagate to it.
+pub struct AspectToolchain {
+    pub toolchain_type: Label,
+    pub target: Option<(Label, Vec<Arc<ConfiguredTarget>>)>,
 }
 
 /// Everything a rule's analysis needs, computed beforehand.
@@ -418,30 +428,61 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     set("disabled_features", heap.alloc(AllocList::EMPTY));
     set("info_file", heap.alloc(FileValue(crate::workspace_status::info_file(&input.config))));
     set("version_file", heap.alloc(FileValue(crate::workspace_status::version_file(&input.config))));
-    set("toolchains", heap.alloc(ToolchainContext::new(&input.toolchains, definition_mapping(input), heap)));
+    set("toolchains", heap.alloc(ToolchainContext::new(&input.toolchains, definition_mapping(input), target_description(input), heap)));
     set("fragments", heap.alloc(crate::fragments::Fragments(options)));
     set("exec_groups", heap.alloc(exec_groups(input)));
     set("split_attr", split_attr_struct(input, prepared, heap));
     set("aspect_ids", heap.alloc(AllocList(input.config.aspects.iter().map(|aspect| aspect.description()))));
     set("build_setting_value", build_setting_value(input, heap));
     if let Some(view) = &input.aspect {
-        set("rule", rule_struct(&view.rule, state, prepared, heap)?);
+        set("rule", rule_struct(input, view, state, prepared, heap)?);
     }
     Ok(fields)
 }
 
 /// `ctx.rule` for an aspect: the attributes of the target's rule, its
 /// files and executables, and its kind.
-fn rule_struct<'v>(rule: &RuleInput, state: &RuleState, prepared: &Prepared<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+fn rule_struct<'v>(input: &RuleInput, view: &AspectView, state: &RuleState, prepared: &Prepared<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+    let rule = &view.rule;
     let fields = vec![
         ("attr", attr_struct(rule, prepared, heap)),
         ("file", file_struct(rule, prepared, heap)?),
         ("files", files_struct(rule, prepared, heap)?),
         ("executable", executable_struct(rule, state, prepared, heap)),
         ("kind", heap.alloc(rule.class.kind.as_str())),
-        ("toolchains", heap.alloc(ToolchainContext::new(&rule.toolchains, definition_mapping(rule), heap))),
+        ("toolchains", aspect_toolchains(input, view, heap)?),
     ];
     Ok(heap.alloc(AllocStruct(fields)))
+}
+
+/// `ctx.rule.toolchains`: for each toolchain of the target, the providers
+/// the aspects that propagate to it gave its target.
+fn aspect_toolchains<'v>(input: &RuleInput, view: &AspectView, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+    let mut types = Vec::with_capacity(view.toolchains.len());
+    let mut values = Vec::with_capacity(view.toolchains.len());
+    for toolchain in &view.toolchains {
+        types.push(toolchain.toolchain_type);
+        let Some((label, applied)) = &toolchain.target else {
+            values.push(Value::new_none());
+            continue;
+        };
+        let providers = match applied.is_empty() {
+            true => heap.alloc(TargetValue {
+                label: *label,
+                providers: SmallMap::new(),
+                is_file: false,
+            }),
+            false => merged(applied, heap)?,
+        };
+        values.push(heap.alloc(ToolchainAspectsProviders { label: *label, providers }));
+    }
+    let mapping = definition_mapping(input);
+    Ok(heap.alloc(ToolchainContext {
+        types,
+        values,
+        mapping,
+        target: target_description(input),
+    }))
 }
 
 /// The `target` an aspect's implementation gets: the target, with the
@@ -463,9 +504,19 @@ fn merged<'v>(targets: &[Arc<ConfiguredTarget>], heap: Heap<'v>) -> anyhow::Resu
 /// What `ctx.exec_groups` holds: the exec groups the rule declares.
 fn exec_groups(input: &RuleInput) -> ExecGroups {
     ExecGroups {
-        target: format!("{} rule {}", input.class.kind, input.label),
+        target: target_description(input),
         names: input.class.exec_groups.iter().map(|name| name.to_string()).collect(),
     }
+}
+
+/// What a rule's or aspect's analysis is of, as Bazel's errors about its
+/// toolchains and exec groups describe it: `<kind> rule //pkg:name`, or
+/// `aspect //pkg:defs.bzl%name applied to <kind> rule //pkg:name`.
+fn target_description(input: &RuleInput) -> String {
+    let (Some(view), Some(aspect)) = (&input.aspect, input.config.aspects.last()) else {
+        return format!("{} rule {}", input.class.kind, input.label);
+    };
+    format!("aspect {} applied to {} rule {}", aspect.description(), view.rule.class.kind, input.label)
 }
 
 /// The value of a build setting: from the command line, or its default.
@@ -653,13 +704,14 @@ fn files_struct<'v>(input: &RuleInput, prepared: &Prepared<'v>, heap: Heap<'v>) 
     Ok(heap.alloc(AllocStruct(fields)))
 }
 
-/// The repository of the `.bzl` file defining the rule, and its mapping.
-fn definition_mapping(input: &RuleInput) -> Option<(RepoName, Arc<RepoMappingTable>)> {
+/// The package of the `.bzl` file defining the implementation, and its
+/// repository's mapping.
+fn definition_mapping(input: &RuleInput) -> Option<(PackageId, Arc<RepoMappingTable>)> {
     let Implementation::Starlark { module, .. } = &input.implementation else {
         return None;
     };
-    let repo = module.label.repo();
-    Some((repo, input.mappings.get(&repo)?.clone()))
+    let package = module.label.package;
+    Some((package, input.mappings.get(&package.repo)?.clone()))
 }
 
 /// `ctx.executable`: the executables of executable attributes' targets,

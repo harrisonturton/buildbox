@@ -6,7 +6,7 @@
 //! Its value has only the providers that aspect returns; a dependent sees
 //! the target's and every aspect's merged.
 
-use crate::build_ctx::{AspectView, Dep};
+use crate::build_ctx::{AspectToolchain, AspectView, Dep};
 use crate::configured::{
     self, ConfiguredTarget, ConfiguredTargetKey, Implementation, RuleSetup, Setup, analyze_deps, configured, evaluate_reporting, exec_config, heap_name,
     rule_input, setup,
@@ -421,22 +421,72 @@ async fn apply(
     };
     let before = &config.aspects[..config.aspects.len() - 1];
     let targets = with_applications(ctx, plain, before).await?;
+    let toolchains = on_toolchains(ctx, &setup.toolchains, &config.aspects, aspects).await?;
     propagate(&mut setup, &config.aspects, aspects);
     let mut deps = analyze_deps(ctx, key.label, &setup.class, &setup.attrs, setup.deps_config, setup.exec_config, &setup.attr_configs).await?;
     let own = own_setup(ctx, key.label, aspect, descriptor, setup.deps_config).await?;
     deps.extend(analyze_deps(ctx, key.label, &own.class, &own.attrs, own.deps_config, own.exec_config, &own.attr_configs).await?);
-    let fingerprint = fingerprint(key, rule, &own.implementation, &deps, &targets, &own.toolchains);
+    let fingerprint = fingerprint(key, rule, &own.implementation, &deps, &targets, &toolchains, &own.toolchains);
     let view = rule_input(ctx, plain_key, package, setup, BTreeMap::new()).await?;
     let mut input = rule_input(ctx, key, package, own, deps).await?;
     input.aspect = Some(AspectView {
         rule: Box::new(view),
         targets,
+        toolchains,
     });
     let analyzed = evaluate_reporting(ctx, key.label, input, heap_name("aspect", key, fingerprint)).await?;
     if let Ok(progress) = ctx.global::<Progress>() {
         progress.aspect_applied();
     }
     Ok(configured(ctx, key, kind, false, analyzed, fingerprint))
+}
+
+/// The toolchains of a target, `resolved` for it, as aspects applied to
+/// it see them: each with the applications to its target of those that
+/// propagate to toolchains of its type.
+async fn on_toolchains(
+    ctx: &Ctx,
+    resolved: &crate::toolchains::ResolvedToolchains,
+    descriptors: &[AspectDescriptor],
+    aspects: &[LoadedAspect],
+) -> Result<Vec<AspectToolchain>, SkyError> {
+    let mut toolchains = Vec::with_capacity(resolved.resolved.len());
+    for (toolchain_type, target) in &resolved.resolved {
+        let Some(target) = target else {
+            toolchains.push(AspectToolchain {
+                toolchain_type: *toolchain_type,
+                target: None,
+            });
+            continue;
+        };
+        let actual = crate::platform::actual(ctx, *toolchain_type).await?;
+        let mut propagating = Vec::new();
+        for (descriptor, aspect) in descriptors.iter().zip(aspects) {
+            if propagates_to_toolchains(ctx, aspect, actual).await? {
+                propagating.push(descriptor.clone());
+            }
+        }
+        let mut applied = with_applications(ctx, target.clone(), &propagating).await?;
+        applied.remove(0);
+        toolchains.push(AspectToolchain {
+            toolchain_type: *toolchain_type,
+            target: Some((target.label, applied)),
+        });
+    }
+    Ok(toolchains)
+}
+
+/// Whether an aspect propagates to the toolchains of a type, by its
+/// actual label: whether its `toolchains_aspects` names it, or an alias of
+/// it.
+async fn propagates_to_toolchains(ctx: &Ctx, aspect: &LoadedAspect, toolchain_type: Label) -> Result<bool, SkyError> {
+    let propagated = aspect.get().propagated_toolchains.get().cloned().unwrap_or_default();
+    for propagated in propagated {
+        if crate::platform::actual(ctx, propagated).await? == toolchain_type {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// An aspect's own analysis, set up as a rule's is: its attributes, with
@@ -507,6 +557,7 @@ fn fingerprint(
     implementation: &Implementation,
     deps: &BTreeMap<(Label, ConfigId), Dep>,
     targets: &[Arc<ConfiguredTarget>],
+    rule_toolchains: &[AspectToolchain],
     toolchains: &crate::toolchains::ResolvedToolchains,
 ) -> Fingerprint {
     let mut fingerprinter = Fingerprinter::new();
@@ -514,6 +565,13 @@ fn fingerprint(
     fingerprinter.bytes(configured::fingerprint(key, rule, implementation, deps, toolchains).as_bytes());
     for target in targets {
         fingerprinter.bytes(target.fingerprint.as_bytes());
+    }
+    for toolchain in rule_toolchains {
+        fingerprinter.bytes(toolchain.toolchain_type.to_string().as_bytes());
+        let applied = toolchain.target.iter().flat_map(|(_, applied)| applied);
+        for target in applied {
+            fingerprinter.bytes(target.fingerprint.as_bytes());
+        }
     }
     fingerprinter.finish()
 }

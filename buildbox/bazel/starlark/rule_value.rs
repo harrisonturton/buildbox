@@ -244,24 +244,32 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
 /// The exec groups `rule(exec_groups = {...})` declares, and the `test`
 /// group Bazel gives test rules that don't declare it.
 fn exec_groups<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> anyhow::Result<Vec<Symbol>> {
-    let mut names = Vec::new();
-    if let Some(groups) = rule.option("exec_groups").filter(|groups| !groups.is_none()) {
-        let Some(groups) = DictRef::from_value(groups) else {
-            anyhow::bail!("rule: exec_groups must be a dict, not {}", groups.get_type());
-        };
-        for name in groups.keys() {
-            let Some(name) = name.unpack_str() else {
-                anyhow::bail!("rule: exec group names must be strings, not {}", name.get_type());
-            };
-            if !is_valid_exec_group_name(name) {
-                anyhow::bail!("Exec group name '{name}' is not a valid name.");
-            }
-            names.push(Symbol::intern(name));
-        }
-    }
+    let mut names = exec_group_names(rule.option("exec_groups"), "rule")?;
     let test = Symbol::intern("test");
     if rule.test && !names.contains(&test) {
         names.push(test);
+    }
+    Ok(names)
+}
+
+/// The names of the exec groups `exec_groups = {...}` declares, for a
+/// rule or an aspect, as `what` says.
+pub(crate) fn exec_group_names(groups: Option<Value<'_>>, what: &str) -> anyhow::Result<Vec<Symbol>> {
+    let mut names = Vec::new();
+    let Some(groups) = groups.filter(|groups| !groups.is_none()) else {
+        return Ok(names);
+    };
+    let Some(groups) = DictRef::from_value(groups) else {
+        anyhow::bail!("{what}: exec_groups must be a dict, not {}", groups.get_type());
+    };
+    for name in groups.keys() {
+        let Some(name) = name.unpack_str() else {
+            anyhow::bail!("{what}: exec group names must be strings, not {}", name.get_type());
+        };
+        if !is_valid_exec_group_name(name) {
+            anyhow::bail!("Exec group name '{name}' is not a valid name.");
+        }
+        names.push(Symbol::intern(name));
     }
     Ok(names)
 }

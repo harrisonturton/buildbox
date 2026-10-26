@@ -503,11 +503,16 @@ pub struct ToolchainContextGen<V: ValueLifetimeless> {
     pub types: Vec<Label>,
     /// `ToolchainInfo` or `None`, in the order of `types`.
     pub values: Vec<V>,
-    /// How the rule's `.bzl` file sees repositories, which string indexes
-    /// are labels in.
+    /// The package of the `.bzl` file whose implementation indexes it, and
+    /// how it sees repositories: string indexes are labels relative to it.
     #[freeze(identity)]
     #[allocative(skip)]
-    pub mapping: Option<(RepoName, Arc<RepoMappingTable>)>,
+    pub mapping: Option<(PackageId, Arc<RepoMappingTable>)>,
+    /// What the toolchains are for, as errors describe it: `<kind> rule
+    /// //pkg:name`, or `aspect //pkg:defs.bzl%name applied to` it.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    pub target: String,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<ToolchainContextGen<To>> for ToolchainContextGen<From> {}
@@ -515,7 +520,7 @@ unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<
 starlark_complex_value!(pub ToolchainContext);
 
 impl<'v> ToolchainContext<'v> {
-    pub fn new(resolved: &ResolvedToolchains, mapping: Option<(RepoName, Arc<RepoMappingTable>)>, heap: Heap<'v>) -> ToolchainContext<'v> {
+    pub fn new(resolved: &ResolvedToolchains, mapping: Option<(PackageId, Arc<RepoMappingTable>)>, target: String, heap: Heap<'v>) -> ToolchainContext<'v> {
         let mut types = Vec::new();
         let mut values = Vec::new();
         for (toolchain_type, toolchain) in &resolved.resolved {
@@ -529,7 +534,7 @@ impl<'v> ToolchainContext<'v> {
             types.push(*toolchain_type);
             values.push(value);
         }
-        ToolchainContext { types, values, mapping }
+        ToolchainContext { types, values, mapping, target }
     }
 }
 
@@ -547,9 +552,8 @@ impl<'v, V: ValueLike<'v>> ToolchainContextGen<V> {
             return self.types.iter().position(|toolchain_type| *toolchain_type == label.0);
         }
         let text = index.unpack_str()?;
-        if let Some((repo, mapping)) = &self.mapping {
-            let context = LabelContext::new(PackageId::new(*repo, PathId::ROOT), mapping.as_ref());
-            let position = Label::parse(text, &context).ok().and_then(|label| self.types.iter().position(|toolchain_type| *toolchain_type == label));
+        if let Some(label) = self.parse(text) {
+            let position = self.types.iter().position(|toolchain_type| *toolchain_type == label);
             if position.is_some() {
                 return position;
             }
@@ -560,6 +564,23 @@ impl<'v, V: ValueLike<'v>> ToolchainContextGen<V> {
             }
         }
         self.types.iter().position(|toolchain_type| names(*toolchain_type, text))
+    }
+
+    /// A string index, as a label relative to the `.bzl` file's package.
+    fn parse(&self, text: &str) -> Option<Label> {
+        let (package, mapping) = self.mapping.as_ref()?;
+        Label::parse(text, &LabelContext::new(*package, mapping.as_ref())).ok()
+    }
+
+    /// An index, as an error names it: a label, if it is one.
+    fn shown(&self, index: Value<'v>) -> String {
+        if let Some(label) = index.downcast_ref::<LabelValue>() {
+            return label.0.to_string();
+        }
+        match index.unpack_str() {
+            Some(text) => self.parse(text).map(|label| label.to_string()).unwrap_or_else(|| text.to_string()),
+            None => index.to_str(),
+        }
     }
 }
 
@@ -587,8 +608,9 @@ where
         match self.position(index) {
             Some(position) => Ok(self.values[position].to_value()),
             None => Err(starlark::Error::new_other(anyhow::anyhow!(
-                "toolchain type {} was requested but only types [{}] are configured",
-                index.to_str(),
+                "In {}, toolchain type {} was requested but only types [{}] are configured",
+                self.target,
+                self.shown(index),
                 self.types.iter().map(|label| label.to_string()).collect::<Vec<_>>().join(", ")
             ))),
         }
@@ -596,5 +618,63 @@ where
 
     fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
         Ok(self.position(other).is_some())
+    }
+}
+
+/// What an aspect's `ctx.rule.toolchains` has for a toolchain of the target
+/// it's applied to: the toolchain's target's label, and the providers the
+/// aspects that propagate to it gave that target.
+#[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]
+#[repr(C)]
+pub struct ToolchainAspectsProvidersGen<V: ValueLifetimeless> {
+    #[freeze(identity)]
+    #[allocative(skip)]
+    pub label: Label,
+    /// A [`TargetValue`] with those providers.
+    pub providers: V,
+}
+
+unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<ToolchainAspectsProvidersGen<To>> for ToolchainAspectsProvidersGen<From> {}
+
+starlark_complex_value!(pub ToolchainAspectsProviders);
+
+impl<'v, V: ValueLike<'v>> fmt::Display for ToolchainAspectsProvidersGen<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<ToolchainAspectsProviders for toolchain target: {}>", self.label)
+    }
+}
+
+impl<'v, V: ValueLike<'v>> ToolchainAspectsProvidersGen<V> {
+    fn provider(&self, key: &str) -> Option<Value<'v>> {
+        TargetValue::from_value(self.providers.to_value())?.provider(key)
+    }
+}
+
+#[starlark_value(type = "ToolchainAspectsProviders")]
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ToolchainAspectsProvidersGen<V>
+where
+    Self: ProvidesStaticType<'v>,
+{
+    fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        let key = crate::target_value::provider_key(index)?;
+        match self.provider(&key) {
+            Some(value) => Ok(value),
+            None => Err(starlark::Error::new_other(anyhow::anyhow!(
+                "{self} doesn't contain declared provider '{}'",
+                key.rsplit('%').next().unwrap_or(&key)
+            ))),
+        }
+    }
+
+    fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(self.provider(&crate::target_value::provider_key(other)?).is_some())
+    }
+
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        (attribute == "label").then(|| heap.alloc(LabelValue(self.label)))
+    }
+
+    fn dir_attr(&self) -> Vec<String> {
+        vec!["label".to_string()]
     }
 }

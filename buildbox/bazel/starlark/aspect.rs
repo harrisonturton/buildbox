@@ -4,7 +4,7 @@
 use crate::attr_module::Attribute;
 use crate::context::EvalContext;
 use crate::convert::LabelParser;
-use crate::rule_value::{attr_schema, provider_key, toolchain_labels};
+use crate::rule_value::{attr_schema, exec_group_names, provider_key, toolchain_labels};
 use allocative::Allocative;
 use bazel_label::Label;
 use bazel_packages::{AspectRef, RuleClass};
@@ -53,6 +53,11 @@ pub struct AspectGen<V: ValueLifetimeless> {
     pub apply_to_generating_rules: bool,
     /// The toolchain types its implementation needs.
     pub toolchains: Vec<V>,
+    /// The toolchain types it propagates to the toolchains of, in the
+    /// targets it's applied to.
+    pub toolchains_aspects: Vec<V>,
+    /// `exec_groups = {name: exec_group()}`: those its actions can run in.
+    pub exec_groups: Option<V>,
     /// The `.bzl` file that called `aspect()`.
     #[freeze(identity)]
     #[allocative(skip)]
@@ -71,6 +76,10 @@ pub struct AspectGen<V: ValueLifetimeless> {
     #[freeze(identity)]
     #[allocative(skip)]
     pub keys: OnceLock<ProviderKeys>,
+    /// `toolchains_aspects`, as labels, set when it's exported.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    pub propagated_toolchains: OnceLock<Vec<Label>>,
 }
 
 /// An aspect's providers, by their keys.
@@ -107,7 +116,7 @@ where
             return Ok(());
         }
         let context = EvalContext::get(eval).map_err(starlark::Error::new_other)?;
-        let class = self.schema(variable_name, context).map_err(starlark::Error::new_other)?;
+        let (class, propagated_toolchains) = self.schema(variable_name, context).map_err(starlark::Error::new_other)?;
         let keys = ProviderKeys {
             required: keys_of(&self.required_providers),
             required_aspect: keys_of(&self.required_aspect_providers),
@@ -115,6 +124,7 @@ where
         };
         let _ = self.class.set(Arc::new(class));
         let _ = self.keys.set(keys);
+        let _ = self.propagated_toolchains.set(propagated_toolchains);
         let _ = self.exported.set(AspectRef {
             file: context.file,
             name: Symbol::intern(variable_name),
@@ -170,9 +180,16 @@ impl<'v, V: ValueLike<'v>> AspectGen<V> {
         self.requires.iter().filter_map(|aspect| Aspect::from_value(aspect.to_value()))
     }
 
-    /// Its attributes and toolchains, as the schema of a rule class named
-    /// `name`, with labels relative to the `.bzl` file that defines it.
-    fn schema(&self, name: &str, context: &EvalContext) -> anyhow::Result<RuleClass> {
+    /// Whether it propagates to the toolchains of this type, its actual
+    /// label, of the targets it's applied to.
+    pub fn propagates_to_toolchains(&self, toolchain_type: Label) -> bool {
+        self.propagated_toolchains.get().is_some_and(|types| types.contains(&toolchain_type))
+    }
+
+    /// Its attributes, toolchains and exec groups, as the schema of a rule
+    /// class named `name`, with labels relative to the `.bzl` file that
+    /// defines it; and the toolchain types it propagates to.
+    fn schema(&self, name: &str, context: &EvalContext) -> anyhow::Result<(RuleClass, Vec<Label>)> {
         let mapping = context.mapping_for(self.definition.repo());
         let parser = LabelParser {
             package: self.definition.package,
@@ -192,7 +209,9 @@ impl<'v, V: ValueLike<'v>> AspectGen<V> {
         class.attrs = attrs;
         class.toolchain_types = toolchain_types;
         class.optional_toolchain_types = optional_toolchain_types;
-        Ok(class)
+        class.exec_groups = exec_group_names(self.exec_groups.map(|groups| groups.to_value()), "aspect")?;
+        let propagated = self.toolchains_aspects.iter().map(|toolchain_type| parser.label(toolchain_type.to_value())).collect::<anyhow::Result<_>>()?;
+        Ok((class, propagated))
     }
 }
 
@@ -262,7 +281,8 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
     /// `aspect(implementation, attr_aspects = [], attrs = {},
     /// required_providers = [], required_aspect_providers = [],
     /// provides = [], requires = [], apply_to_generating_rules = False,
-    /// toolchains = [], ...)`.
+    /// toolchains = [], toolchains_aspects = [], exec_groups = None,
+    /// ...)`.
     fn aspect<'v>(
         implementation: Value<'v>,
         #[starlark(require = named)] attr_aspects: Option<Value<'v>>,
@@ -273,6 +293,8 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
         #[starlark(require = named)] requires: Option<Value<'v>>,
         #[starlark(require = named, default = false)] apply_to_generating_rules: bool,
         #[starlark(require = named)] toolchains: Option<Value<'v>>,
+        #[starlark(require = named)] toolchains_aspects: Option<Value<'v>>,
+        #[starlark(require = named)] exec_groups: Option<Value<'v>>,
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Aspect<'v>> {
@@ -293,10 +315,13 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
             required_aspect_providers: self::required_providers(required_aspect_providers, "required_aspect_providers")?,
             apply_to_generating_rules,
             toolchains: items(toolchains, "toolchains")?,
+            toolchains_aspects: items(toolchains_aspects, "toolchains_aspects")?,
+            exec_groups,
             definition: context.caller_file(eval),
             exported: OnceLock::new(),
             class: OnceLock::new(),
             keys: OnceLock::new(),
+            propagated_toolchains: OnceLock::new(),
         })
     }
 }

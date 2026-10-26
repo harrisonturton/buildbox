@@ -137,10 +137,10 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
         Err(code) => return failed(code, started, out).await,
     };
     report(context, &options, &built, out).await;
-    report_stats(started, out).await;
     if built.analysis_incomplete {
         out.error("command succeeded, but not all targets were analyzed").await;
     }
+    report_stats(started, out).await;
     if built.errors {
         out.error("Build did NOT complete successfully").await;
         return exit::BUILD_FAILURE;
@@ -320,8 +320,11 @@ async fn analyze_and_build(
     }
     let mut errors = incompatible;
     let execute_actions = options.flag("build", true);
-    out.info(&bazel_ui::analyzed(&what, &out.snapshot().await)).await;
     let skipped = skipped_warnings(&failed, &failed_aspects, &main_mapping);
+    if !execute_actions {
+        report_skipped(&skipped, keep_going, analyzed.len(), labels.len(), "Analysis", out).await;
+    }
+    out.info(&bazel_ui::analyzed(&what, &out.snapshot().await)).await;
     let found = found(&analyzed, testing);
     let analysis_failed = !failed.is_empty() || !failed_aspects.is_empty();
     out.phase(Phase::Executing).await;
@@ -614,6 +617,19 @@ fn found(analyzed: &[(Label, Arc<ConfiguredTarget>)], testing: bool) -> String {
         (true, 0) => format!("Found {tests} test {}...", plural(tests, "target")),
         (true, _) => format!("Found {others} {} and {tests} test {}...", plural(others, "target"), plural(tests, "target")),
         (false, _) => format!("Found {} {}...", analyzed.len(), plural(analyzed.len(), "target")),
+    }
+}
+
+/// Report the targets `--keep_going` skipped, with their warnings, and how
+/// many of those `requested` succeeded in the `phase` that just ended, as
+/// Bazel does: as analysis ends, or when analysis and execution run
+/// together, as the build does.
+async fn report_skipped(skipped: &[String], keep_going: bool, succeeded: usize, requested: usize, phase: &str, out: &Output) {
+    for warning in skipped {
+        out.warning(warning).await;
+    }
+    if keep_going && 0 < succeeded && succeeded < requested {
+        out.info(&format!("{phase} succeeded for only {succeeded} of {requested} top-level targets")).await;
     }
 }
 
@@ -1139,13 +1155,8 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
         false => (0, 0),
     };
     let keep_going = options.flag("keep_going", false);
-    for warning in &built.skipped {
-        out.warning(warning).await;
-    }
-    let succeeded = built.targets.len() - failed;
-    if keep_going && 0 < succeeded && succeeded < built.requested {
-        let phase = if executed { "Build" } else { "Analysis" };
-        out.info(&format!("{phase} succeeded for only {succeeded} of {} top-level targets", built.requested)).await;
+    if executed {
+        report_skipped(&built.skipped, keep_going, built.targets.len() - failed, built.requested, "Build", out).await;
     }
     let any_failed = failed + failed_aspects > 0;
     if keep_going || !any_failed {

@@ -55,7 +55,8 @@ impl<'v, V: ValueLike<'v>> TargetValueGen<V> {
     }
 }
 
-fn provider_key(value: Value<'_>) -> starlark::Result<String> {
+/// The key a provider, given to index a target, finds its instance by.
+pub(crate) fn provider_key(value: Value<'_>) -> starlark::Result<String> {
     if let Some(provider) = value.downcast_ref::<crate::cc::values::NativeProvider>() {
         return Ok(provider.name.to_string());
     }

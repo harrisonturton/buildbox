@@ -84,14 +84,38 @@ pub fn start_position(span: &FileSpan) -> SourcePosition {
 /// where the expression starts.
 fn error_position(span: &FileSpan, raw: &str) -> SourcePosition {
     let mut position = start_position(span);
-    let operator = match missing_key(raw.trim()) {
-        Some(_) => Some("["),
-        None => raw.strip_prefix("Operation `").and_then(|rest| rest.split_once("` not supported for types")).map(|(operator, _)| operator),
+    let source = span.source_span();
+    let operator = raw.strip_prefix("Operation `").and_then(|rest| rest.split_once("` not supported for types")).map(|(operator, _)| operator);
+    let offset = match operator {
+        Some(operator) => unquoted_find(source, operator),
+        None => index_bracket(source),
     };
-    if let Some(offset) = operator.and_then(|operator| unquoted_find(span.source_span(), operator)) {
-        position.column += span.source_span()[..offset].chars().count() as u32;
+    if let Some(offset) = offset {
+        position.column += source[..offset].chars().count() as u32;
     }
     position
+}
+
+/// Where the `[` is of an index expression, such as `x["a"][b]`: the one
+/// the final `]` closes.
+fn index_bracket(source: &str) -> Option<usize> {
+    if !source.ends_with(']') {
+        return None;
+    }
+    let mut quote = None;
+    let mut open = Vec::new();
+    let mut closed = None;
+    for (offset, character) in source.char_indices() {
+        match quote {
+            Some(start) if character == start => quote = None,
+            Some(_) => {}
+            None if character == '"' || character == '\'' => quote = Some(character),
+            None if character == '[' => open.push(offset),
+            None if character == ']' => closed = open.pop(),
+            None => {}
+        }
+    }
+    closed.filter(|offset| *offset > 0)
 }
 
 /// Where `needle` first appears in `source` outside a string literal,
@@ -275,6 +299,14 @@ mod tests {
         assert_eq!(did_you_mean("selct", &candidates), " (did you mean 'select'?)");
         assert_eq!(did_you_mean("foo", &candidates), "");
         assert_eq!(did_you_mean("Glob", &candidates), " (did you mean 'glob'?)");
+    }
+
+    #[test]
+    fn index_errors_are_at_the_last_index() {
+        assert_eq!(index_bracket("x[\"missing\"]"), Some(1));
+        assert_eq!(index_bracket("ctx.t[\"]\"][Info]"), Some(10));
+        assert_eq!(index_bracket("[1, 2]"), None);
+        assert_eq!(index_bracket("f(x)"), None);
     }
 
     #[test]

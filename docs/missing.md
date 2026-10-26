@@ -47,7 +47,9 @@ Starlark aspects work as Bazel's do for the common cases:
   those and of the aspects whose `provides` satisfy their
   `required_aspect_providers`, keyed as Bazel keys them by the aspects
   they see;
-- with private and exec attributes, and toolchains;
+- with private and exec attributes, toolchains and exec groups;
+- propagated to the toolchains of the types their `toolchains_aspects`
+  name, which `ctx.rule.toolchains` gives their providers on;
 - with `ctx.rule` and `ctx.aspect_ids`, and their providers merged into the
   dependent's view of the target, output groups included;
 - applied at the top level with `--aspects` and `--aspects_parameters`,
@@ -57,9 +59,8 @@ Starlark aspects work as Bazel's do for the common cases:
 
 Still missing:
 
-- `propagation_predicate`, `exec_groups` and `toolchains_aspects`;
-- `attr_aspects` and `toolchains_aspects` given as functions (experimental
-  in Bazel);
+- `propagation_predicate`, and `attr_aspects` and `toolchains_aspects`
+  given as functions (all experimental in Bazel);
 - Bazel's native aspects;
 - aspects in `cquery` and `aquery`.
 
