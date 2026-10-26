@@ -1,5 +1,5 @@
 {
-  "checksum": "79bf82a4f52883a2ace88d0a4da83e67e4924edec054047ef7c79f478a844dbf",
+  "checksum": "082b2b9c77522dd7c13425a0b8e1d5b8af929fe963805d96075afdb5015da41f",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -11875,7 +11875,9 @@
             "@@//third_party/starlark:patches/starlark/0009-Add-forget_serialized_heaps-and-keep-a-read-back-hea.patch",
             "@@//third_party/starlark:patches/starlark/0010-Add-eval_module_all_errors-failing-with-every-name-e.patch",
             "@@//third_party/starlark:patches/starlark/0012-Cross-process-pagable-ser-de-for-BcInstrs.patch",
-            "@@//third_party/starlark:patches/starlark/0013-Test-that-a-frozen-module-s-functions-run-after-a-ro.patch"
+            "@@//third_party/starlark:patches/starlark/0013-Test-that-a-frozen-module-s-functions-run-after-a-ro.patch",
+            "@@//third_party/starlark:patches/starlark/0014-shrink-retained-bytecode-side-tables.patch",
+            "@@//third_party/starlark:patches/starlark/0015-Record-statement-locations-only-when-something-reads.patch"
           ],
           "sha256": "9062e866918dc4c9701c98ac99f7f4fa9e4b3b4edce306e147393bc75458c4fc",
           "url": "https://static.crates.io/crates/starlark/0.14.2/download"

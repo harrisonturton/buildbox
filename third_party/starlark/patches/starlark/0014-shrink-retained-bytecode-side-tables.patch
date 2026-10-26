@@ -1,0 +1,378 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Davis Rollman <drollman@meta.com>
+Date: Wed, 30 Sep 2026 13:20:34 -0700
+Subject: [PATCH] shrink retained bytecode side tables
+
+Summary:
+Every compiled function keeps a few side tables alive for as long as it exists: the per-instruction spans used for error messages, the statement-location table, and the local names. Two things made them bigger than they needed to be. The tables were built by pushing into `Vec`s and never trimmed, so they carried doubling slack. And every instruction's slow arg embedded a `Vec<FrameSpan>` of "extra" spans that only `DictNPop` ever populates (one per key, so a duplicate or unhashable key error can point at the key); for every other instruction it was 24 bytes of empty vector header.
+
+This diff drops that field. Dictionary key spans now live in a single `dictnpop_spans` array on the function's `End` instruction, and each `DictNPop` carries a `u32` offset into it. The writer appends a dictionary's key spans when it emits the instruction, which happens after any nested dictionaries have been compiled, so nested literals get their own disjoint ranges. On the error path the instruction already knows it is the faulting one, so it walks to `End` (the same walk the existing span lookup does) and indexes the array. `finish` also shrinks the slow-arg and statement-location vectors before they're retained.
+
+This is the layout jtbraun suggested in review. `DictNPop` grows by 8 bytes for the offset, visible in the updated golden; what it replaces was 24 bytes per instruction plus a heap allocation per dictionary literal. Against the parent diff, retained jemalloc Allocated drops 3.8% on a floor daemon and 1.6% on adfinder, with CPU flat (test plan).
+
+Reviewed By: jtbraun
+
+Differential Revision: D116723107
+
+fbshipit-source-id: 5dddaeba4a82f9cb18b6d25be4b1497a6ce1f010
+(cherry picked from commit 342f76c071c629d109df36be441afda25b6605ed)
+---
+ src/eval/bc/bytecode.rs                       | 34 ++++++++--------
+ src/eval/bc/compiler/expr.rs                  | 12 ++----
+ src/eval/bc/instr_impl.rs                     | 14 ++++---
+ src/eval/bc/instrs.rs                         | 18 +++++++--
+ src/eval/bc/slow_arg.rs                       |  4 +-
+ src/eval/bc/writer.rs                         | 39 ++++++++++++-------
+ .../bc/golden/def_inline_dict_inlined.golden  |  6 +--
+ src/tests/opt/def_inline.rs                   | 24 ++++++++++++
+ 8 files changed, 97 insertions(+), 54 deletions(-)
+
+diff --git a/src/eval/bc/bytecode.rs b/src/eval/bc/bytecode.rs
+index 653921c9..3e038a49 100644
+--- a/src/eval/bc/bytecode.rs
++++ b/src/eval/bc/bytecode.rs
+@@ -53,33 +53,35 @@ pub(crate) struct Bc {
+ }
+ 
+ impl Bc {
+-    /// Find span for instruction.
++    /// Find the end instruction and its argument from an instruction pointer.
+     #[cold]
+     #[inline(never)]
+-    pub(crate) fn slow_arg_at_ptr(addr_ptr: BcPtrAddr<'_>) -> &BcInstrSlowArg {
++    pub(crate) fn end_arg_at_ptr(addr_ptr: BcPtrAddr<'_>) -> (BcPtrAddr<'_>, &BcInstrEndArg) {
+         let mut ptr = addr_ptr;
+         loop {
+             let opcode = ptr.get_opcode();
+             if opcode == BcOpcode::End {
+-                let end_of_bc = ptr.get_instr::<InstrEnd>();
+-                let BcInstrEndArg {
+-                    slow_args,
+-                    end_addr,
+-                    ..
+-                } = &end_of_bc.arg;
+-                let code_start_ptr = ptr.sub(*end_addr);
+-                let addr = addr_ptr.offset_from(code_start_ptr);
+-                for (next_addr, next_span) in slow_args {
+-                    if *next_addr == addr {
+-                        return next_span;
+-                    }
+-                }
+-                panic!("span not found for addr: {addr}");
++                return (ptr, &ptr.get_instr::<InstrEnd>().arg);
+             }
+             ptr = ptr.add(opcode.size_of_repr());
+         }
+     }
+ 
++    /// Find span for instruction.
++    #[cold]
++    #[inline(never)]
++    pub(crate) fn slow_arg_at_ptr(addr_ptr: BcPtrAddr<'_>) -> &BcInstrSlowArg {
++        let (end_ptr, end_arg) = Self::end_arg_at_ptr(addr_ptr);
++        let code_start_ptr = end_ptr.sub(end_arg.end_addr);
++        let addr = addr_ptr.offset_from(code_start_ptr);
++        for (next_addr, next_span) in &end_arg.slow_args {
++            if *next_addr == addr {
++                return next_span;
++            }
++        }
++        panic!("span not found for addr: {addr}");
++    }
++
+     #[cold]
+     #[inline(never)]
+     pub(crate) fn wrap_error_for_instr_ptr(
+diff --git a/src/eval/bc/compiler/expr.rs b/src/eval/bc/compiler/expr.rs
+index e8bcf2bc..11c76745 100644
+--- a/src/eval/bc/compiler/expr.rs
++++ b/src/eval/bc/compiler/expr.rs
+@@ -25,7 +25,6 @@ use crate::collections::Hashed;
+ use crate::collections::SmallMap;
+ use crate::eval::bc::compiler::if_compiler::write_if_else;
+ use crate::eval::bc::instr_impl::*;
+-use crate::eval::bc::slow_arg::BcInstrSlowArg;
+ use crate::eval::bc::stack_ptr::BcSlot;
+ use crate::eval::bc::stack_ptr::BcSlotIn;
+ use crate::eval::bc::stack_ptr::BcSlotInRange;
+@@ -250,15 +249,10 @@ impl IrSpanned<ExprCompiled> {
+                             );
+                         });
+                     } else {
+-                        let key_spans = xs.map(|(k, _v)| k.span);
+                         write_exprs(xs.iter().flat_map(|(k, v)| [k, v]), bc, |kvs, bc| {
+-                            bc.write_instr_explicit::<InstrDictNPop>(
+-                                BcInstrSlowArg {
+-                                    span,
+-                                    spans: key_spans,
+-                                },
+-                                (kvs, target),
+-                            );
++                            let spans_offset =
++                                bc.add_dictnpop_spans(xs.iter().map(|(k, _)| k.span));
++                            bc.write_instr::<InstrDictNPop>(span, (kvs, target, spans_offset));
+                         });
+                     }
+                 }
+diff --git a/src/eval/bc/instr_impl.rs b/src/eval/bc/instr_impl.rs
+index c697d5bf..a9be86ea 100644
+--- a/src/eval/bc/instr_impl.rs
++++ b/src/eval/bc/instr_impl.rs
+@@ -1003,13 +1003,13 @@ impl InstrNoFlowImpl for InstrDictOfConstsImpl {
+ }
+ 
+ impl InstrNoFlowImpl for InstrDictNPopImpl {
+-    type Arg = (BcSlotInRange, BcSlotOut);
++    type Arg = (BcSlotInRange, BcSlotOut, u32);
+ 
+     fn run_with_args<'v>(
+         eval: &mut Evaluator<'v, '_, '_>,
+         frame: BcFramePtr<'v>,
+         ip: BcPtrAddr,
+-        (npops, target): &(BcSlotInRange, BcSlotOut),
++        (npops, target, spans_offset): &(BcSlotInRange, BcSlotOut, u32),
+     ) -> crate::Result<()> {
+         let items = frame.get_bc_slot_range(*npops);
+         debug_assert!(items.len().is_multiple_of(2));
+@@ -1020,16 +1020,18 @@ impl InstrNoFlowImpl for InstrDictNPopImpl {
+             let k = match k.get_hashed() {
+                 Ok(k) => k,
+                 Err(e) => {
+-                    let spans = &Bc::slow_arg_at_ptr(ip).spans;
+-                    return Err(add_span_to_expr_error(e, spans[i], eval).into_error());
++                    let (_, end_arg) = Bc::end_arg_at_ptr(ip);
++                    let span = end_arg.dictnpop_spans[*spans_offset as usize + i];
++                    return Err(add_span_to_expr_error(e, span, eval).into_error());
+                 }
+             };
+             let prev = dict.insert_hashed(k, v);
+             if prev.is_some() {
+                 let e =
+                     crate::Error::new_other(EvalError::DuplicateDictionaryKey(k.key().to_string()));
+-                let spans = &Bc::slow_arg_at_ptr(ip).spans;
+-                return Err(add_span_to_expr_error(e, spans[i], eval).into_error());
++                let (_, end_arg) = Bc::end_arg_at_ptr(ip);
++                let span = end_arg.dictnpop_spans[*spans_offset as usize + i];
++                return Err(add_span_to_expr_error(e, span, eval).into_error());
+             }
+         }
+         let dict = eval.heap().alloc(Dict::new(dict));
+diff --git a/src/eval/bc/instrs.rs b/src/eval/bc/instrs.rs
+index 293d5009..6f85b4d7 100644
+--- a/src/eval/bc/instrs.rs
++++ b/src/eval/bc/instrs.rs
+@@ -46,6 +46,7 @@ use crate::eval::bc::repr::BcInstrRepr;
+ use crate::eval::bc::slow_arg::BcInstrEndArg;
+ use crate::eval::bc::slow_arg::BcInstrSlowArg;
+ use crate::eval::bc::writer::BcStatementLocations;
++use crate::eval::runtime::frame_span::FrameSpan;
+ use crate::pagable::StarlarkDeserialize;
+ use crate::pagable::StarlarkDeserializeContext;
+ use crate::pagable::StarlarkSerialize;
+@@ -113,6 +114,7 @@ fn empty_instrs() -> &'static [u64] {
+             arg: BcInstrEndArg {
+                 end_addr: BcAddr(0),
+                 slow_args: Vec::new(),
++                dictnpop_spans: Box::default(),
+                 local_names: VALUE_EMPTY_LOCAL_NAMES.unpack(),
+             },
+             _align: [],
+@@ -512,13 +514,18 @@ impl BcInstrsWriter {
+ 
+     pub(crate) fn finish(
+         mut self,
+-        slow_args: Vec<(BcAddr, BcInstrSlowArg)>,
+-        stmt_locs: BcStatementLocations,
++        mut slow_args: Vec<(BcAddr, BcInstrSlowArg)>,
++        dictnpop_spans: Box<[FrameSpan]>,
++        mut stmt_locs: BcStatementLocations,
+         local_names: FrozenAnyArray<FrozenStringValue>,
+     ) -> BcInstrs {
++        slow_args.shrink_to_fit();
++        stmt_locs.locs.shrink_to_fit();
++        stmt_locs.stmts.shrink_to_fit();
+         self.write::<InstrEnd>(BcInstrEndArg {
+             end_addr: self.ip(),
+             slow_args,
++            dictnpop_spans,
+             local_names,
+         });
+         // We cannot destructure `self` to fetch `instrs` because `Self` has `drop,
+@@ -572,7 +579,12 @@ mod tests {
+         let mut bc = BcInstrsWriter::new();
+         bc.write::<InstrConst>((FrozenValue::new_bool(true), BcSlot(0).to_out()));
+         bc.write::<InstrReturn>(BcSlot(0).to_in());
+-        let bc = bc.finish(Vec::new(), BcStatementLocations::new(), local_names);
++        let bc = bc.finish(
++            Vec::new(),
++            Box::default(),
++            BcStatementLocations::new(),
++            local_names,
++        );
+         if mem::size_of::<usize>() == 8 {
+             assert_eq!(
+                 "0: Const True ->&abc; 24: Return &abc; 32: End",
+diff --git a/src/eval/bc/slow_arg.rs b/src/eval/bc/slow_arg.rs
+index d75b06b3..87be5903 100644
+--- a/src/eval/bc/slow_arg.rs
++++ b/src/eval/bc/slow_arg.rs
+@@ -29,8 +29,6 @@ use crate::values::types::any_array::FrozenAnyArray;
+ pub(crate) struct BcInstrSlowArg {
+     /// Instruction code span.
+     pub(crate) span: FrameSpan,
+-    /// Spans when an instruction needs multiple spans.
+-    pub(crate) spans: Vec<FrameSpan>,
+ }
+ 
+ #[derive(Debug, StarlarkPagable)]
+@@ -39,6 +37,8 @@ pub(crate) struct BcInstrEndArg {
+     pub(crate) end_addr: BcAddr,
+     /// Spans of all instructions.
+     pub(crate) slow_args: Vec<(BcAddr, BcInstrSlowArg)>,
++    /// Dictionary key spans, indexed by the offset stored in `InstrDictNPop`.
++    pub(crate) dictnpop_spans: Box<[FrameSpan]>,
+     /// Frame local names.
+     pub(crate) local_names: FrozenAnyArray<FrozenStringValue>,
+ }
+diff --git a/src/eval/bc/writer.rs b/src/eval/bc/writer.rs
+index 2a078d7b..e743af2b 100644
+--- a/src/eval/bc/writer.rs
++++ b/src/eval/bc/writer.rs
+@@ -160,6 +160,7 @@ pub(crate) struct BcWriter<'f> {
+     instrs: BcInstrsWriter,
+     /// Instruction spans, used for errors.
+     slow_args: Vec<(BcAddr, BcInstrSlowArg)>,
++    dictnpop_spans: Vec<FrameSpan>,
+     /// For each statement, will store the span for the first instruction and any instruction after a call.
+     stmt_locs: BcStatementLocations,
+     /// The last-written opcode
+@@ -197,6 +198,7 @@ impl<'f> BcWriter<'f> {
+         BcWriter {
+             instrs: BcInstrsWriter::new(),
+             slow_args: Vec::new(),
++            dictnpop_spans: Vec::new(),
+             stmt_locs: BcStatementLocations::new(),
+             last_opcode: BcOpcode::End,
+             stack_size: 0,
+@@ -215,6 +217,7 @@ impl<'f> BcWriter<'f> {
+         let BcWriter {
+             instrs,
+             slow_args: spans,
++            dictnpop_spans,
+             stmt_locs,
+             last_opcode: _,
+             stack_size,
+@@ -230,8 +233,13 @@ impl<'f> BcWriter<'f> {
+         assert_eq!(stack_size, 0);
+         assert!(for_loops.is_empty());
+         Bc {
+-            instrs: instrs.finish(spans, stmt_locs, local_names),
+             local_count: local_names.len().try_into().unwrap(),
++            instrs: instrs.finish(
++                spans,
++                dictnpop_spans.into_boxed_slice(),
++                stmt_locs,
++                local_names,
++            ),
+             max_stack_size,
+             max_loop_depth,
+         }
+@@ -246,6 +254,19 @@ impl<'f> BcWriter<'f> {
+         self.instrs.ip()
+     }
+ 
++    pub(crate) fn add_dictnpop_spans(
++        &mut self,
++        spans: impl IntoIterator<Item = FrameSpan>,
++    ) -> u32 {
++        let offset = self
++            .dictnpop_spans
++            .len()
++            .try_into()
++            .expect("too many dictionary key spans");
++        self.dictnpop_spans.extend(spans);
++        offset
++    }
++
+     /// Version of instruction write with explicit slow arg arg.
+     fn do_write_generic_explicit<I: BcInstr>(
+         &mut self,
+@@ -283,13 +304,7 @@ impl<'f> BcWriter<'f> {
+         span: FrameSpan,
+         arg: I::Arg,
+     ) -> (BcAddr, *const I::Arg) {
+-        self.write_instr_ret_arg_explicit::<I>(
+-            BcInstrSlowArg {
+-                span,
+-                ..Default::default()
+-            },
+-            arg,
+-        )
++        self.write_instr_ret_arg_explicit::<I>(BcInstrSlowArg { span }, arg)
+     }
+ 
+     pub(crate) fn write_instr_explicit<I: BcInstr>(
+@@ -302,13 +317,7 @@ impl<'f> BcWriter<'f> {
+ 
+     /// Write an instruction.
+     pub(crate) fn write_instr<I: BcInstr>(&mut self, span: FrameSpan, arg: I::Arg) {
+-        self.write_instr_explicit::<I>(
+-            BcInstrSlowArg {
+-                span,
+-                ..Default::default()
+-            },
+-            arg,
+-        );
++        self.write_instr_explicit::<I>(BcInstrSlowArg { span }, arg);
+     }
+ 
+     /// Write load constant instruction.
+diff --git a/src/tests/bc/golden/def_inline_dict_inlined.golden b/src/tests/bc/golden/def_inline_dict_inlined.golden
+index 2793fea3..fe78be7b 100644
+--- a/src/tests/bc/golden/def_inline_dict_inlined.golden
++++ b/src/tests/bc/golden/def_inline_dict_inlined.golden
+@@ -18,6 +18,6 @@ Instructions:
+        # instrs.star.bzl:6:5-26
+    0: ListNew ->&1
+    8: Const 10 ->&2
+-  32: DictNPop [&1, &2] ->&0
+-  48: Return &0
+-  56: End
++  32: DictNPop [&1, &2] ->&0 0
++  56: Return &0
++  64: End
+diff --git a/src/tests/opt/def_inline.rs b/src/tests/opt/def_inline.rs
+index a0041695..6b4a7d85 100644
+--- a/src/tests/opt/def_inline.rs
++++ b/src/tests/opt/def_inline.rs
+@@ -129,6 +129,30 @@ error: Value of type `list` is not hashable
+     );
+ }
+ 
++#[test]
++fn test_dict_key_spans_after_nested_dicts() {
++    let mut a = Assert::new();
++    let source = "\
++def dicts(good_key, bad_key):
++    first = {good_key: {good_key: 0}}
++    return {good_key: first, bad_key: 1}
++";
++    a.module("dicts.bzl", source);
++    for prelude in [source, "load('dicts.bzl', 'dicts')"] {
++        a.is_true(&format!("{prelude}\ndicts(0, 1)[1] == 1"));
++        for (key, message) in [("0", "key repeated"), ("[]", "not hashable")] {
++            let error = a.fail(&format!("{prelude}\ndicts(0, {key})"), message);
++            assert_eq!(
++                "bad_key",
++                error
++                    .span()
++                    .expect("dictionary key error span")
++                    .source_span(),
++            );
++        }
++    }
++}
++
+ #[test]
+ fn test_do_not_inline_too_large_functions() {
+     let mut a = Assert::new();

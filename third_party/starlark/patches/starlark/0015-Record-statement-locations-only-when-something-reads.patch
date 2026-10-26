@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harry Turton <harrisonturton@gmail.com>
+Date: Sun, 25 Oct 2026 19:55:45 -0400
+Subject: [PATCH] Record statement locations only when something reads them
+
+Every compiled function kept the bytecode offset and span of each
+statement, and of each instruction after a call: about 8% of what a
+frozen module retains. Only before_stmt hooks and profiling read them, so
+they're recorded only when the evaluator compiling the code has those
+enabled.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/eval/bc/compiler/stmt.rs  |  2 +-
+ src/eval/bc/writer.rs         | 12 ++++++++++--
+ src/eval/compiler/stmt.rs     |  8 +++++++-
+ src/eval/runtime/evaluator.rs | 11 +++++++++++
+ 4 files changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/src/eval/bc/compiler/stmt.rs b/src/eval/bc/compiler/stmt.rs
+index fb5d9298..d475fd3c 100644
+--- a/src/eval/bc/compiler/stmt.rs
++++ b/src/eval/bc/compiler/stmt.rs
+@@ -262,7 +262,7 @@ impl StmtsCompiled {
+         param_count: u32,
+         heap: &FrozenHeap,
+     ) -> Bc {
+-        let mut bc = BcWriter::new(local_names, param_count, heap);
++        let mut bc = BcWriter::new(local_names, param_count, compiler.record_stmt_locs, heap);
+         self.write_bc(compiler, &mut bc);
+ 
+         // Small optimization: if the last statement is return,
+diff --git a/src/eval/bc/writer.rs b/src/eval/bc/writer.rs
+index e743af2b..a453ebe7 100644
+--- a/src/eval/bc/writer.rs
++++ b/src/eval/bc/writer.rs
+@@ -163,6 +163,9 @@ pub(crate) struct BcWriter<'f> {
+     dictnpop_spans: Vec<FrameSpan>,
+     /// For each statement, will store the span for the first instruction and any instruction after a call.
+     stmt_locs: BcStatementLocations,
++    /// Whether to record `stmt_locs`, which only `before_stmt` hooks and
++    /// profiling read.
++    record_stmt_locs: bool,
+     /// The last-written opcode
+     last_opcode: BcOpcode,
+     /// Current stack size.
+@@ -187,6 +190,7 @@ impl<'f> BcWriter<'f> {
+     pub(crate) fn new(
+         local_names: FrozenAnyArray<FrozenStringValue>,
+         param_count: u32,
++        record_stmt_locs: bool,
+         heap: &'f FrozenHeap,
+     ) -> BcWriter<'f> {
+         assert!(param_count as usize <= local_names.len());
+@@ -200,6 +204,7 @@ impl<'f> BcWriter<'f> {
+             slow_args: Vec::new(),
+             dictnpop_spans: Vec::new(),
+             stmt_locs: BcStatementLocations::new(),
++            record_stmt_locs,
+             last_opcode: BcOpcode::End,
+             stack_size: 0,
+             local_names,
+@@ -218,6 +223,7 @@ impl<'f> BcWriter<'f> {
+             instrs,
+             slow_args: spans,
+             dictnpop_spans,
++            record_stmt_locs: _,
+             stmt_locs,
+             last_opcode: _,
+             stack_size,
+@@ -277,7 +283,7 @@ impl<'f> BcWriter<'f> {
+         // instruction, instrument this instruction with the current statement
+         // span so that the time this and following instructions take can be
+         // attributed to the correct statement.
+-        if self.last_opcode.is_call() {
++        if self.record_stmt_locs && self.last_opcode.is_call() {
+             self.stmt_locs.push_prev(self.ip());
+         }
+         self.last_opcode = BcOpcode::for_instr::<I>();
+@@ -287,7 +293,9 @@ impl<'f> BcWriter<'f> {
+     }
+ 
+     pub(crate) fn mark_before_stmt(&mut self, span: FrameSpan) {
+-        self.stmt_locs.push(self.ip(), BcStmtLoc { span })
++        if self.record_stmt_locs {
++            self.stmt_locs.push(self.ip(), BcStmtLoc { span })
++        }
+     }
+ 
+     /// Write an instruction, return address and argument.
+diff --git a/src/eval/compiler/stmt.rs b/src/eval/compiler/stmt.rs
+index b7fce37e..74879747 100644
+--- a/src/eval/compiler/stmt.rs
++++ b/src/eval/compiler/stmt.rs
+@@ -109,6 +109,9 @@ pub(crate) enum StmtCompiled {
+ pub(crate) struct StmtCompileContext {
+     /// Current function has return type.
+     pub(crate) has_return_type: bool,
++    /// Record each statement's location in the bytecode, which only
++    /// `before_stmt` hooks and profiling read.
++    pub(crate) record_stmt_locs: bool,
+ }
+ 
+ pub(crate) struct OptimizeOnFreezeContext<'v, 'a> {
+@@ -646,7 +649,10 @@ pub(crate) fn add_assign<'v>(
+ 
+ impl Compiler<'_, '_, '_, '_> {
+     pub(crate) fn compile_context(&self, has_return_type: bool) -> StmtCompileContext {
+-        StmtCompileContext { has_return_type }
++        StmtCompileContext {
++            has_return_type,
++            record_stmt_locs: self.eval.wants_stmt_locations(),
++        }
+     }
+ 
+     pub(crate) fn stmt(
+diff --git a/src/eval/runtime/evaluator.rs b/src/eval/runtime/evaluator.rs
+index caee64da..3225369a 100644
+--- a/src/eval/runtime/evaluator.rs
++++ b/src/eval/runtime/evaluator.rs
+@@ -499,6 +499,17 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
+         self.before_stmt(BeforeStmtFunc::from_fn(f))
+     }
+ 
++    /// Whether code compiled now needs the location of each statement in its
++    /// bytecode: only to call `before_stmt` hooks, or to profile.
++    pub(crate) fn wants_stmt_locations(&self) -> bool {
++        self.eval_instrumentation.enabled
++            || !matches!(
++                self.profile_or_instrumentation_mode,
++                ProfileOrInstrumentationMode::None
++            )
++            || cfg!(test)
++    }
++
+     pub(crate) fn before_stmt(&mut self, f: BeforeStmtFunc<'a, 'e>) {
+         self.eval_instrumentation
+             .change(|v| v.before_stmt.before_stmt.push(f))

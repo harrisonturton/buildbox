@@ -21,6 +21,8 @@ crate.annotation(
         "//third_party/starlark:patches/starlark/0010-Add-eval_module_all_errors-failing-with-every-name-e.patch",
         "//third_party/starlark:patches/starlark/0012-Cross-process-pagable-ser-de-for-BcInstrs.patch",
         "//third_party/starlark:patches/starlark/0013-Test-that-a-frozen-module-s-functions-run-after-a-ro.patch",
+        "//third_party/starlark:patches/starlark/0014-shrink-retained-bytecode-side-tables.patch",
+        "//third_party/starlark:patches/starlark/0015-Record-statement-locations-only-when-something-reads.patch",
     ],
 )
 
