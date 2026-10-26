@@ -41,23 +41,26 @@ Starlark aspects work as Bazel's do for the common cases:
   rule's attributes of the same names and types;
 - propagated along `attr_aspects`, including `*`;
 - applied only to rules whose `provides` satisfy `required_providers`;
+- applied after the aspects they `requires`, and seeing the providers of
+  those and of the aspects whose `provides` satisfy their
+  `required_aspect_providers`, keyed as Bazel keys them by the aspects
+  they see;
 - with private and exec attributes, and toolchains;
 - with `ctx.rule` and `ctx.aspect_ids`, and their providers merged into the
   dependent's view of the target, output groups included;
 - applied at the top level with `--aspects` and `--aspects_parameters`,
-  built with `--output_groups` and reported as Bazel reports them.
+  built with `--output_groups` and reported as Bazel reports them;
+- failing as Bazel's do, with Bazel's tracebacks and wording, as rules'
+  implementations now do too.
 
 Still missing:
 
-- `requires` and `required_aspect_providers` (aspects that see other
-  aspects' providers);
 - `apply_to_generating_rules`, `propagation_predicate`, `exec_groups` and
   `toolchains_aspects`;
+- `attr_aspects` and `toolchains_aspects` given as functions (experimental
+  in Bazel);
 - Bazel's native aspects;
 - aspects in `cquery` and `aquery`.
-
-An error in an aspect's implementation is worded as a rule's would be,
-not as Bazel words an aspect's.
 
 ## 3. Execution platforms and exec groups
 

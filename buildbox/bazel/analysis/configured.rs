@@ -6,11 +6,12 @@ use crate::paging::PagedValue;
 use crate::artifact::{self, Artifact};
 use crate::attrs::resolve_attrs;
 use crate::build_ctx::{self, Dep, RuleInput};
+use crate::failure::{ImplementationFailed, ProvidersClash};
 use crate::platform::PlatformKey;
 use crate::providers;
 use crate::toolchains::{self, ResolvedToolchains};
 use crate::transition::{AttrConfigs, ExecConfigKey, configured_key, dep_configs};
-use bazel_config::ConfigId;
+use bazel_config::{AspectDescriptor, ConfigId};
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule, PackageKey, RepoMappingKey};
 use bazel_progress::{Event, Progress};
@@ -341,8 +342,47 @@ pub(crate) async fn evaluate_reporting(ctx: &Ctx, label: Label, input: RuleInput
     bazel_loading::report_printed(ctx, &printed).await;
     match analyzed {
         Ok(analyzed) => Ok(analyzed),
-        Err(message) => Err(located(ctx, label, message).await),
+        Err(Failure::Implementation { target, failed }) => {
+            let message = format!("in {target}: {}", failed.describe(ctx).await);
+            Err(located(ctx, label, message).await)
+        }
+        Err(Failure::Clash(clash)) => Err(located(ctx, label, clash.to_string()).await.with_origin(label.to_string())),
     }
+}
+
+/// Why running an implementation failed.
+pub(crate) enum Failure {
+    /// The implementation failed, as Bazel reports after
+    /// `in <target>: `.
+    Implementation { target: String, failed: ImplementationFailed },
+    /// The providers of a dependency and of its aspects clash, which Bazel
+    /// reports at the target alone.
+    Clash(ProvidersClash),
+}
+
+impl Failure {
+    fn of(input: &RuleInput, error: anyhow::Error) -> Failure {
+        let error = match error.downcast::<ProvidersClash>() {
+            Ok(clash) => return Failure::Clash(clash),
+            Err(error) => error,
+        };
+        let failed = error.downcast::<ImplementationFailed>().unwrap_or_else(|error| ImplementationFailed::reported(error.to_string()));
+        Failure::Implementation {
+            target: implementing(input),
+            failed,
+        }
+    }
+}
+
+/// What Bazel says it was analyzing when an implementation fails:
+/// `<kind> rule <label>`, or for aspects,
+/// `<aspects> aspect on <kind> rule <label>`.
+fn implementing(input: &RuleInput) -> String {
+    let Some(view) = &input.aspect else {
+        return format!("{} rule {}", input.class.kind, input.label);
+    };
+    let aspects: Vec<String> = input.config.aspects.iter().map(AspectDescriptor::description).collect();
+    format!("{} aspect on {} rule {}", aspects.join(","), view.rule.class.kind, input.label)
 }
 
 /// The labels a label list attribute has, such as `exec_compatible_with`.
@@ -448,6 +488,7 @@ pub(crate) async fn analyze_deps(
         match result {
             Ok(dep) => deps.insert(wanted, dep),
             Err(DepError::Failed(error)) => return Err(error),
+            Err(DepError::AspectFailed(error)) => return Err(error.with_origin(referrer.to_string())),
             Err(DepError::Missing(message)) => return Err(missing_dep(ctx, referrer, &message).await),
         };
     }
@@ -460,6 +501,9 @@ enum DepError {
     Missing(String),
     /// It failed to analyze.
     Failed(SkyError),
+    /// An aspect applied to it failed, which Bazel reports as the
+    /// failure of the target that applies it.
+    AspectFailed(SkyError),
 }
 
 /// The error for a dependency that doesn't exist, as Bazel reports it:
@@ -497,7 +541,7 @@ async fn dep(ctx: &Ctx, label: Label, config: ConfigId) -> Result<Dep, DepError>
     let Dep::Target(target) = plain else {
         return Ok(plain);
     };
-    crate::aspect::applied(ctx, target, &aspects).await.map_err(DepError::Failed)
+    crate::aspect::applied(ctx, target, &aspects).await.map_err(DepError::AspectFailed)
 }
 
 /// One dependency, without aspects.
@@ -671,12 +715,12 @@ fn incompatible(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool
 
 /// Run the rule's implementation, on a blocking thread, returning what
 /// it printed too.
-pub(crate) fn evaluate(input: RuleInput, name: FrozenHeapName) -> (Result<Analyzed, String>, Vec<Printed>) {
+pub(crate) fn evaluate(input: RuleInput, name: FrozenHeapName) -> (Result<Analyzed, Failure>, Vec<Printed>) {
     let mut printed = Vec::new();
     let analyzed = Module::with_temp_heap(|module| {
         module.frozen_heap().add_reference(bazel_starlark::provider::builtin_providers_heap());
-        let actions = build_ctx::run(&module, &input, &mut printed).map_err(|error| format!("in {} rule {}: {error}", input.class.kind, input.label))?;
-        let module = module.freeze_named(name).map_err(|error| format!("{}: {error:?}", input.label))?;
+        let actions = build_ctx::run(&module, &input, &mut printed).map_err(|error| Failure::of(&input, error))?;
+        let module = module.freeze_named(name).map_err(|error| Failure::of(&input, anyhow::anyhow!("{}: {error:?}", input.label)))?;
         Ok(Analyzed { module, actions })
     });
     (analyzed, printed)

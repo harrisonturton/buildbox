@@ -28,6 +28,7 @@ rust_library(
         "configured.rs",
         "coverage.rs",
         "exec_groups.rs",
+        "failure.rs",
         "expand.rs",
         "file_value.rs",
         "inputs.rs",

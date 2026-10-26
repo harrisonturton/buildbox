@@ -16,11 +16,12 @@ use bazel_config::{AspectDescriptor, ConfigId};
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule};
 use bazel_progress::Progress;
-use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, Package, Rule, RuleClass, Target};
+use bazel_packages::{AttrDefault, AttrSchema, AttrType, AttrValue, Package, Rule, RuleClass, Target};
 use bazel_starlark::aspect::{Aspect, AspectGen};
 use intern::Symbol;
 use skycodec::{Fingerprint, Fingerprinter};
 use skyframe::{Compute, Ctx, SkyError};
+use starlark::collections::SmallMap;
 use starlark::environment::Module;
 use starlark::values::{OwnedFrozenValue, Value, ValueLike};
 use std::collections::BTreeMap;
@@ -76,8 +77,9 @@ impl LoadedAspect {
 /// The aspects `--aspects` names, each `file%name`, with the values
 /// `--aspects_parameters` gives their parameters, or else their defaults.
 pub async fn top_level(ctx: &impl Compute, aspects: &[(Label, String)], parameters: &[(String, String)]) -> Result<Vec<AspectDescriptor>, SkyError> {
+    let aspects = with_required(ctx, aspects).await?;
     let mut loaded = Vec::with_capacity(aspects.len());
-    for (file, name) in aspects {
+    for (file, name) in &aspects {
         loaded.push(LoadedAspect::load(ctx, *file, name).await?);
     }
     let mut used = Vec::new();
@@ -121,6 +123,22 @@ pub async fn top_level(ctx: &impl Compute, aspects: &[(Label, String)], paramete
         });
     }
     Ok(descriptors)
+}
+
+/// Aspects, each `file%name`, each after the aspects it requires: each
+/// once.
+async fn with_required(ctx: &impl Compute, aspects: &[(Label, String)]) -> Result<Vec<(Label, String)>, SkyError> {
+    let mut all = Vec::with_capacity(aspects.len());
+    for (file, name) in aspects {
+        let aspect = LoadedAspect::load(ctx, *file, name).await?;
+        let required = aspect.get().required_aspects().into_iter().map(|required| (required.file, required.name.to_string()));
+        for aspect in required.chain([(*file, name.clone())]) {
+            if !all.contains(&aspect) {
+                all.push(aspect);
+            }
+        }
+    }
+    Ok(all)
 }
 
 /// Whether an aspect's attribute is a parameter: public, rather than
@@ -203,9 +221,10 @@ pub(crate) async fn with_attached_aspects(
     mut attr_configs: AttrConfigs,
 ) -> Result<AttrConfigs, SkyError> {
     for schema in class.attrs.iter().filter(|schema| !schema.aspects.is_empty()) {
-        let mut descriptors = Vec::with_capacity(schema.aspects.len());
-        for aspect in &schema.aspects {
-            descriptors.push(attached(ctx, aspect, class, attrs).await?);
+        let given: Vec<(Label, String)> = schema.aspects.iter().map(|aspect| (aspect.file, aspect.name.to_string())).collect();
+        let mut descriptors = Vec::with_capacity(given.len());
+        for (file, name) in with_required(ctx, &given).await? {
+            descriptors.push(attached(ctx, file, &name, class, attrs).await?);
         }
         let configs = dep_configs(schema.cfg, schema.name, config, exec_config, &attr_configs);
         let configs = configs.into_iter().map(|(key, config)| (key, config.get().with_aspects(&descriptors))).collect();
@@ -217,8 +236,8 @@ pub(crate) async fn with_attached_aspects(
 
 /// An aspect an attribute attaches, with the parameters the rule's
 /// attributes of the same names and types give it.
-async fn attached(ctx: &Ctx, aspect: &AspectRef, rule_class: &RuleClass, attrs: &[(Symbol, AttrValue)]) -> Result<AspectDescriptor, SkyError> {
-    let loaded = LoadedAspect::load(ctx, aspect.file, aspect.name.as_str()).await?;
+async fn attached(ctx: &Ctx, file: Label, name: &str, rule_class: &RuleClass, attrs: &[(Symbol, AttrValue)]) -> Result<AspectDescriptor, SkyError> {
+    let loaded = LoadedAspect::load(ctx, file, name).await?;
     let mut params = Vec::new();
     for schema in loaded.class()?.attrs.iter().filter(|schema| is_parameter(schema)) {
         let same_type = rule_class.attrs.iter().any(|attr| attr.name == schema.name && attr.ty == schema.ty);
@@ -229,8 +248,8 @@ async fn attached(ctx: &Ctx, aspect: &AspectRef, rule_class: &RuleClass, attrs: 
     }
     params.sort();
     Ok(AspectDescriptor {
-        file: aspect.file,
-        name: aspect.name.to_string(),
+        file,
+        name: name.to_string(),
         params,
     })
 }
@@ -250,27 +269,11 @@ fn quote(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn unquote(text: &str) -> Option<String> {
-    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
-    let mut unquoted = String::with_capacity(inner.len());
-    let mut escaped = false;
-    for c in inner.chars() {
-        match c {
-            '\\' if !escaped => escaped = true,
-            _ => {
-                escaped = false;
-                unquoted.push(c);
-            }
-        }
-    }
-    Some(unquoted)
-}
-
 /// A parameter's value, read back from a descriptor as the attribute's
 /// type.
 fn parameter_value(schema: &AttrSchema, text: &str) -> Option<AttrValue> {
     match schema.ty {
-        AttrType::String => unquote(text).map(AttrValue::String),
+        AttrType::String => bazel_config::unquoted(text).map(AttrValue::String),
         AttrType::Int => text.parse().ok().map(AttrValue::Int),
         AttrType::Bool => Some(AttrValue::Bool(text == "True")),
         _ => None,
@@ -286,18 +289,50 @@ pub(crate) async fn applied(ctx: &Ctx, target: Arc<ConfiguredTarget>, aspects: &
 /// A target, then each aspect's application to it, each after those
 /// before it.
 async fn with_applications(ctx: &Ctx, target: Arc<ConfiguredTarget>, aspects: &[AspectDescriptor]) -> Result<Vec<Arc<ConfiguredTarget>>, SkyError> {
-    let config = target.config.get();
-    let keys: Vec<ConfiguredTargetKey> = (1..=aspects.len())
-        .map(|count| ConfiguredTargetKey {
-            label: target.label,
-            config: config.with_aspects(&aspects[..count]),
-        })
-        .collect();
+    let plain = ConfiguredTargetKey {
+        label: target.label,
+        config: target.config,
+    };
+    let keys = application_keys(ctx, plain, aspects).await?;
     let mut chain = vec![target];
     for applied in ctx.compute_many(&keys).await {
         chain.push(applied?);
     }
     Ok(chain)
+}
+
+/// The key of each aspect's application to a target, `plain`, after those
+/// before it. As Bazel keys them, each names only the aspects before it
+/// that it sees, directly or through those it sees.
+pub async fn application_keys(ctx: &impl Compute, plain: ConfiguredTargetKey, aspects: &[AspectDescriptor]) -> Result<Vec<ConfiguredTargetKey>, SkyError> {
+    let mut loaded = Vec::with_capacity(aspects.len());
+    for descriptor in aspects {
+        loaded.push(LoadedAspect::load(ctx, descriptor.file, &descriptor.name).await?);
+    }
+    let config = plain.config.get();
+    let mut keys = Vec::with_capacity(aspects.len());
+    for last in 0..aspects.len() {
+        let seen: Vec<AspectDescriptor> = seen_by(&loaded[..=last]).into_iter().map(|index| aspects[index].clone()).collect();
+        keys.push(ConfiguredTargetKey {
+            label: plain.label,
+            config: config.with_aspects(&seen),
+        });
+    }
+    Ok(keys)
+}
+
+/// The aspects the last of `aspects` sees, directly or through those it
+/// sees, and itself: their indices, in order.
+fn seen_by(aspects: &[LoadedAspect]) -> Vec<usize> {
+    let last = aspects.len() - 1;
+    let mut seen = vec![last];
+    for earlier in (0..last).rev() {
+        if seen.iter().any(|later| aspects[*later].get().sees(aspects[earlier].get())) {
+            seen.push(earlier);
+        }
+    }
+    seen.reverse();
+    seen
 }
 
 /// Analyze the last aspect `key`'s configuration names, applied to its
@@ -333,9 +368,17 @@ pub(crate) async fn analyze(ctx: &Ctx, key: ConfiguredTargetKey, package: &Packa
         Setup::Incompatible(_) => return nothing_provided(ctx, key, plain.kind),
     };
     match apply(ctx, key, package, rule, plain, setup, &aspects).await {
-        Err(error) if error.origin().is_none() => Err(configured::analysis_failed(ctx, plain_key, error).await),
+        Err(error) if error.origin().is_none() => Err(failed(plain_key, error)),
         applied => applied,
     }
+}
+
+/// An aspect's error as Bazel reports it: then that the analysis of its
+/// target failed, which Bazel doesn't place, with the target as the
+/// error's origin.
+fn failed(key: ConfiguredTargetKey, error: SkyError) -> SkyError {
+    let failed = format!("Analysis of target '{}' (config: {}) failed", key.label, key.config.get().checksum);
+    SkyError::with_kind(error.kind(), configured::errors(&[error.message(), &failed])).with_origin(key.label.to_string())
 }
 
 /// Apply the last of `aspects` to a rule's target, `plain`, set up as it
@@ -461,7 +504,11 @@ fn fingerprint(
 fn nothing_provided(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol) -> Result<ConfiguredTarget, SkyError> {
     let fingerprint = Fingerprint::of(format!("no aspect {} {:?}", key.label, key.config.get().options).as_bytes());
     let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<configured::Analyzed> {
-        let target = crate::providers::collect_aspect(key.label, Value::new_none())?;
+        let target = crate::target_value::TargetValue {
+            label: key.label,
+            providers: SmallMap::new(),
+            is_file: false,
+        };
         module.set(configured::TARGET, module.heap().alloc(target));
         let module = module.freeze_named(heap_name("no aspect", key, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
         Ok(configured::Analyzed { module, actions: Vec::new() })
@@ -491,6 +538,6 @@ mod tests {
     #[test]
     fn quoted_parameters_read_back() {
         let text = quote(r#"a "b" \c"#);
-        assert_eq!(unquote(&text).as_deref(), Some(r#"a "b" \c"#));
+        assert_eq!(bazel_config::unquoted(&text).as_deref(), Some(r#"a "b" \c"#));
     }
 }

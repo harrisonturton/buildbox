@@ -80,10 +80,14 @@ pub fn start_position(span: &FileSpan) -> SourcePosition {
 }
 
 /// Where an error in an expression is, as Bazel places it: at the
-/// operator of a binary operation, otherwise where the expression starts.
+/// operator of a binary operation, or the `[` of an index, otherwise
+/// where the expression starts.
 fn error_position(span: &FileSpan, raw: &str) -> SourcePosition {
     let mut position = start_position(span);
-    let operator = raw.strip_prefix("Operation `").and_then(|rest| rest.split_once("` not supported for types")).map(|(operator, _)| operator);
+    let operator = match missing_key(raw.trim()) {
+        Some(_) => Some("["),
+        None => raw.strip_prefix("Operation `").and_then(|rest| rest.split_once("` not supported for types")).map(|(operator, _)| operator),
+    };
     if let Some(offset) = operator.and_then(|operator| unquoted_find(span.source_span(), operator)) {
         position.column += span.source_span()[..offset].chars().count() as u32;
     }
@@ -132,6 +136,9 @@ pub fn bazel_wording(message: &str, candidates: &[String]) -> String {
     if let Some(operation) = binary_operation(message) {
         return operation;
     }
+    if let Some(key) = missing_key(message) {
+        return format!("key {key} not found in dictionary");
+    }
     message.strip_prefix("error: ").unwrap_or(message).to_string()
 }
 
@@ -141,6 +148,12 @@ fn undefined_name(message: &str) -> Option<&str> {
     let rest = message.strip_prefix("Variable `")?;
     let (name, rest) = rest.split_once('`')?;
     rest.starts_with(" not found").then_some(name)
+}
+
+/// The key, as Starlark writes it, in starlark-rust's
+/// ``Key `"name"` was not found``.
+fn missing_key(message: &str) -> Option<&str> {
+    message.strip_prefix("Key `")?.strip_suffix("` was not found")
 }
 
 /// `unsupported binary operation: int + string`, from starlark-rust's
@@ -284,5 +297,6 @@ mod tests {
         let candidates = names(&["select"]);
         assert_eq!(bazel_wording("Variable `selct` not found, did you mean `set`?", &candidates), "name 'selct' is not defined (did you mean 'select'?)");
         assert_eq!(bazel_wording("Operation `+` not supported for types `int` and `string`", &[]), "unsupported binary operation: int + string");
+        assert_eq!(bazel_wording("Key `\"missing\"` was not found", &[]), "key \"missing\" not found in dictionary");
     }
 }

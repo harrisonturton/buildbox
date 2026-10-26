@@ -364,6 +364,46 @@ impl AspectDescriptor {
             params: parsed,
         })
     }
+
+    /// The descriptor as Bazel describes it to users and to
+    /// `ctx.aspect_ids`: each parameter's value quoted as Java prints it,
+    /// so `"a"` and `True` are `"a"` and `"true"`.
+    pub fn description(&self) -> String {
+        let aspect = format!("{}%{}", self.file, self.name);
+        if self.params.is_empty() {
+            return aspect;
+        }
+        let params: Vec<String> = self.params.iter().map(|(name, value)| format!("{name}=\"{}\"", described_value(value))).collect();
+        format!("{aspect}[{}]", params.join(","))
+    }
+}
+
+/// A parameter's value, as Starlark writes it, as Java prints it, with
+/// quotes and backslashes escaped.
+fn described_value(value: &str) -> String {
+    let text = match value {
+        "True" => "true".to_string(),
+        "False" => "false".to_string(),
+        _ => unquoted(value).unwrap_or_else(|| value.to_string()),
+    };
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// A Starlark string literal's text, as a descriptor's parameter has it.
+pub fn unquoted(literal: &str) -> Option<String> {
+    let inner = literal.strip_prefix('"')?.strip_suffix('"')?;
+    let mut text = String::with_capacity(inner.len());
+    let mut escaped = false;
+    for c in inner.chars() {
+        match c {
+            '\\' if !escaped => escaped = true,
+            _ => {
+                escaped = false;
+                text.push(c);
+            }
+        }
+    }
+    Some(text)
 }
 
 impl fmt::Display for AspectDescriptor {
@@ -557,5 +597,17 @@ mod tests {
         assert!(options.matches("conlyopt", "", &parse_label).is_ok_and(|matched| !matched));
         assert!(!options.matches("compiler", "gcc", &parse_label).unwrap());
         assert!(options.matches("nosuch", "1", &parse_label).is_err());
+    }
+
+    #[test]
+    fn aspects_are_described_as_bazel_describes_them() {
+        let aspect = AspectDescriptor {
+            file: Label::parse_canonical("//pkg:defs.bzl").unwrap(),
+            name: "count".to_string(),
+            params: vec![("flag".to_string(), "True".to_string()), ("mode".to_string(), r#""a \"b\"""#.to_string()), ("n".to_string(), "3".to_string())],
+        };
+        assert_eq!(aspect.description(), r#"//pkg:defs.bzl%count[flag="true",mode="a \"b\"",n="3"]"#);
+        let plain = AspectDescriptor { params: Vec::new(), ..aspect };
+        assert_eq!(plain.description(), "//pkg:defs.bzl%count");
     }
 }

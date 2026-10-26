@@ -6,6 +6,7 @@ use crate::actions::{self, Actions};
 use crate::artifact::{self, Artifact};
 use crate::configured::{ConfiguredTarget, Implementation};
 use crate::exec_groups::ExecGroups;
+use crate::failure::ImplementationFailed;
 use crate::file_value::{FileRoot, FileValue};
 use crate::providers::{self, Defaults};
 use crate::rule_ctx::RuleCtx;
@@ -212,7 +213,7 @@ fn implement<'v>(input: &RuleInput, prepared: &Prepared<'v>, ctx: Value<'v>, eva
                 Some(view) => vec![aspect_target(view, eval.heap())?, ctx],
                 None => vec![ctx],
             };
-            eval.eval_function(implementation, &arguments, &[]).map_err(|error| anyhow::anyhow!("{error}"))
+            eval.eval_function(implementation, &arguments, &[]).map_err(|error| ImplementationFailed::starlark(&error).into())
         }
         Implementation::Native(kind) => crate::native::analyze(*kind, input, prepared, eval),
     }
@@ -421,7 +422,7 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     set("fragments", heap.alloc(crate::fragments::Fragments(options)));
     set("exec_groups", heap.alloc(exec_groups(input)));
     set("split_attr", split_attr_struct(input, prepared, heap));
-    set("aspect_ids", heap.alloc(AllocList(input.config.aspects.iter().map(|aspect| format!("{}%{}", aspect.file, aspect.name)))));
+    set("aspect_ids", heap.alloc(AllocList(input.config.aspects.iter().map(|aspect| aspect.description()))));
     set("build_setting_value", build_setting_value(input, heap));
     if let Some(view) = &input.aspect {
         set("rule", rule_struct(&view.rule, state, prepared, heap)?);

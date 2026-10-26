@@ -141,7 +141,8 @@ pub fn merge<'v>(targets: &[Value<'v>], heap: Heap<'v>) -> anyhow::Result<Value<
                 continue;
             }
             if providers.insert(key.clone(), *value).is_some() {
-                anyhow::bail!("Provider {key} provided twice");
+                let name = key.rsplit('%').next().unwrap_or(key);
+                return Err(crate::failure::ProvidersClash(name.to_string()).into());
             }
         }
     }

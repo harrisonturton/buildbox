@@ -1,6 +1,7 @@
 //! The providers a rule returns, gathered into its `Target`.
 
 use crate::artifact::Artifact;
+use crate::failure::ImplementationFailed;
 use crate::file_value::FileValue;
 use crate::runfiles::{FilesToRun, Runfiles};
 use crate::target_value::{DEFAULT_INFO, TargetValue};
@@ -49,7 +50,7 @@ pub struct Defaults {
 /// Gather what a rule implementation returned into its `Target`: a list
 /// of providers, one provider, or `None`.
 pub fn collect<'v>(label: Label, returned: Value<'v>, defaults: &Defaults, heap: Heap<'v>) -> anyhow::Result<TargetValue<'v>> {
-    let mut providers = returned_providers(label, returned)?;
+    let mut providers = returned_providers(label, returned, Returner::Rule)?;
     let given = providers.get(DEFAULT_INFO).copied();
     let default_info = default_info(label, given, defaults, heap)?;
     providers.insert(DEFAULT_INFO.to_string(), default_info);
@@ -65,24 +66,24 @@ pub fn collect<'v>(label: Label, returned: Value<'v>, defaults: &Defaults, heap:
 pub fn collect_aspect<'v>(label: Label, returned: Value<'v>) -> anyhow::Result<TargetValue<'v>> {
     Ok(TargetValue {
         label,
-        providers: returned_providers(label, returned)?,
+        providers: returned_providers(label, returned, Returner::Aspect)?,
         is_file: false,
     })
 }
 
+/// What returned providers: a rule's implementation, or an aspect's, whose
+/// errors Bazel words differently.
+#[derive(Clone, Copy, PartialEq)]
+enum Returner {
+    Rule,
+    Aspect,
+}
+
 /// The providers an implementation returned, by key.
-fn returned_providers<'v>(label: Label, returned: Value<'v>) -> anyhow::Result<SmallMap<String, Value<'v>>> {
-    let items = if returned.is_none() {
-        Vec::new()
-    } else if ProviderInstance::from_value(returned).is_some() || native_provider_key(returned).is_some() {
-        vec![returned]
-    } else {
-        bazel_starlark::convert::items(returned).ok_or_else(|| {
-            anyhow::anyhow!("{label}: a rule implementation must return a list of providers, not {}", returned.get_type())
-        })?
-    };
+fn returned_providers<'v>(label: Label, returned: Value<'v>, returner: Returner) -> anyhow::Result<SmallMap<String, Value<'v>>> {
+    let items = returned_items(returned, returner)?;
     let mut providers = SmallMap::new();
-    for item in items {
+    for (index, item) in items.into_iter().enumerate() {
         if let Some(opaque) = item.downcast_ref::<Opaque>() {
             anyhow::bail!("{label}: the rule returned '{}', which isn't supported by bb yet", opaque.type_name);
         }
@@ -90,14 +91,45 @@ fn returned_providers<'v>(label: Label, returned: Value<'v>) -> anyhow::Result<S
             Some(instance) => instance.provider_key().unwrap_or_default(),
             None => match native_provider_key(item) {
                 Some(key) => key.to_string(),
-                None => anyhow::bail!("{label}: a rule implementation must return providers, not {}", item.get_type()),
+                None => return Err(not_a_provider(item, index, returner).into()),
             },
         };
         if providers.insert(key.clone(), item).is_some() {
-            anyhow::bail!("{label}: the rule returned more than one {key}");
+            let name = key.rsplit('%').next().unwrap_or(&key);
+            return Err(ImplementationFailed::reported(format!("Multiple conflicting returned providers with key {name}")).into());
         }
     }
     Ok(providers)
+}
+
+/// What an implementation returned, as a list: of the providers in a list
+/// it returned, or of the one provider it returned. A rule may return
+/// `None` for no providers.
+fn returned_items<'v>(returned: Value<'v>, returner: Returner) -> anyhow::Result<Vec<Value<'v>>> {
+    if returned.is_none() && returner == Returner::Rule {
+        return Ok(Vec::new());
+    }
+    if ProviderInstance::from_value(returned).is_some() || native_provider_key(returned).is_some() {
+        return Ok(vec![returned]);
+    }
+    if let Some(items) = bazel_starlark::convert::items(returned) {
+        return Ok(items);
+    }
+    let message = match returner {
+        Returner::Rule => format!("Rule should return a struct or a list, but got {}", returned.get_type()),
+        Returner::Aspect => format!("Aspect implementation should return a list, or a provider instance, but got {}", returned.get_type()),
+    };
+    Err(ImplementationFailed::reported(message).into())
+}
+
+/// The error for an implementation returning a list with `item`, which
+/// isn't a provider, at `index`.
+fn not_a_provider(item: Value<'_>, index: usize, returner: Returner) -> ImplementationFailed {
+    let ty = item.get_type();
+    ImplementationFailed::raised(match returner {
+        Returner::Rule => format!("at index {index} of result of rule implementation function, got element of type {ty}, want Info"),
+        Returner::Aspect => format!("A return value of an aspect implementation function should be a sequence of declared providers, instead got a {ty} at index {index}"),
+    })
 }
 
 /// The provider an instance of a natively implemented provider, such as a

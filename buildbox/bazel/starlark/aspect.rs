@@ -39,6 +39,18 @@ pub struct AspectGen<V: ValueLifetimeless> {
     pub required_providers: Vec<Vec<V>>,
     /// The aspects it requires, which apply before it.
     pub requires: Vec<V>,
+    /// The providers it advertises, which aspects applied after it may
+    /// ask to see.
+    pub provides: Vec<V>,
+    /// The providers an aspect applied before it must advertise for it to
+    /// see that aspect's: any one of these lists, all of whose providers
+    /// it advertises.
+    pub required_aspect_providers: Vec<Vec<V>>,
+    /// Whether, along an attribute naming a generated file, it propagates
+    /// to the rule that generates the file.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    pub apply_to_generating_rules: bool,
     /// The toolchain types its implementation needs.
     pub toolchains: Vec<V>,
     /// The `.bzl` file that called `aspect()`.
@@ -54,11 +66,22 @@ pub struct AspectGen<V: ValueLifetimeless> {
     #[freeze(identity)]
     #[allocative(skip)]
     pub class: OnceLock<Arc<RuleClass>>,
-    /// The keys of `required_providers`' providers, set when it's
+    /// The keys of the providers it needs and advertises, set when it's
     /// exported.
     #[freeze(identity)]
     #[allocative(skip)]
-    pub required: OnceLock<Vec<Vec<String>>>,
+    pub keys: OnceLock<ProviderKeys>,
+}
+
+/// An aspect's providers, by their keys.
+#[derive(Debug, Default)]
+pub struct ProviderKeys {
+    /// `required_providers`.
+    pub required: Vec<Vec<String>>,
+    /// `required_aspect_providers`.
+    pub required_aspect: Vec<Vec<String>>,
+    /// `provides`.
+    pub advertised: Vec<String>,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<AspectGen<To>> for AspectGen<From> {}
@@ -85,9 +108,13 @@ where
         }
         let context = EvalContext::get(eval).map_err(starlark::Error::new_other)?;
         let class = self.schema(variable_name, context).map_err(starlark::Error::new_other)?;
-        let required = self.required_providers.iter().map(|providers| providers.iter().filter_map(|provider| provider_key(provider.to_value())).collect()).collect();
+        let keys = ProviderKeys {
+            required: keys_of(&self.required_providers),
+            required_aspect: keys_of(&self.required_aspect_providers),
+            advertised: self.provides.iter().filter_map(|provider| provider_key(provider.to_value())).collect(),
+        };
         let _ = self.class.set(Arc::new(class));
-        let _ = self.required.set(required);
+        let _ = self.keys.set(keys);
         let _ = self.exported.set(AspectRef {
             file: context.file,
             name: Symbol::intern(variable_name),
@@ -105,10 +132,42 @@ impl<'v, V: ValueLike<'v>> AspectGen<V> {
     /// Whether it applies to targets of a rule that advertises these
     /// providers.
     pub fn applies_to(&self, advertised: &[String]) -> bool {
-        let Some(required) = self.required.get() else {
+        let Some(keys) = self.keys.get() else {
             return true;
         };
-        required.is_empty() || required.iter().any(|providers| providers.iter().all(|provider| advertised.contains(provider)))
+        keys.required.is_empty() || satisfied(&keys.required, advertised)
+    }
+
+    /// Whether, applied after `earlier`, it sees `earlier`'s providers:
+    /// because it requires it, or because `earlier` advertises the
+    /// providers it asks to see.
+    pub fn sees(&self, earlier: &AspectGen<V>) -> bool {
+        let (Some(keys), Some(earlier_keys)) = (self.keys.get(), earlier.keys.get()) else {
+            return false;
+        };
+        let required = earlier.exported.get().is_some_and(|earlier| self.directly_required().any(|aspect| aspect.exported.get() == Some(earlier)));
+        required || satisfied(&keys.required_aspect, &earlier_keys.advertised)
+    }
+
+    /// The aspects it requires, each after those they require in turn, as
+    /// Bazel applies them before it: each once.
+    pub fn required_aspects(&self) -> Vec<AspectRef> {
+        let mut required = Vec::new();
+        self.add_required(&mut required);
+        required
+    }
+
+    fn add_required(&self, required: &mut Vec<AspectRef>) {
+        for aspect in self.directly_required() {
+            aspect.add_required(required);
+            if let Some(exported) = aspect.exported.get().filter(|exported| !required.contains(exported)) {
+                required.push(exported.clone());
+            }
+        }
+    }
+
+    fn directly_required(&self) -> impl Iterator<Item = &'v AspectGen<Value<'v>>> + '_ {
+        self.requires.iter().filter_map(|aspect| Aspect::from_value(aspect.to_value()))
     }
 
     /// Its attributes and toolchains, as the schema of a rule class named
@@ -137,6 +196,17 @@ impl<'v, V: ValueLike<'v>> AspectGen<V> {
     }
 }
 
+/// Whether `advertised` has every provider of any one of the `required`
+/// lists.
+fn satisfied(required: &[Vec<String>], advertised: &[String]) -> bool {
+    required.iter().any(|providers| providers.iter().all(|provider| advertised.contains(provider)))
+}
+
+/// The keys of the providers in lists of them.
+fn keys_of<'v, V: ValueLike<'v>>(lists: &[Vec<V>]) -> Vec<Vec<String>> {
+    lists.iter().map(|providers| providers.iter().filter_map(|provider| provider_key(provider.to_value())).collect()).collect()
+}
+
 /// The aspect an `attr.label(aspects = [...])` entry is, which must be
 /// exported by the time the rule is.
 pub fn aspect_ref(value: Value<'_>) -> anyhow::Result<AspectRef> {
@@ -156,16 +226,17 @@ fn items<'v>(value: Option<Value<'v>>, what: &str) -> anyhow::Result<Vec<Value<'
     crate::convert::items(value).ok_or_else(|| anyhow::anyhow!("aspect(): {what} must be a list, not {}", value.get_type()))
 }
 
-/// `required_providers`: a list of providers, or a list of lists of them.
-fn required_providers<'v>(value: Option<Value<'v>>) -> anyhow::Result<Vec<Vec<Value<'v>>>> {
-    let entries = items(value, "required_providers")?;
+/// `required_providers` or `required_aspect_providers`: a list of
+/// providers, or a list of lists of them.
+fn required_providers<'v>(value: Option<Value<'v>>, what: &str) -> anyhow::Result<Vec<Vec<Value<'v>>>> {
+    let entries = items(value, what)?;
     if entries.iter().all(|entry| crate::convert::items(*entry).is_none()) {
         return Ok(match entries.is_empty() {
             true => Vec::new(),
             false => vec![entries],
         });
     }
-    entries.into_iter().map(|entry| items(Some(entry), "required_providers")).collect()
+    entries.into_iter().map(|entry| items(Some(entry), what)).collect()
 }
 
 /// The aspect's attributes, from `attrs = {name: attr.*()}`.
@@ -189,13 +260,18 @@ fn declared_attrs<'v>(attrs: Option<Value<'v>>) -> anyhow::Result<Vec<(String, V
 #[starlark_module]
 pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
     /// `aspect(implementation, attr_aspects = [], attrs = {},
-    /// required_providers = [], requires = [], toolchains = [], ...)`.
+    /// required_providers = [], required_aspect_providers = [],
+    /// provides = [], requires = [], apply_to_generating_rules = False,
+    /// toolchains = [], ...)`.
     fn aspect<'v>(
         implementation: Value<'v>,
         #[starlark(require = named)] attr_aspects: Option<Value<'v>>,
         #[starlark(require = named)] attrs: Option<Value<'v>>,
         #[starlark(require = named)] required_providers: Option<Value<'v>>,
+        #[starlark(require = named)] required_aspect_providers: Option<Value<'v>>,
+        #[starlark(require = named)] provides: Option<Value<'v>>,
         #[starlark(require = named)] requires: Option<Value<'v>>,
+        #[starlark(require = named, default = false)] apply_to_generating_rules: bool,
         #[starlark(require = named)] toolchains: Option<Value<'v>>,
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -211,13 +287,16 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
             implementation,
             attr_aspects,
             attrs: declared_attrs(attrs)?,
-            required_providers: self::required_providers(required_providers)?,
+            required_providers: self::required_providers(required_providers, "required_providers")?,
             requires: items(requires, "requires")?,
+            provides: items(provides, "provides")?,
+            required_aspect_providers: self::required_providers(required_aspect_providers, "required_aspect_providers")?,
+            apply_to_generating_rules,
             toolchains: items(toolchains, "toolchains")?,
             definition: context.caller_file(eval),
             exported: OnceLock::new(),
             class: OnceLock::new(),
-            required: OnceLock::new(),
+            keys: OnceLock::new(),
         })
     }
 }

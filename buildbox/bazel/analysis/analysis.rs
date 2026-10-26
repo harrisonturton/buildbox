@@ -19,6 +19,7 @@ mod configured;
 mod coverage;
 mod exec_groups;
 mod expand;
+mod failure;
 mod file_value;
 mod fragments;
 mod inputs;
