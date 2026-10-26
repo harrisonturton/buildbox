@@ -60,6 +60,9 @@ pub struct RuleInput {
     /// The configurations transitions give the dependencies through
     /// attributes.
     pub attr_configs: AttrConfigs,
+    /// The configuration of the rule's dependencies: its own, less the
+    /// execution platform a toolchain target is analyzed for.
+    pub deps_config: ConfigId,
     /// The configuration of the rule's tools.
     pub exec_config: ConfigId,
     pub deps: BTreeMap<(Label, ConfigId), Dep>,
@@ -97,7 +100,7 @@ impl RuleInput {
     /// The configurations of the dependencies through an attribute, keyed
     /// as a split transition names them.
     pub fn dep_configs(&self, schema: &AttrSchema) -> Vec<(String, ConfigId)> {
-        crate::transition::dep_configs(schema.cfg, schema.name, self.config.id, self.exec_config, &self.attr_configs)
+        crate::transition::dep_configs(schema.cfg, schema.name, self.deps_config, self.exec_config, &self.attr_configs)
     }
 }
 

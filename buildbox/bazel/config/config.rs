@@ -44,6 +44,9 @@ pub struct BuildConfiguration {
     pub host_platform: Label,
     /// Whether this is an execution configuration, for tools.
     pub is_exec: bool,
+    /// For a toolchain target: the execution platform of the rule it's
+    /// analyzed for, on which its tools run.
+    pub toolchain_exec_platform: Option<Label>,
     /// The name of its output directory under `bazel-out`, such as
     /// `k8-fastbuild` or `k8-opt-exec-ST-d57f47055a04`.
     pub output_directory: String,
@@ -101,13 +104,20 @@ impl BuildConfiguration {
         let host_platform = options.label("host_platform").unwrap_or(*DEFAULT_HOST_PLATFORM);
         let platform = options.labels("platforms").first().copied().unwrap_or(host_platform);
         let is_exec = options.bool("is exec configuration");
-        let mnemonic = match is_exec {
-            true => format!("{cpu}-{compilation_mode}-exec"),
-            false => format!("{cpu}-{compilation_mode}"),
+        let toolchain_exec_platform = options.label(TOOLCHAIN_EXEC_PLATFORM);
+        let named = platform_in_output_directory(&options, platform, is_exec);
+        let descriptor = match named {
+            true => platform_descriptor(&options, platform, &cpu),
+            false => cpu.clone(),
         };
+        let mnemonic = match is_exec {
+            true => format!("{descriptor}-{compilation_mode}-exec"),
+            false => format!("{descriptor}-{compilation_mode}"),
+        };
+        let in_mnemonic = if named { "platforms" } else { "cpu" };
         let output_directory = match options.baseline {
             None => mnemonic,
-            Some(baseline) => transitioned_directory(&mnemonic, &options, &baseline.get().options),
+            Some(baseline) => transitioned_directory(&mnemonic, &options, &baseline.get().options, in_mnemonic),
         };
         BuildConfiguration {
             id,
@@ -117,6 +127,7 @@ impl BuildConfiguration {
             platform,
             host_platform,
             is_exec,
+            toolchain_exec_platform,
             output_directory,
             checksum: digest[..7].to_string(),
         }
@@ -126,6 +137,26 @@ impl BuildConfiguration {
     /// execution root, such as `bazel-out/k8-fastbuild/bin`.
     pub fn bin_dir(&self) -> String {
         format!("bazel-out/{}/bin", self.output_directory)
+    }
+
+    /// The configuration a toolchain target is analyzed in for a rule whose
+    /// tools run on `platform`: this one, with tools of its own on that
+    /// platform too, as Bazel's toolchain transition gives.
+    pub fn for_toolchain(&self, platform: Label) -> ConfigId {
+        let mut options = self.options.clone();
+        options.set(TOOLCHAIN_EXEC_PLATFORM, OptionValue::Label(platform)).expect("a native option");
+        ConfigId::intern(&options)
+    }
+
+    /// The configuration a target's dependencies are built in: this one,
+    /// less the execution platform a toolchain target is analyzed for.
+    pub fn for_dependencies(&self) -> ConfigId {
+        if self.toolchain_exec_platform.is_none() {
+            return self.id;
+        }
+        let mut options = self.options.clone();
+        options.set(TOOLCHAIN_EXEC_PLATFORM, OptionValue::Null).expect("a native option");
+        ConfigId::intern(&options)
     }
 
     /// A configuration for tools that run on `platform`, built optimised:
@@ -146,11 +177,42 @@ impl BuildConfiguration {
     }
 }
 
+/// Whether an output directory's name starts with the target platform's
+/// rather than the CPU's, as `--experimental_platform_in_output_dir` says:
+/// for exec configurations unless it's `no`, and for others if it's `yes`.
+fn platform_in_output_directory(options: &BuildOptions, platform: Label, is_exec: bool) -> bool {
+    let setting = options.string("experimental_platform_in_output_dir");
+    if is_exec {
+        return setting != "no";
+    }
+    let limit = options.labels("incompatible_limit_platforms_in_output_dir_to");
+    setting == "yes" && (limit.is_empty() || limit.contains(&platform))
+}
+
+/// The platform as an output directory's name gives it: by its name, as
+/// Bazel's legacy heuristic does, unless that's one of the default
+/// platforms' names, for which the CPU stands.
+fn platform_descriptor(options: &BuildOptions, platform: Label, cpu: &str) -> String {
+    if options.labels("platforms").len() > 1 {
+        return "multi-platform".to_string();
+    }
+    let name = platform.name.as_str();
+    match DEFAULT_PLATFORM_NAMES.contains(&name) {
+        true => cpu.to_string(),
+        false => name.to_string(),
+    }
+}
+
+/// The names of Bazel's default platforms, which output directories don't
+/// name.
+const DEFAULT_PLATFORM_NAMES: [&str; 5] = ["host", "host_platform", "target_platform", "default_host", "default_target"];
+
 /// The output directory of options a transition made: `mnemonic`, then,
 /// if they differ from the baseline's in more than the mnemonic says, a
-/// hash of how, as Bazel names it.
-fn transitioned_directory(mnemonic: &str, options: &BuildOptions, baseline: &BuildOptions) -> String {
-    let changed = changed_settings(options, baseline);
+/// hash of how, as Bazel names it. `in_mnemonic` is the option the mnemonic
+/// names beside the compilation mode: `cpu` or `platforms`.
+fn transitioned_directory(mnemonic: &str, options: &BuildOptions, baseline: &BuildOptions, in_mnemonic: &str) -> String {
+    let changed = changed_settings(options, baseline, in_mnemonic);
     if changed.is_empty() {
         return mnemonic.to_string();
     }
@@ -165,12 +227,12 @@ fn transitioned_directory(mnemonic: &str, options: &BuildOptions, baseline: &Bui
 }
 
 /// The settings that differ from the baseline's, each as `name=value`, or
-/// `name@null` for none, sorted by name. The options the mnemonic names
-/// are left out.
-fn changed_settings(options: &BuildOptions, baseline: &BuildOptions) -> Vec<String> {
+/// `name@null` for none, sorted by name. The options the mnemonic names,
+/// the compilation mode and `in_mnemonic`, are left out.
+fn changed_settings(options: &BuildOptions, baseline: &BuildOptions, in_mnemonic: &str) -> Vec<String> {
     let mut changed = std::collections::BTreeMap::new();
     for option in NATIVE_OPTIONS {
-        if matches!(option.name, "cpu" | "compilation_mode") {
+        if option.name == in_mnemonic || matches!(option.name, "compilation_mode" | TOOLCHAIN_EXEC_PLATFORM) {
             continue;
         }
         let (Ok(value), Ok(base)) = (options.get(option.name), baseline.get(option.name)) else {
@@ -210,6 +272,10 @@ fn varint(mut n: usize) -> Vec<u8> {
         bytes.push(low | 0x80);
     }
 }
+
+/// bb's own option for the execution platform a toolchain target is
+/// analyzed for.
+const TOOLCHAIN_EXEC_PLATFORM: &str = "toolchain execution platform";
 
 /// The platform tools run on when `--host_platform` doesn't say.
 static DEFAULT_HOST_PLATFORM: LazyLock<Label> = LazyLock::new(|| Label::parse_canonical("@@platforms//host:host").expect("a canonical label"));

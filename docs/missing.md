@@ -13,23 +13,21 @@ roughly in order of how many real repositories each gap blocks.
   It has those `config_setting`s match in the rule sets bb has met, and
   every one Bazel's exec transition reads or writes; a `config_setting` or
   transition on any other fails rather than misbehaving. Most of them only
-  carry their values: `--extra_execution_platforms` and `--extra_toolchains`,
-  for example, don't yet take part in toolchain resolution.
+  carry their values, which transitions and `config_setting`s read.
 - **Transitions are partly there.** Starlark transitions work on
   attributes and on rules (`rule(cfg = ...)`), including splits and
   `ctx.split_attr` (`buildbox/bazel/analysis/transition.rs`), and their
   output directories are named as Bazel names them, against the top-level
   configuration. Still missing:
-  - Errors in transitions are reported at the target, not at the
-    transition, and without Bazel's second "on dependency edge" error.
   - `analysis_test_transition`, and Bazel's own transitions that bb only
     stands in for, such as Apple's splits.
 - **The exec configuration** comes from Bazel's own Starlark exec
   transition, run for the execution platform toolchain resolution chooses
-  for each rule, and its output directories are named as Bazel names them.
-  Toolchains are analyzed in the rule's configuration rather than through
-  Bazel's toolchain transition, so their own tools use their own execution
-  platform rather than the rule's.
+  for each rule, from the platforms `--extra_execution_platforms` and
+  modules register, with the toolchains `--extra_toolchains` and modules
+  register. Toolchains' own tools are for the execution platform of the
+  rule that uses them, as Bazel's toolchain transition gives, and output
+  directories are named as Bazel names them.
 
 rules_go, rules_rust, rules_oci, rules_python, platform-specific binary
 wrappers and multi-arch images all rely on transitions, and most of them on
@@ -125,7 +123,15 @@ CI integrations and remote build services depend on these.
 - **Stamping:** `--workspace_status_command` isn't run, so the workspace
   status files hold fixed values.
 
-## 10. Visibility
+## 10. Checking dependencies
+
+Analysis doesn't check that dependencies are what their attributes allow:
+`allow_files`, `providers`, `allow_rules` and `executable` aren't enforced.
+A rule that depends on a file its attribute doesn't allow, or on one that
+doesn't exist, as `attr.label()` with `":missing"` does, analyzes in bb
+where Bazel fails.
+
+## 11. Visibility
 
 Analysis doesn't check target visibility, so a build can succeed in bb that
 Bazel rejects.

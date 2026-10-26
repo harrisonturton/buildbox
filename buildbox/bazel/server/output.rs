@@ -18,6 +18,9 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(200);
 /// redrawn in place.
 const PRINT_INTERVAL: Duration = Duration::from_secs(1);
 
+/// What separates the errors a message holds.
+const MORE_ERRORS: &str = "\nERROR: ";
+
 /// Where a command writes its output: the client's stdout and stderr.
 #[derive(Clone)]
 pub struct Output {
@@ -123,12 +126,17 @@ impl Output {
     }
 
     /// Report an error, as Bazel does: `ERROR: message`, unless it's the
-    /// error of a failure already reported as it happened.
+    /// error of a failure already reported as it happened. A message may
+    /// hold several errors, each after `\nERROR: `, which are reported as
+    /// Bazel reports them, each with its own `ERROR:`.
     pub async fn error(&self, message: &str) {
         let mut ui = self.ui.lock().await;
         ui.show_events().await;
-        if !ui.reported.contains(message) {
-            ui.write_message(Kind::Error, message).await;
+        if ui.reported.contains(message) {
+            return;
+        }
+        for error in message.split(MORE_ERRORS) {
+            ui.write_message(Kind::Error, error).await;
         }
     }
 

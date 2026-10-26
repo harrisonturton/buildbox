@@ -1,7 +1,7 @@
 //! Accumulates the targets a BUILD file defines.
 
 use bazel_label::{Label, PackageId};
-use bazel_packages::{Package, PackageArgs, PackageError, PackageGroup, Rule, RuleClassRef, SourceFile, Target};
+use bazel_packages::{Package, PackageArgs, PackageError, PackageGroup, Rule, RuleClass, RuleClassRef, SourceFile, Target};
 use intern::Symbol;
 use std::collections::{BTreeMap, HashMap};
 
@@ -17,6 +17,9 @@ pub struct PackageBuilder {
     rule_classes: Vec<RuleClassRef>,
     rule_class_index: HashMap<RuleClassRef, u32>,
     targets: BTreeMap<Symbol, Target>,
+    /// The labels rules' dependency attributes have, which name files of
+    /// the package if it doesn't declare them otherwise.
+    dependencies: Vec<Label>,
 }
 
 impl PackageBuilder {
@@ -31,6 +34,7 @@ impl PackageBuilder {
             rule_classes: Vec::new(),
             rule_class_index: HashMap::new(),
             targets: BTreeMap::new(),
+            dependencies: Vec::new(),
         }
     }
 
@@ -46,8 +50,9 @@ impl PackageBuilder {
         &self.rule_classes[rule.class as usize]
     }
 
-    /// Add a rule of the given class, and the output files it declares.
-    pub fn add_rule(&mut self, class: RuleClassRef, mut rule: Rule) -> anyhow::Result<()> {
+    /// Add a rule of the given class, whose schema is `schema`, and the
+    /// output files it declares.
+    pub fn add_rule(&mut self, class: RuleClassRef, schema: &RuleClass, mut rule: Rule) -> anyhow::Result<()> {
         self.check_name_free(rule.name, "rule")?;
         for output in &rule.outputs {
             if *output == rule.name {
@@ -56,6 +61,11 @@ impl PackageBuilder {
             self.check_name_free(*output, "output file")?;
         }
         rule.class = self.intern_class(class);
+        for (attr, value) in &rule.attrs {
+            if schema.attr(*attr).is_some_and(|attr| attr.is_dependency) {
+                value.labels(&mut self.dependencies);
+            }
+        }
         for output in &rule.outputs {
             self.targets.insert(*output, Target::OutputFile { name: *output, rule: rule.name });
         }
@@ -87,20 +97,9 @@ impl PackageBuilder {
     }
 
     /// Finish the package: add a source file target for each file in the
-    /// package that a rule refers to, and the BUILD file itself.
+    /// package that a rule depends on, and the BUILD file itself.
     pub fn finish(mut self) -> Package {
-        let mut referenced = Vec::new();
-        for target in self.targets.values() {
-            let Target::Rule(rule) = target else {
-                continue;
-            };
-            for (attr, value) in &rule.attrs {
-                if attr.as_str() == "visibility" {
-                    continue;
-                }
-                value.labels(&mut referenced);
-            }
-        }
+        let mut referenced = std::mem::take(&mut self.dependencies);
         referenced.push(self.id.label(self.build_file_name));
         for label in referenced {
             if label.package != self.id || self.targets.contains_key(&label.name) {

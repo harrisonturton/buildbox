@@ -36,7 +36,7 @@ pub fn instantiate<'v>(
 
     let name = rule_name(schema, kwargs)?;
     let (rule, mut errors) = rule(schema, kwargs, computed, &parser, name, location, generator);
-    if let Err(error) = builder.add_rule(class, rule) {
+    if let Err(error) = builder.add_rule(class, schema, rule) {
         errors.push(error);
     }
     for error in errors {

@@ -262,7 +262,7 @@ async fn analyze_and_build(
     let (analyzed, failed) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
     let incompatible = report_explicitly_incompatible(&analyzed, &explicit, &main_mapping, out).await;
     if let Some(first) = failed.first().filter(|_| !keep_going) {
-        out.error(&format!("Analysis of target '{first}' failed; build aborted: Analysis failed")).await;
+        out.error(&build_aborted(first)).await;
         return Err(exit::BUILD_FAILURE);
     }
     if !failed.is_empty() {
@@ -745,7 +745,7 @@ async fn analyze(
     mapping: &RepoMappingTable,
     analyzed: Option<UnboundedSender<Arc<ConfiguredTarget>>>,
     out: &Output,
-) -> (Vec<(Label, Arc<ConfiguredTarget>)>, Vec<String>) {
+) -> (Vec<(Label, Arc<ConfiguredTarget>)>, Vec<Failed>) {
     let mut analyses: Vec<BoxFuture<'_, _>> = Vec::with_capacity(labels.len());
     for label in labels {
         analyses.push(Box::pin(analyze_one(session, ConfiguredTargetKey { label: *label, config }, analyzed.clone())));
@@ -759,7 +759,10 @@ async fn analyze(
         match result {
             Ok(target) => analyzed.push((*label, target)),
             Err(error) => {
-                failed.push(bazel_query::display_label(*label, mapping));
+                failed.push(Failed {
+                    target: bazel_query::display_label(*label, mapping),
+                    in_dependency: error.origin().is_some_and(|origin| origin != label.to_string()),
+                });
                 if reported.insert(error.message().to_string()) {
                     out.error(error.message()).await;
                 }
@@ -767,6 +770,23 @@ async fn analyze(
         }
     }
     (analyzed, failed)
+}
+
+/// A top-level target whose analysis failed, as messages show it, and
+/// whether a dependency's analysis is what failed.
+struct Failed {
+    target: String,
+    in_dependency: bool,
+}
+
+/// The error that ends a build when a top-level target's analysis fails,
+/// as Bazel words it: with why only if a dependency failed.
+fn build_aborted(failed: &Failed) -> String {
+    let aborted = format!("Analysis of target '{}' failed; build aborted", failed.target);
+    match failed.in_dependency {
+        true => format!("{aborted}: Analysis failed"),
+        false => aborted,
+    }
 }
 
 async fn analyze_one(

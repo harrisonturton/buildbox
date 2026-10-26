@@ -140,6 +140,9 @@ const STRICT_DEPS_MODES: &[&str] = &["off", "warn", "error", "strict", "default"
 /// The native options bb knows, sorted by name, with Bazel 9.3.1's types
 /// and defaults: those `config_setting`s match in the rule sets bb has met,
 /// those bb reads, and every one Bazel's exec transition reads or writes.
+/// One is bb's own: `toolchain execution platform`, the execution platform
+/// of the rule a toolchain target is analyzed for, which Bazel keeps in the
+/// target's key instead.
 pub static NATIVE_OPTIONS: &[NativeOption] = {
     use OptionDefault::*;
     use OptionType::*;
@@ -359,6 +362,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         choice("strip", "sometimes", "strip mode", &["always", "sometimes", "never"]),
         option("tool_java_language_version", String, Text("")),
         option("tool_java_runtime_version", String, Text("remotejdk_11")),
+        option("toolchain execution platform", Label, Null),
         option("toolchain_resolution_debug", String, Text("-.*")),
         option("tvos_sdk_version", String, Null),
         option("use_ijars", Bool, Text("true")),

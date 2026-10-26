@@ -11,7 +11,7 @@ use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName};
 use crate::configured::ConfiguredTargetKey;
 use crate::settings::BuildSetting;
 use bazel_loading::{BzlLoadKey, PackageKey, RepoMappingKey};
-use bazel_packages::{AttrValue, Cfg, RuleClassRef, Target};
+use bazel_packages::{AttrValue, Cfg, RuleClassRef, SourcePosition, Target};
 use bazel_starlark::attr_module::Attribute;
 use bazel_starlark::label_value::LabelValue;
 use bazel_starlark::rule_value::StarlarkRule;
@@ -49,16 +49,87 @@ pub fn dep_configs(cfg: Cfg, attr: Symbol, config: ConfigId, exec_config: Config
 
 /// The configurations the transitions of a Starlark rule's attributes give
 /// the rule's dependencies, which `attrs` are the rule's values for.
-pub async fn attr_configs(ctx: &Ctx, rule: &OwnedFrozenValue, attrs: &[(Symbol, AttrValue)], config: ConfigId) -> Result<AttrConfigs, SkyError> {
+pub async fn attr_configs(ctx: &Ctx, label: Label, rule: &OwnedFrozenValue, attrs: &[(Symbol, AttrValue)], config: ConfigId) -> Result<AttrConfigs, SkyError> {
     let transitions = attr_transitions(rule);
     if transitions.is_empty() {
         return Ok(Vec::new());
     }
-    transition_configs(ctx, &transitions, attrs, config).await
+    match transition_configs(ctx, &transitions, attrs, config).await {
+        Ok(configs) => Ok(configs),
+        Err(Failure::Graph(error)) => Err(error),
+        Err(Failure::Transition { attr, error }) => Err(edge_error(ctx, label, config, attr, attrs, error).await),
+    }
+}
+
+/// Why the configurations of transitions couldn't be had: a transition
+/// failed, through an attribute, or something it needs did.
+enum Failure {
+    Transition { attr: Symbol, error: String },
+    Graph(SkyError),
+}
+
+impl From<SkyError> for Failure {
+    fn from(error: SkyError) -> Failure {
+        Failure::Graph(error)
+    }
+}
+
+/// A transition's error through an attribute, as Bazel reports it: the
+/// error, then that the edge to the attribute's first dependency failed.
+async fn edge_error(ctx: &Ctx, label: Label, config: ConfigId, attr: Symbol, attrs: &[(Symbol, AttrValue)], error: String) -> SkyError {
+    let mut deps = Vec::new();
+    if let Some((_, value)) = attrs.iter().find(|(name, _)| *name == attr) {
+        value.labels(&mut deps);
+    }
+    let dep = deps.first().map(Label::to_string).unwrap_or_default();
+    let edge = format!("on dependency edge {label} ({}) -|{attr}|-> {dep}: Errors encountered while applying Starlark transition", config.get().checksum);
+    let edge = match bazel_loading::target_location(ctx, label).await {
+        Some(location) => format!("{location}: {edge}"),
+        None => edge,
+    };
+    SkyError::new(crate::configured::errors(&[&error, &edge])).with_origin(label.to_string())
+}
+
+/// A transition's error at where Bazel reports it: the implementation's
+/// `def`, or the `transition()` call.
+async fn located_error(ctx: &Ctx, transition: &OwnedFrozenValue, error: &TransitionError) -> String {
+    let Some((location, implementation)) = Transition::from_value(transition.value()).map(|transition| (transition.location.clone(), transition.implementation.to_repr())) else {
+        return error.message.clone();
+    };
+    let position = match error.at {
+        ErrorAt::Call => location,
+        ErrorAt::Implementation => def_position(ctx, &implementation).await,
+    };
+    let Some(position) = position else {
+        return error.message.clone();
+    };
+    let path = match Label::parse_canonical(&position.file) {
+        Ok(file) => bazel_loading::source_path(ctx, file).await,
+        Err(_) => None,
+    };
+    let file = path.map(|path| path.display().to_string()).unwrap_or(position.file);
+    format!("{file}:{}:{}: {}", position.line, position.column, error.message)
+}
+
+/// Where a function was defined: at its name in its `def`, found in its
+/// file by how it prints, `<function NAME from FILE>`.
+async fn def_position(ctx: &Ctx, printed: &str) -> Option<SourcePosition> {
+    let (name, file) = printed.strip_prefix("<function ")?.strip_suffix('>')?.split_once(" from ")?;
+    let label = Label::parse_canonical(file).ok()?;
+    let source = bazel_loading::read_source(ctx, label).await?;
+    let def = format!("def {name}(");
+    source.lines().enumerate().find_map(|(index, line)| {
+        let column = line.find(&def)?;
+        Some(SourcePosition {
+            file: file.to_string(),
+            line: index as u32 + 1,
+            column: (column + "def ".len()) as u32 + 1,
+        })
+    })
 }
 
 /// The configurations transitions give, each named by what it's for.
-async fn transition_configs(ctx: &Ctx, transitions: &[(Symbol, OwnedFrozenValue)], attrs: &[(Symbol, AttrValue)], config: ConfigId) -> Result<AttrConfigs, SkyError> {
+async fn transition_configs(ctx: &Ctx, transitions: &[(Symbol, OwnedFrozenValue)], attrs: &[(Symbol, AttrValue)], config: ConfigId) -> Result<AttrConfigs, Failure> {
     let (settings, mappings) = transitions_context(ctx, transitions).await?;
     let options = config.get().options.clone();
     let mut configs = Vec::with_capacity(transitions.len());
@@ -70,8 +141,13 @@ async fn transition_configs(ctx: &Ctx, transitions: &[(Symbol, OwnedFrozenValue)
             settings: &settings,
             mappings: &mappings,
         };
-        let applied = Module::with_temp_heap(|module| apply_owned(transition, &input, attrs, &module));
-        let applied = applied.map_err(|error| SkyError::new(format!("in {attr} attribute: {error}")))?;
+        let applied = match Module::with_temp_heap(|module| apply_owned(transition, &input, attrs, &module)) {
+            Ok(applied) => applied,
+            Err(error) => {
+                let error = located_error(ctx, transition, &error).await;
+                return Err(Failure::Transition { attr: *attr, error });
+            }
+        };
         let applied = applied.into_iter().map(|(key, options)| (key, ConfigId::intern(&options))).collect();
         configs.push((*attr, applied));
     }
@@ -202,13 +278,27 @@ impl Key for RuleTransitionKey {
         let class = bazel_loading::rule_class(ctx, class_ref).await?;
         let attrs = crate::attrs::resolve_attrs(ctx, rule, &class, self.config).await?;
         let transitions = [(Symbol::intern("cfg"), transition)];
-        let configs = transition_configs(ctx, &transitions, &attrs, self.config).await;
-        let configs = configs.map_err(|error| SkyError::new(format!("in {} rule {}: {}", class_ref.kind, self.label, error.message())))?;
+        let configs = match transition_configs(ctx, &transitions, &attrs, self.config).await {
+            Ok(configs) => configs,
+            Err(Failure::Graph(error)) => return Err(error),
+            Err(Failure::Transition { error, .. }) => return Err(rule_transition_error(ctx, self.label, error).await),
+        };
         match configs.first().map(|(_, configs)| configs.as_slice()) {
             Some([(_, config)]) => Ok(TransitionedConfig(*config)),
             _ => Err(SkyError::new(format!("in {} rule {}: a rule's transition can't split its targets", class_ref.kind, self.label))),
         }
     }
+}
+
+/// A rule's own transition's error, as Bazel reports it: the error, then
+/// that applying it to the target failed.
+async fn rule_transition_error(ctx: &Ctx, label: Label, error: String) -> SkyError {
+    let failed = "Errors encountered while applying Starlark transition";
+    let failed = match bazel_loading::target_location(ctx, label).await {
+        Some(location) => format!("{location}: {failed}"),
+        None => failed.to_string(),
+    };
+    SkyError::new(crate::configured::errors(&[&error, &failed])).with_origin(label.to_string())
 }
 
 /// The transition `rule(cfg = ...)` gives a Starlark rule, if any.
@@ -295,12 +385,12 @@ struct OwnedInput<'a> {
 
 /// Apply a transition kept in a `.bzl` file's heap, with the rule's
 /// attributes as `attr`.
-fn apply_owned(transition: &OwnedFrozenValue, input: &OwnedInput<'_>, attrs: &[(Symbol, AttrValue)], module: &Module) -> anyhow::Result<Vec<(String, BuildOptions)>> {
+fn apply_owned(transition: &OwnedFrozenValue, input: &OwnedInput<'_>, attrs: &[(Symbol, AttrValue)], module: &Module) -> Result<Vec<(String, BuildOptions)>, TransitionError> {
     let heap = module.heap();
     let value = heap.access_owned_frozen_value(transition);
-    let transition = Transition::from_value(value).ok_or_else(|| anyhow::anyhow!("not a transition"))?;
+    let transition = Transition::from_value(value).ok_or_else(|| TransitionError::call("not a transition"))?;
     let definition = transition.definition;
-    let mapping = input.mappings.get(&definition.repo()).ok_or_else(|| anyhow::anyhow!("no repository mapping for {definition}"))?;
+    let mapping = input.mappings.get(&definition.repo()).ok_or_else(|| TransitionError::call(format!("no repository mapping for {definition}")))?;
     let attr = attr_struct(attrs, heap);
     let mut context = EvalContext::new(FileKind::Bzl, definition);
     context.mappings = input.mappings.clone();
@@ -342,6 +432,45 @@ pub struct TransitionInput<'a> {
     pub mapping: &'a RepoMappingTable,
 }
 
+/// Why a transition failed, and where Bazel reports it.
+#[derive(Debug)]
+pub struct TransitionError {
+    pub message: String,
+    pub at: ErrorAt,
+}
+
+/// Where Bazel reports a transition's error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorAt {
+    /// At the implementation function's `def`: the implementation failed,
+    /// or returned something that isn't settings.
+    Implementation,
+    /// At the `transition()` call: the settings it read or wrote can't be.
+    Call,
+}
+
+impl TransitionError {
+    fn implementation(error: impl std::fmt::Display) -> TransitionError {
+        TransitionError {
+            message: error.to_string(),
+            at: ErrorAt::Implementation,
+        }
+    }
+
+    fn call(error: impl std::fmt::Display) -> TransitionError {
+        TransitionError {
+            message: error.to_string(),
+            at: ErrorAt::Call,
+        }
+    }
+}
+
+impl std::fmt::Display for TransitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// The options a transition gives, keyed as a split names its
 /// configurations: `""` for a transition to one.
 pub fn apply<'v>(
@@ -349,12 +478,12 @@ pub fn apply<'v>(
     input: &TransitionInput<'_>,
     attr: Value<'v>,
     eval: &mut Evaluator<'v, '_, '_>,
-) -> anyhow::Result<Vec<(String, BuildOptions)>> {
-    let settings = settings_dict(transition, input, eval.heap())?;
+) -> Result<Vec<(String, BuildOptions)>, TransitionError> {
+    let settings = settings_dict(transition, input, eval.heap()).map_err(TransitionError::call)?;
     let returned = eval
         .eval_function(transition.implementation.to_value(), &[settings, attr], &[])
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let invalid = |error: anyhow::Error| anyhow::anyhow!("invalid result from transition function: {error}");
+        .map_err(TransitionError::implementation)?;
+    let invalid = |error: anyhow::Error| TransitionError::implementation(format!("invalid result from transition function: {error}"));
     let mut results = Vec::new();
     for (key, values) in returned_dicts(returned).map_err(invalid)? {
         let options = transitioned(transition, input, values)?;
@@ -438,11 +567,11 @@ fn dict(value: Value<'_>) -> anyhow::Result<DictRef<'_>> {
 /// The options with one returned dict's settings written. A transition
 /// that changes nothing leaves the options as they were, so its targets
 /// are the same as those without it.
-fn transitioned(transition: &Transition<'_>, input: &TransitionInput<'_>, values: DictRef<'_>) -> anyhow::Result<BuildOptions> {
+fn transitioned(transition: &Transition<'_>, input: &TransitionInput<'_>, values: DictRef<'_>) -> Result<BuildOptions, TransitionError> {
     if values.len() == 0 {
         return Ok(input.start.clone());
     }
-    let values = declared_outputs(transition, values).map_err(|error| anyhow::anyhow!("invalid result from transition function: {error}"))?;
+    let values = declared_outputs(transition, values).map_err(|error| TransitionError::implementation(format!("invalid result from transition function: {error}")))?;
     let package = transition.definition.package;
     let parse_label = |text: &str| {
         let context = LabelContext::new(package, input.mapping);
@@ -450,10 +579,11 @@ fn transitioned(transition: &Transition<'_>, input: &TransitionInput<'_>, values
     };
     let mut options = input.start.clone();
     for (setting, value) in values {
-        match setting {
-            Setting::Native(name) => set_native(&mut options, name, value, &parse_label)?,
-            Setting::Starlark(label) => set_flag(&mut options, build_setting(input, *label)?, value, &parse_label)?,
-        }
+        let set = match setting {
+            Setting::Native(name) => set_native(&mut options, name, value, &parse_label),
+            Setting::Starlark(label) => build_setting(input, *label).and_then(|setting| set_flag(&mut options, setting, value, &parse_label)),
+        };
+        set.map_err(TransitionError::call)?;
     }
     if options == *input.start {
         return Ok(options);
@@ -633,6 +763,7 @@ mod tests {
                 outputs: outputs.iter().map(|given| setting(given)).collect(),
                 definition,
                 exec: false,
+                location: None,
             };
             let input = TransitionInput {
                 config,
@@ -642,7 +773,7 @@ mod tests {
                 mapping: &mapping,
             };
             let attr = module.heap().alloc(AllocStruct(Vec::<(&str, Value)>::new()));
-            apply(&transition, &input, attr, &mut eval)
+            apply(&transition, &input, attr, &mut eval).map_err(|error| anyhow::anyhow!("{error}"))
         })
     }
 

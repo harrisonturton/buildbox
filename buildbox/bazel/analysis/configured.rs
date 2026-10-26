@@ -140,7 +140,10 @@ async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarg
         return Err(SkyError::new(no_such_target(ctx, key.label, &package.0).await));
     };
     match target {
-        Target::Rule(rule) => analyze_rule(ctx, key, &package.0, rule).await,
+        Target::Rule(rule) => match analyze_rule(ctx, key, &package.0, rule).await {
+            Err(error) if error.origin().is_none() => Err(analysis_failed(ctx, key, error).await),
+            analyzed => analyzed,
+        },
         Target::SourceFile(_) => file(ctx, key, "source file", Artifact::source(key.label)),
         Target::OutputFile { rule, .. } => {
             let owner = ConfiguredTargetKey {
@@ -153,6 +156,34 @@ async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarg
         }
         Target::PackageGroup(group) => package_group(ctx, key, group).await,
     }
+}
+
+/// A rule's error as Bazel reports it: then that the target's analysis
+/// failed, at the rule, with the target as the error's origin.
+async fn analysis_failed(ctx: &Ctx, key: ConfiguredTargetKey, error: SkyError) -> SkyError {
+    let failed = format!("Analysis of target '{}' (config: {}) failed", key.label, key.config.get().checksum);
+    let failed = match bazel_loading::target_location(ctx, key.label).await {
+        Some(location) => format!("{location}: {failed}"),
+        None => failed,
+    };
+    SkyError::with_kind(error.kind(), errors(&[error.message(), &failed])).with_origin(key.label.to_string())
+}
+
+/// A toolchain resolution's error, as Bazel reports it: at the rule, for
+/// the target in its configuration, with the target as the origin.
+async fn toolchain_error(ctx: &Ctx, key: ConfiguredTargetKey, error: SkyError) -> SkyError {
+    let message = format!("While resolving toolchains for target {} ({}): {}", key.label, key.config.get().checksum, error.message());
+    let message = match bazel_loading::target_location(ctx, key.label).await {
+        Some(location) => format!("{location}: {message}"),
+        None => message,
+    };
+    SkyError::with_kind(error.kind(), message).with_origin(key.label.to_string())
+}
+
+/// Several errors as one error's message, which the server reports as
+/// Bazel does, each with its own `ERROR:`.
+pub(crate) fn errors(errors: &[&str]) -> String {
+    errors.join("\nERROR: ")
 }
 
 /// The error for a target its package doesn't declare, naming the
@@ -204,26 +235,26 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         Ok(implementation) => implementation,
         Err(message) => return Err(located(ctx, label, message).await),
     };
-    let attr_configs = match &implementation {
-        Implementation::Starlark { rule, .. } => crate::transition::attr_configs(ctx, rule, &attrs, key.config).await,
-        Implementation::Builtin { .. } | Implementation::Native(_) => Ok(Vec::new()),
-    };
-    let attr_configs = match attr_configs {
-        Ok(attr_configs) => attr_configs,
-        Err(error) => return Err(located(ctx, label, format!("{}, of {} rule {label}", error.message(), class_ref.kind)).await),
-    };
     let config = key.config.get();
-    let toolchains = toolchains::resolve(ctx, &class, &config, &attr_labels(&attrs, "exec_compatible_with")).await;
-    let exec_platform = toolchains.as_ref().ok().and_then(|toolchains| toolchains.exec_platform).unwrap_or(config.host_platform);
-    let exec_config = exec_config(ctx, &class, key.config, exec_platform).await?;
+    let deps_config = config.for_dependencies();
+    let attr_configs = match &implementation {
+        Implementation::Starlark { rule, .. } => crate::transition::attr_configs(ctx, label, rule, &attrs, deps_config).await?,
+        Implementation::Builtin { .. } | Implementation::Native(_) => Vec::new(),
+    };
+    let toolchains = match toolchains::resolve(ctx, label, &class, &config, &attr_labels(&attrs, "exec_compatible_with")).await {
+        Ok(toolchains) => toolchains,
+        Err(error) if error.origin().is_some() => return Err(error),
+        Err(error) => return Err(toolchain_error(ctx, key, error).await),
+    };
+    let exec_platform = toolchains.exec_platform.unwrap_or(config.host_platform);
+    let exec_config = exec_config(ctx, &class, deps_config, exec_platform).await?;
     let deps = match is_stub(&implementation) {
         true => BTreeMap::new(),
-        false => analyze_deps(ctx, label, &class, &attrs, key.config, exec_config, &attr_configs).await?,
+        false => analyze_deps(ctx, label, &class, &attrs, deps_config, exec_config, &attr_configs).await?,
     };
     if let Some(reason) = incompatible_dep(key, &deps) {
         return incompatible(ctx, key, class_ref.kind, class.test, reason);
     }
-    let toolchains = toolchains?;
     let platform = ctx.compute(&PlatformKey(config.platform)).await?;
     let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
     let mappings = match &implementation {
@@ -238,6 +269,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         class: class.clone(),
         attrs,
         attr_configs,
+        deps_config,
         exec_config,
         deps,
         build_file: package.build_file,

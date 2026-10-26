@@ -166,7 +166,7 @@ fn native_classes() -> Vec<RuleClass> {
             "toolchain",
             vec![
                 a("toolchain_type", Label).mandatory().nonconfigurable(),
-                a("toolchain", Label).mandatory(),
+                a("toolchain", Label).mandatory().not_dependency(),
                 a("target_settings", LabelList).nonconfigurable(),
                 a("use_target_platform_constraints", Bool).nonconfigurable(),
             ],

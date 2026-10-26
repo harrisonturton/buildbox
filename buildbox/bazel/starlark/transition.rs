@@ -5,6 +5,7 @@ use crate::context::EvalContext;
 use crate::convert::LabelParser;
 use allocative::Allocative;
 use bazel_label::Label;
+use bazel_packages::SourcePosition;
 use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
@@ -50,6 +51,11 @@ pub struct TransitionGen<V: ValueLifetimeless> {
     #[freeze(identity)]
     #[allocative(skip)]
     pub exec: bool,
+    /// Where `transition()` was called, which errors in what it writes are
+    /// reported at.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    pub location: Option<SourcePosition>,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<TransitionGen<To>> for TransitionGen<From> {}
@@ -111,6 +117,7 @@ fn new_transition<'v>(implementation: Value<'v>, inputs: Value<'v>, outputs: Val
         outputs: settings(outputs, "outputs", &parser)?,
         definition,
         exec,
+        location: eval.call_stack_top_location().map(|span| crate::reported::call_position(&span)),
     })
 }
 

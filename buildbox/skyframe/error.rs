@@ -18,6 +18,9 @@ pub struct SkyError(Arc<ErrorInner>);
 struct ErrorInner {
     kind: ErrorKind,
     message: String,
+    /// What failed first, as the layer that made the error names it, kept
+    /// as the error passes to the keys that depend on it.
+    origin: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +52,22 @@ impl SkyError {
         SkyError(Arc::new(ErrorInner {
             kind,
             message: message.into(),
+            origin: None,
         }))
+    }
+
+    /// The same error, saying what failed first.
+    pub fn with_origin(&self, origin: impl Into<String>) -> SkyError {
+        SkyError(Arc::new(ErrorInner {
+            kind: self.kind(),
+            message: self.message().to_string(),
+            origin: Some(origin.into()),
+        }))
+    }
+
+    /// What failed first, if the error says.
+    pub fn origin(&self) -> Option<&str> {
+        self.0.origin.as_deref()
     }
 
     pub fn kind(&self) -> ErrorKind {
@@ -62,7 +80,11 @@ impl SkyError {
 
     /// The same error, with `context` saying what was being attempted.
     pub fn context(&self, context: impl fmt::Display) -> SkyError {
-        SkyError::with_kind(self.kind(), format!("{context}: {}", self.message()))
+        SkyError(Arc::new(ErrorInner {
+            kind: self.kind(),
+            message: format!("{context}: {}", self.message()),
+            origin: self.0.origin.clone(),
+        }))
     }
 
     /// Whether the error may be kept as the key's result.
@@ -94,6 +116,7 @@ impl Encode for SkyError {
         };
         e.u8(kind);
         e.str(self.message());
+        e.str(self.origin().unwrap_or_default());
     }
 }
 
@@ -112,6 +135,11 @@ impl Decode for SkyError {
                 })
             }
         };
-        Ok(SkyError::with_kind(kind, d.str()?))
+        let error = SkyError::with_kind(kind, d.str()?);
+        let origin = d.str()?;
+        Ok(match origin.is_empty() {
+            true => error,
+            false => error.with_origin(origin),
+        })
     }
 }
