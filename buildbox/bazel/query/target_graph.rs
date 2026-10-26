@@ -59,6 +59,11 @@ impl<C: Compute> QueryEnvironment for Universe<C> {
         if attr.as_str() == "name" {
             return Ok(Some(vec![rule.name.to_string()]));
         }
+        if attr.as_str().starts_with("generator_") {
+            let generated = generator_attrs(self, &target, rule).await?;
+            let value = generated.into_iter().flatten().find(|(name, _)| *name == attr.as_str()).map(|(_, value)| value);
+            return Ok(Some(vec![value.unwrap_or_default()]));
+        }
         let class = Universe::rule_class(self, target.package().rule_class(rule)).await?;
         let Some(schema) = class.attr(attr) else {
             return Ok(None);
@@ -147,10 +152,9 @@ impl<C: Compute> Universe<C> {
 
     /// Whether one label of a target's visibility lets a package see it.
     async fn visibility_allows(&self, label: Label, viewer: PackageId) -> Result<bool, QueryError> {
-        let visibility_package = PackageId::new(RepoName::MAIN, PathId::parse("visibility").unwrap_or(PathId::ROOT));
         match label.name.as_str() {
-            "public" if label.package == visibility_package => return Ok(true),
-            "private" if label.package == visibility_package => return Ok(false),
+            "public" if is_visibility_constant(label) => return Ok(true),
+            "private" if is_visibility_constant(label) => return Ok(false),
             "__pkg__" => return Ok(viewer == label.package),
             "__subpackages__" => return Ok(viewer.repo == label.package.repo && viewer.path.starts_with(label.package.path)),
             _ => {}
@@ -187,6 +191,39 @@ pub(crate) fn visibility_of(target: &TargetRef) -> Vec<Label> {
         _ if rule.is_some_and(|rule| package.rule_class(rule).kind.as_str() == "config_setting") => vec![public()],
         _ => package.args.default_visibility.clone(),
     }
+}
+
+/// The attributes Bazel gives a rule a macro created: the macro's name,
+/// its function, and where the BUILD file called it.
+pub(crate) async fn generator_attrs<C: Compute>(universe: &Universe<C>, target: &TargetRef, rule: &bazel_packages::Rule) -> Result<Option<[(&'static str, String); 3]>, QueryError> {
+    let Some(generator) = &rule.generator else {
+        return Ok(None);
+    };
+    let build_file = universe.build_file(target.package()).await?;
+    let name = match generator.name.is_empty() {
+        true => rule.name.to_string(),
+        false => generator.name.to_string(),
+    };
+    let location = format!("{}:{}:{}", build_file.display(), generator.location.line, generator.location.column);
+    Ok(Some([("generator_name", name), ("generator_function", generator.function.to_string()), ("generator_location", location)]))
+}
+
+/// The package groups a target's visibility names, which it depends on,
+/// as Bazel's query has it: not `//visibility:public` or `private`, nor
+/// `__pkg__` or `__subpackages__`.
+pub(crate) fn visibility_dependencies(target: &TargetRef) -> Vec<Label> {
+    let special = |label: &Label| is_visibility_constant(*label) || matches!(label.name.as_str(), "__pkg__" | "__subpackages__");
+    let declared = match target.target() {
+        Target::SourceFile(file) => file.visibility.clone().unwrap_or_default(),
+        _ => visibility_of(target),
+    };
+    declared.into_iter().filter(|label| !special(label)).collect()
+}
+
+/// Whether a label is `//visibility:public` or `//visibility:private`,
+/// which mean the same in any repository.
+fn is_visibility_constant(label: Label) -> bool {
+    label.package.path.to_string() == "visibility" && matches!(label.name.as_str(), "public" | "private")
 }
 
 /// `//visibility:public`, which every package can see.

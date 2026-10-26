@@ -76,7 +76,7 @@ async fn rule_message<C: Compute>(universe: &Universe<C>, target: &TargetRef, va
         };
         attributes.push((proto_name(schema), attribute_message(schema, value.as_ref(), explicit, mapping)));
     }
-    attributes.extend(synthesized_attributes(target, rule, mapping));
+    attributes.extend(synthesized_attributes(universe, target, rule, mapping).await?);
     attributes.sort_by(|a, b| a.0.cmp(&b.0));
     for (_, attribute) in attributes {
         message.repeated(4, "attribute", attribute);
@@ -90,25 +90,9 @@ async fn rule_message<C: Compute>(universe: &Universe<C>, target: &TargetRef, va
 
 /// The attributes Bazel gives every rule that bb keeps elsewhere: the
 /// macro that created it, and the conditions of its `select()`s.
-fn synthesized_attributes(target: &TargetRef, rule: &bazel_packages::Rule, mapping: &RepoMappingTable) -> Vec<(String, Message)> {
-    let package = target.package();
-    let generator = rule.generator.as_ref();
-    let generator_location = match generator {
-        Some(generator) => {
-            let build_file = match package.id.path.is_root() {
-                true => package.build_file.name.to_string(),
-                false => format!("{}/{}", package.id.path, package.build_file.name),
-            };
-            format!("{build_file}:{}:{}", generator.location.line, generator.location.column)
-        }
-        None => String::new(),
-    };
-    let generator_name = match generator {
-        Some(generator) if !generator.name.is_empty() => generator.name.to_string(),
-        Some(_) => rule.name.to_string(),
-        None => String::new(),
-    };
-    let generator_function = generator.map(|generator| generator.function.to_string()).unwrap_or_default();
+async fn synthesized_attributes<C: Compute>(universe: &Universe<C>, target: &TargetRef, rule: &bazel_packages::Rule, mapping: &RepoMappingTable) -> Result<Vec<(String, Message)>, QueryError> {
+    let generated = crate::target_graph::generator_attrs(universe, target, rule).await?;
+    let generator = |name: &str| generated.iter().flatten().find(|(attr, _)| *attr == name).map(|(_, value)| value.clone()).unwrap_or_default();
     let mut conditions = Vec::new();
     for (_, value) in &rule.attrs {
         value.conditions(&mut conditions);
@@ -125,12 +109,12 @@ fn synthesized_attributes(target: &TargetRef, rule: &bazel_packages::Rule, mappi
     config_dependencies.string(1, "name", "$config_dependencies").enumeration(2, "type", 6, "LABEL_LIST");
     config_dependencies.strings(6, "string_list_value", conditions.iter().map(|label| display_label(*label, mapping)));
     config_dependencies.bool(13, "explicitly_specified", false).bool(20, "nodep", false);
-    vec![
-        string("generator_function", generator_function),
-        string("generator_location", generator_location),
-        string("generator_name", generator_name),
+    Ok(vec![
+        string("generator_function", generator("generator_function")),
+        string("generator_location", generator("generator_location")),
+        string("generator_name", generator("generator_name")),
         ("$config_dependencies".to_string(), config_dependencies),
-    ]
+    ])
 }
 
 /// A rule's `visibility`, which Bazel's protos give as the labels of its

@@ -126,18 +126,17 @@ async fn rule_element<C: Compute>(universe: &Universe<C>, target: &TargetRef, op
     let package = target.package();
     let class = universe.rule_class(package.rule_class(rule)).await?;
     let mut element = Element::new("rule").with("class", class.kind.to_string());
+    let generated = crate::target_graph::generator_attrs(universe, target, rule).await?;
     for schema in &class.attrs {
         let given = schema.name.as_str() == "name" || rule.attr(schema.name).is_some();
-        if !given && !options.xml_default_values {
-            continue;
+        if given || options.xml_default_values {
+            element.children.push(attribute_element(rule, schema, mapping));
         }
-        let value = match schema.name.as_str() {
-            "name" => Some(AttrValue::String(rule.name.to_string())),
-            _ => rule.attr_or_computed(schema.name).or_else(|| attr_value(rule, schema)).cloned(),
-        };
-        let mut value_element = value_element(schema.ty, value.as_ref(), mapping);
-        value_element.attributes.push(("name", schema.name.to_string()));
-        element.children.push(value_element);
+        if schema.name.as_str() == "tags" {
+            for (name, value) in generated.iter().flatten() {
+                element.children.push(string(value).with("name", *name));
+            }
+        }
     }
     if class.kind.as_str() == "test_suite" {
         if let Some(tests) = implicit_tests_element(target, mapping) {
@@ -154,6 +153,17 @@ async fn rule_element<C: Compute>(universe: &Universe<C>, target: &TargetRef, op
         element.children.push(Element::new("rule-default-setting").with("name", feature.clone()));
     }
     Ok(element)
+}
+
+/// The element for a rule's attribute, as given or defaulted.
+fn attribute_element(rule: &bazel_packages::Rule, schema: &bazel_packages::AttrSchema, mapping: &RepoMappingTable) -> Element {
+    let value = match schema.name.as_str() {
+        "name" => Some(AttrValue::String(rule.name.to_string())),
+        _ => rule.attr_or_computed(schema.name).or_else(|| attr_value(rule, schema)).cloned(),
+    };
+    let mut element = value_element(schema.ty, value.as_ref(), mapping);
+    element.attributes.push(("name", schema.name.to_string()));
+    element
 }
 
 /// A test suite's `$implicit_tests`, which Bazel sets when it names no

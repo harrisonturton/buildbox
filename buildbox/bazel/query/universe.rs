@@ -503,12 +503,13 @@ impl<C: Compute> Universe<C> {
                 if class.kind.as_str() == "test_suite" {
                     deps.extend(target.package().implicit_tests(rule));
                 }
+                deps.extend(crate::target_graph::visibility_dependencies(target));
                 deps.sort();
                 deps.dedup();
                 Ok(deps)
             }
             Target::OutputFile { rule, .. } => Ok(vec![target.package().label(*rule)]),
-            Target::SourceFile(_) => Ok(Vec::new()),
+            Target::SourceFile(_) => Ok(crate::target_graph::visibility_dependencies(target)),
             Target::PackageGroup(group) => Ok(group.includes.clone()),
         }
     }

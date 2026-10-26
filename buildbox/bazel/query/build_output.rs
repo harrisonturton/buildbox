@@ -39,6 +39,7 @@ pub async fn write_rule_with<C: Compute>(
     writeln!(out, "# {location}").ok();
     writeln!(out, "{}(", class.kind).ok();
     writeln!(out, "  name = \"{}\",", rule.name).ok();
+    let generated = crate::target_graph::generator_attrs(universe, target, rule).await?;
     for schema in &class.attrs {
         if schema.name.as_str() == "name" {
             continue;
@@ -50,6 +51,11 @@ pub async fn write_rule_with<C: Compute>(
         };
         if let Some(value) = value {
             writeln!(out, "  {} = {},", schema.name, build_value(value, mapping)).ok();
+        }
+        if schema.name.as_str() == "tags" {
+            for (name, value) in generated.iter().flatten() {
+                writeln!(out, "  {name} = {},", build_value(&AttrValue::String(value.clone()), mapping)).ok();
+            }
         }
     }
     if class.kind.as_str() == "test_suite" && !names_tests(rule) {
