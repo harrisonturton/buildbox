@@ -39,6 +39,9 @@ pub enum Dep {
     /// A source file, or a file another rule generates.
     File(Label, Artifact),
     Target(Arc<ConfiguredTarget>),
+    /// A target with aspects applied: the target, then each aspect's
+    /// application to it, whose providers dependents see merged.
+    Aspect(Vec<Arc<ConfiguredTarget>>),
 }
 
 impl Dep {
@@ -46,8 +49,26 @@ impl Dep {
         match self {
             Dep::File(label, artifact) => fingerprinter.bytes(label.to_string().as_bytes()).bytes(artifact.exec_path.to_string().as_bytes()),
             Dep::Target(target) => fingerprinter.bytes(target.fingerprint.as_bytes()),
+            Dep::Aspect(applied) => {
+                for target in applied {
+                    fingerprinter.bytes(target.fingerprint.as_bytes());
+                }
+                fingerprinter
+            }
         };
     }
+}
+
+/// What an aspect's analysis has beside its own attributes: the target
+/// it's applied to.
+pub struct AspectView {
+    /// The target's rule, with its attributes, as `ctx.rule` has them. Its
+    /// dependencies are among the aspect's, with the aspect applied along
+    /// the attributes it propagates along.
+    pub rule: Box<RuleInput>,
+    /// The target, then the aspects applied to it before this one, whose
+    /// providers the implementation's `target` has.
+    pub targets: Vec<Arc<ConfiguredTarget>>,
 }
 
 /// Everything a rule's analysis needs, computed beforehand.
@@ -73,6 +94,8 @@ pub struct RuleInput {
     pub target_constraints: Vec<Label>,
     /// The target platform's CPU, as `$(TARGET_CPU)` names it.
     pub target_cpu: String,
+    /// For an aspect: the target it's applied to.
+    pub aspect: Option<AspectView>,
     pub toolchains: ResolvedToolchains,
 }
 
@@ -185,7 +208,11 @@ fn implement<'v>(input: &RuleInput, prepared: &Prepared<'v>, ctx: Value<'v>, eva
     match &input.implementation {
         Implementation::Starlark { implementation, .. } | Implementation::Builtin { implementation, .. } => {
             let implementation = eval.heap().access_owned_frozen_value(implementation);
-            eval.eval_function(implementation, &[ctx], &[]).map_err(|error| anyhow::anyhow!("{error}"))
+            let arguments = match &input.aspect {
+                Some(view) => vec![aspect_target(view, eval.heap())?, ctx],
+                None => vec![ctx],
+            };
+            eval.eval_function(implementation, &arguments, &[]).map_err(|error| anyhow::anyhow!("{error}"))
         }
         Implementation::Native(kind) => crate::native::analyze(*kind, input, prepared, eval),
     }
@@ -241,7 +268,10 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     let state = context.extension.take().and_then(|state| state.downcast::<RuleState>().ok()).ok_or_else(|| anyhow::anyhow!("lost the rule's state"))?;
     let defaults = defaults(&state, &prepared.outputs);
     check_outputs(&state, &prepared.outputs)?;
-    let target = providers::collect(input.label, returned, &defaults, heap)?;
+    let target = match input.aspect {
+        Some(_) => providers::collect_aspect(input.label, returned)?,
+        None => providers::collect(input.label, returned, &defaults, heap)?,
+    };
     module.set("target", heap.alloc(target));
     Ok(state.actions.into_inner())
 }
@@ -280,6 +310,7 @@ fn dep_values<'v>(module: &Module<'v>, input: &RuleInput) -> anyhow::Result<Hash
         let value = match dep {
             Dep::File(label, artifact) => heap.alloc(providers::file_target(*label, *artifact, heap)?),
             Dep::Target(target) => heap.access_owned_frozen_value(target.providers()?.owned()),
+            Dep::Aspect(applied) => merged(applied, heap)?,
         };
         values.insert(*key, value);
     }
@@ -390,9 +421,42 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     set("fragments", heap.alloc(crate::fragments::Fragments(options)));
     set("exec_groups", heap.alloc(exec_groups(input)));
     set("split_attr", split_attr_struct(input, prepared, heap));
-    set("aspect_ids", heap.alloc(AllocList::EMPTY));
+    set("aspect_ids", heap.alloc(AllocList(input.config.aspects.iter().map(|aspect| format!("{}%{}", aspect.file, aspect.name)))));
     set("build_setting_value", build_setting_value(input, heap));
+    if let Some(view) = &input.aspect {
+        set("rule", rule_struct(&view.rule, state, prepared, heap)?);
+    }
     Ok(fields)
+}
+
+/// `ctx.rule` for an aspect: the attributes of the target's rule, its
+/// files and executables, and its kind.
+fn rule_struct<'v>(rule: &RuleInput, state: &RuleState, prepared: &Prepared<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+    let fields = vec![
+        ("attr", attr_struct(rule, prepared, heap)),
+        ("file", file_struct(rule, prepared, heap)?),
+        ("files", files_struct(rule, prepared, heap)?),
+        ("executable", executable_struct(rule, state, prepared, heap)),
+        ("kind", heap.alloc(rule.class.kind.as_str())),
+        ("toolchains", heap.alloc(ToolchainContext::new(&rule.toolchains, definition_mapping(rule), heap))),
+    ];
+    Ok(heap.alloc(AllocStruct(fields)))
+}
+
+/// The `target` an aspect's implementation gets: the target, with the
+/// providers of the aspects applied to it before.
+fn aspect_target<'v>(view: &AspectView, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+    merged(&view.targets, heap)
+}
+
+/// Configured targets' providers merged, as a target with aspects applied
+/// has them.
+fn merged<'v>(targets: &[Arc<ConfiguredTarget>], heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+    let mut values = Vec::with_capacity(targets.len());
+    for target in targets {
+        values.push(heap.access_owned_frozen_value(target.providers()?.owned()));
+    }
+    crate::target_value::merge(&values, heap)
 }
 
 /// What `ctx.exec_groups` holds: the exec groups the rule declares.

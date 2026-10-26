@@ -19,15 +19,6 @@ pub(crate) fn bzl_functions(builder: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    /// `aspect(implementation, ...)`.
-    fn aspect<'v>(
-        implementation: Value<'v>,
-        #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
-    ) -> anyhow::Result<crate::opaque::Opaque> {
-        let _ = (implementation, kwargs);
-        Ok(crate::opaque::Opaque::new("Aspect"))
-    }
-
     fn analysis_test_transition<'v>(#[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> anyhow::Result<crate::opaque::Opaque> {
         let _ = kwargs;
         Ok(crate::opaque::Opaque::new("transition"))

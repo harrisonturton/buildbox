@@ -9,6 +9,7 @@ rust_library(
         "actions.rs",
         "analysis.rs",
         "args.rs",
+        "aspect.rs",
         "artifact.rs",
         "attrs.rs",
         "build_ctx.rs",

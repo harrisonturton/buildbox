@@ -41,6 +41,11 @@ impl Progress {
         self.update(|state| state.targets_configured += 1);
     }
 
+    /// An aspect was applied to a target.
+    pub fn aspect_applied(&self) {
+        self.update(|state| state.aspects_applied += 1);
+    }
+
     /// An action whose inputs are ready has started. It's shown as running
     /// until the handle returned is finished or dropped. `key` identifies
     /// the action, and `inputs` the actions that generated its inputs, for
@@ -170,6 +175,7 @@ impl Tracker {
 pub struct Snapshot {
     pub packages_loaded: u64,
     pub targets_configured: u64,
+    pub aspects_applied: u64,
     pub actions_started: u64,
     pub actions_finished: u64,
     /// The actions running, in the order they started.

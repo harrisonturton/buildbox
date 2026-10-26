@@ -45,14 +45,21 @@ pub fn progress_bar(phase: &Phase, snapshot: &Snapshot, now: Option<Instant>, op
     }
 }
 
-/// `packages loaded, targets configured`, as the analysis phase shows them.
+/// `packages loaded, targets configured`, and aspect applications if
+/// there were any, as the analysis phase shows them.
 pub(crate) fn analysis_counts(snapshot: &Snapshot) -> String {
     let targets = snapshot.targets_configured;
     let noun = match targets {
         1 => "target",
         _ => "targets",
     };
-    format!("{} packages loaded, {} {noun} configured", format_count(snapshot.packages_loaded), format_count(targets))
+    let counts = format!("{} packages loaded, {} {noun} configured", format_count(snapshot.packages_loaded), format_count(targets));
+    let aspects = snapshot.aspects_applied;
+    match aspects {
+        0 => counts,
+        1 => format!("{counts}, 1 aspect application"),
+        _ => format!("{counts}, {} aspect applications", format_count(aspects)),
+    }
 }
 
 /// `Status: message`, with the status in green, cut to `width`.

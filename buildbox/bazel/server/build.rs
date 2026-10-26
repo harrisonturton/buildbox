@@ -3,11 +3,11 @@
 
 use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
-use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey};
+use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey, output_groups};
 use crate::written::Written;
 use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Incompatibility};
 use bazel_analysis::settings::BuildSetting;
-use bazel_config::{BuildOptions, ConfigId, FlagValue, LabelParser, NativeOption, OptionType, OptionValue};
+use bazel_config::{AspectDescriptor, BuildOptions, ConfigId, FlagValue, LabelParser, NativeOption, OptionType, OptionValue};
 use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
 use bazel_loading::RepoMappingKey;
@@ -40,6 +40,8 @@ pub fn build_spec() -> OptionSpec {
         ("symlink_prefix", Value),
         ("show_result", Value),
         ("output_groups", Multi),
+        ("aspects", Multi),
+        ("aspects_parameters", Multi),
         ("build_tests_only", Bool),
         ("verbose_failures", Bool),
         ("jobs", Jobs),
@@ -88,11 +90,25 @@ pub struct Built {
     pub config: ConfigId,
     /// Each top-level target, with the files it built.
     pub targets: Vec<(Label, Arc<ConfiguredTarget>, Vec<OutputFile>)>,
+    /// Each aspect `--aspects` applies to each top-level target, with the
+    /// files it built.
+    pub aspects: Vec<BuiltAspect>,
+    /// The output groups built, as `--output_groups` requests.
+    pub groups: Vec<String>,
     /// How many of the targets didn't build every file they build at the
     /// top level.
     pub unbuilt: usize,
     pub exec_root: PathBuf,
     pub errors: bool,
+}
+
+/// An aspect applied to a top-level target, and the files it built.
+pub struct BuiltAspect {
+    /// The aspect, as Bazel shows it: `//pkg:defs.bzl%name`.
+    pub aspect: String,
+    pub label: Label,
+    pub target: Arc<ConfiguredTarget>,
+    pub files: Vec<OutputFile>,
 }
 
 pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {
@@ -194,18 +210,19 @@ pub async fn run_command(
     let (analyzed, head_starts) = futures::channel::mpsc::unbounded();
     let execute_actions = options.flag("build", true);
     let analyzed = execute_actions.then_some(analyzed);
-    let (built, ()) = futures::join!(analyze_and_build(context, session, options, testing, analyzed, out), head_starts_of(session, head_starts));
+    let groups = output_groups(options);
+    let (built, ()) = futures::join!(analyze_and_build(context, session, options, testing, analyzed, out), head_starts_of(session, head_starts, &groups));
     built
 }
 
 /// Give each target received a [`head_start`], until there are no more.
-async fn head_starts_of(session: &Session, mut targets: UnboundedReceiver<Arc<ConfiguredTarget>>) {
+async fn head_starts_of(session: &Session, mut targets: UnboundedReceiver<Arc<ConfiguredTarget>>, groups: &[String]) {
     let mut running: FuturesUnordered<BoxFuture<'_, ()>> = FuturesUnordered::new();
     let mut receiving = true;
     loop {
         tokio::select! {
             target = targets.next(), if receiving => match target {
-                Some(target) => running.push(Box::pin(head_start(session, target))),
+                Some(target) => running.push(Box::pin(head_start(session, target, groups))),
                 None => receiving = false,
             },
             Some(()) = running.next(), if !running.is_empty() => {}
@@ -215,11 +232,14 @@ async fn head_starts_of(session: &Session, mut targets: UnboundedReceiver<Arc<Co
 }
 
 /// Start building the files of an analyzed target.
-async fn head_start(session: &Session, target: Arc<ConfiguredTarget>) {
-    let key = TopLevelKey(ConfiguredTargetKey {
-        label: target.label,
-        config: target.config,
-    });
+async fn head_start(session: &Session, target: Arc<ConfiguredTarget>, groups: &[String]) {
+    let key = TopLevelKey {
+        target: ConfiguredTargetKey {
+            label: target.label,
+            config: target.config,
+        },
+        groups: groups.to_vec(),
+    };
     let Ok(top) = session.evaluate(&key).await else {
         return;
     };
@@ -257,9 +277,22 @@ async fn analyze_and_build(
             return Err(exit::COMMAND_LINE_ERROR);
         }
     };
+    let requested = match requested_aspects(options, &main_mapping) {
+        Ok(requested) => requested,
+        Err(message) => {
+            out.error(&message).await;
+            return Err(exit::BUILD_FAILURE);
+        }
+    };
     let what = analyzing(&labels, &main_mapping);
     out.phase(Phase::Analyzing(what.clone())).await;
-    let (analyzed, failed) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
+    let aspects = match bazel_analysis::aspect::top_level(session, &requested.aspects, &requested.parameters).await {
+        Ok(aspects) => aspects,
+        Err(error) => return Err(aspects_failed(options, &requested, &labels, &main_mapping, error.message(), out).await),
+    };
+    let (analyzed, mut failed) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
+    let (applied, failed_aspects) = apply_aspects(session, &analyzed, &aspects, &main_mapping, out).await;
+    failed.extend(failed_aspects);
     let incompatible = report_explicitly_incompatible(&analyzed, &explicit, &main_mapping, out).await;
     if let Some(first) = failed.first().filter(|_| !keep_going) {
         out.error(&build_aborted(first)).await;
@@ -280,28 +313,41 @@ async fn analyze_and_build(
     let backend = context.server.backend();
     // --nobuild stops after analysis.
     let execute_actions = options.flag("build", true);
-    let (top_levels, failed) = top_levels(session, &analyzed, execute_actions, out).await;
+    let groups = output_groups(options);
+    let applied_targets: Vec<Arc<ConfiguredTarget>> = applied.iter().map(|(_, _, target)| target.clone()).collect();
+    let (target_tops, failed) = top_levels(session, analyzed.iter().map(|(_, target)| target), &groups, execute_actions, out).await;
     errors |= failed;
-    let all: Vec<Artifact> = top_levels.iter().flatten().flat_map(|top| top.artifacts.iter().copied()).collect::<BTreeSet<_>>().into_iter().collect();
+    let (aspect_tops, failed) = top_levels(session, applied_targets.iter(), &groups, execute_actions, out).await;
+    errors |= failed;
+    let all: Vec<Artifact> = target_tops
+        .iter()
+        .chain(&aspect_tops)
+        .flatten()
+        .flat_map(|top| top.artifacts.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let (built, failed) = execute(session, &all, out).await;
     errors |= failed;
     let built_by_path: HashMap<PathId, OutputFile> = built.iter().map(|file| (file.path, *file)).collect();
     let mut targets = Vec::new();
     let mut unbuilt = 0;
-    for ((label, target), top) in analyzed.into_iter().zip(&top_levels) {
-        let artifacts = top.as_ref().map(|top| top.artifacts.as_slice()).unwrap_or_default();
-        let files: Vec<OutputFile> = artifacts.iter().filter_map(|artifact| built_by_path.get(&artifact.exec_path).copied()).collect();
-        if files.len() < artifacts.len() {
-            unbuilt += 1;
-        }
-        targets.push((label, target, files));
+    for ((label, target), top) in analyzed.into_iter().zip(&target_tops) {
+        let files = built_files(top.as_deref(), &built_by_path);
+        unbuilt += usize::from(files.is_none());
+        targets.push((label, target, files.unwrap_or_default()));
+    }
+    let mut built_aspects = Vec::new();
+    for ((aspect, label, target), top) in applied.into_iter().zip(&aspect_tops) {
+        let files = built_files(top.as_deref(), &built_by_path).unwrap_or_default();
+        built_aspects.push(BuiltAspect { aspect, label, target, files });
     }
     if let Some(backend) = &backend {
         let written = context.server.workspaces().get(&context.workspace_root).written.clone();
         let mut results = vec![write_files(backend, &written, &exec_root, built).await];
         let trees: Vec<_> = targets
             .iter()
-            .zip(&top_levels)
+            .zip(&target_tops)
             .filter_map(|((_, target, files), top)| Some((target, files, top.as_ref()?.runfiles.as_ref()?)))
             .map(|(target, files, runfiles)| Box::pin(write_runfiles_tree(session, &written, target, files, runfiles, &exec_root, &context.workspace_root)))
             .collect();
@@ -315,10 +361,122 @@ async fn analyze_and_build(
         main_mapping,
         config,
         targets,
+        aspects: built_aspects,
+        groups,
         unbuilt,
         exec_root,
         errors,
     })
+}
+
+/// The files of a top-level target's that were built, or `None` if any
+/// wasn't.
+fn built_files(top: Option<&TopLevel>, built_by_path: &HashMap<PathId, OutputFile>) -> Option<Vec<OutputFile>> {
+    let artifacts = top.map(|top| top.artifacts.as_slice()).unwrap_or_default();
+    let files: Vec<OutputFile> = artifacts.iter().filter_map(|artifact| built_by_path.get(&artifact.exec_path).copied()).collect();
+    match files.len() < artifacts.len() {
+        true => None,
+        false => Some(files),
+    }
+}
+
+/// The aspects `--aspects` names, in order, each as its `.bzl` file and
+/// the name it's exported as, and the `--aspects_parameters` given them.
+struct RequestedAspects {
+    /// Each as the command line gives it.
+    given: Vec<String>,
+    aspects: Vec<(Label, String)>,
+    parameters: Vec<(String, String)>,
+}
+
+fn requested_aspects(options: &ParsedOptions, main_mapping: &RepoMappingTable) -> Result<RequestedAspects, String> {
+    let mut parameters = Vec::new();
+    for text in options.all("aspects_parameters") {
+        let Some((name, value)) = text.split_once('=') else {
+            return Err(format!("Invalid aspects_parameters: '{text}': expected a 'name=value' assignment"));
+        };
+        parameters.push((name.to_string(), value.to_string()));
+    }
+    let label_context = LabelContext::new(bazel_label::PackageId::new(RepoName::MAIN, intern::PathId::ROOT), main_mapping);
+    let given: Vec<String> = options.all("aspects").iter().flat_map(|text| text.split(',')).filter(|text| !text.is_empty()).map(str::to_string).collect();
+    let mut aspects = Vec::with_capacity(given.len());
+    for text in &given {
+        let Some((file, name)) = text.rsplit_once('%') else {
+            return Err(format!("Aspect '{text}' is unknown"));
+        };
+        let file = Label::parse(file, &label_context).map_err(|error| format!("Invalid aspect '{text}': {error}"))?;
+        aspects.push((file, name.to_string()));
+    }
+    Ok(RequestedAspects { given, aspects, parameters })
+}
+
+/// Report that the aspects `--aspects` names can't be applied, as Bazel
+/// does: as the failure of every top-level target, and of the aspects'
+/// analysis on the first.
+async fn aspects_failed(options: &ParsedOptions, requested: &RequestedAspects, labels: &[Label], mapping: &RepoMappingTable, message: &str, out: &Output) -> i32 {
+    out.error(message).await;
+    let show_result: usize = options.get("show_result").and_then(|value| value.parse().ok()).unwrap_or(1);
+    if labels.len() <= show_result {
+        let failed: String = labels.iter().map(|label| format!("Target {} failed to build\n", bazel_query::display_label(*label, mapping))).collect();
+        out.stderr(&failed).await;
+    }
+    if !options.flag("verbose_failures", false) {
+        out.stderr("Use --verbose_failures to see the command lines of failed build steps.\n").await;
+    }
+    let parameters: Vec<String> = requested.parameters.iter().map(|(name, value)| format!("{name}={value}")).collect();
+    let on = labels.first().map(|label| bazel_query::display_label(*label, mapping)).unwrap_or_default();
+    out.error(&format!(
+        "Analysis of aspects '[{}] with parameters {{{}}} on {on}' failed; build aborted: {message}",
+        requested.given.join(", "),
+        parameters.join(", ")
+    ))
+    .await;
+    exit::BUILD_FAILURE
+}
+
+/// Apply the aspects to each compatible top-level target, each after
+/// those before it. Returns each aspect as Bazel shows it, with the
+/// target, and its application; and the applications that failed.
+async fn apply_aspects(
+    session: &Session,
+    analyzed: &[(Label, Arc<ConfiguredTarget>)],
+    aspects: &[AspectDescriptor],
+    mapping: &RepoMappingTable,
+    out: &Output,
+) -> (Vec<(String, Label, Arc<ConfiguredTarget>)>, Vec<Failed>) {
+    let mut wanted = Vec::new();
+    for (label, target) in analyzed.iter().filter(|(_, target)| target.incompatible.is_none()) {
+        let config = target.config.get();
+        for count in 1..=aspects.len() {
+            let aspect = &aspects[count - 1];
+            let shown = format!("{}%{}", bazel_query::display_label(aspect.file, mapping), aspect.name);
+            let key = ConfiguredTargetKey {
+                label: target.label,
+                config: config.with_aspects(&aspects[..count]),
+            };
+            wanted.push((shown, *label, key));
+        }
+    }
+    let keys: Vec<ConfiguredTargetKey> = wanted.iter().map(|(_, _, key)| *key).collect();
+    let results = session.evaluate_many(&keys).await;
+    let mut applied = Vec::new();
+    let mut failed = Vec::new();
+    let mut reported = BTreeSet::new();
+    for ((shown, label, _), result) in wanted.into_iter().zip(results) {
+        match result {
+            Ok(target) => applied.push((shown, label, target)),
+            Err(error) => {
+                failed.push(Failed {
+                    target: bazel_query::display_label(label, mapping),
+                    in_dependency: true,
+                });
+                if reported.insert(error.message().to_string()) {
+                    out.error(error.message()).await;
+                }
+            }
+        }
+    }
+    (applied, failed)
 }
 
 /// Report the targets that can't be built for the target platform but
@@ -388,12 +546,21 @@ async fn report_analysis(what: &str, analyzed: &[(Label, Arc<ConfiguredTarget>)]
 /// build nothing.
 async fn top_levels(
     session: &Session,
-    analyzed: &[(Label, Arc<ConfiguredTarget>)],
+    analyzed: impl Iterator<Item = &Arc<ConfiguredTarget>>,
+    groups: &[String],
     execute_actions: bool,
     out: &Output,
 ) -> (Vec<Option<Arc<TopLevel>>>, bool) {
-    let keys: Vec<TopLevelKey> = analyzed.iter().map(|(_, target)| TopLevelKey(ConfiguredTargetKey { label: target.label, config: target.config })).collect();
-    let wanted: Vec<bool> = analyzed.iter().map(|(_, target)| execute_actions && target.incompatible.is_none()).collect();
+    let analyzed: Vec<&Arc<ConfiguredTarget>> = analyzed.collect();
+    let key = |target: &ConfiguredTarget| TopLevelKey {
+        target: ConfiguredTargetKey {
+            label: target.label,
+            config: target.config,
+        },
+        groups: groups.to_vec(),
+    };
+    let keys: Vec<TopLevelKey> = analyzed.iter().map(|target| key(target)).collect();
+    let wanted: Vec<bool> = analyzed.iter().map(|target| execute_actions && target.incompatible.is_none()).collect();
     let to_compute: Vec<TopLevelKey> = keys.iter().zip(&wanted).filter(|(_, wanted)| **wanted).map(|(key, _)| key.clone()).collect();
     let mut computed = session.evaluate_many(&to_compute).await.into_iter();
     let mut failed = false;
@@ -886,53 +1053,102 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
         out.info(&format!("Build succeeded for only {succeeded} of {} top-level targets", built.targets.len())).await;
     }
     let show_result: usize = options.get("show_result").and_then(|value| value.parse().ok()).unwrap_or(1);
-    if executed && built.targets.len() <= show_result {
-        for (label, target, files) in &built.targets {
-            report_target(*label, target, files, built, prefix, out).await;
-        }
+    if executed {
+        report_results(built, show_result, prefix, out).await;
     }
     if failed > 0 && !options.flag("verbose_failures", false) {
         out.stderr("Use --verbose_failures to see the command lines of failed build steps.\n").await;
     }
 }
 
-/// Whether every file a target builds by default was built. Incompatible
-/// targets build nothing, so count as built.
-fn all_built(target: &ConfiguredTarget, files: &[OutputFile]) -> bool {
-    if target.incompatible.is_some() {
-        return true;
-    }
-    let defaults = default_files(target).into_iter().filter(|artifact| !artifact.is_source());
-    defaults.into_iter().all(|artifact| files.iter().any(|file| file.path == artifact.exec_path))
+/// How building a top-level target, or an aspect applied to one, went.
+enum Outcome {
+    /// It's incompatible with the target platform.
+    Skipped,
+    /// Its files of the requested output groups were built, those shown.
+    Built(Vec<Artifact>),
+    Failed,
 }
 
-/// Say whether a target is up to date, and the files it built.
-async fn report_target(label: Label, target: &ConfiguredTarget, files: &[OutputFile], built: &Built, prefix: &str, out: &Output) {
-    if target.incompatible.is_some() {
+/// What a top-level target, or an aspect applied to one, is reported as:
+/// `Target //pkg:name` or `Aspect //pkg:defs.bzl%name of //pkg:name`.
+struct Reported {
+    shown: String,
+    outcome: Outcome,
+}
+
+/// Report what each top-level target and aspect built, as Bazel does:
+/// unless more than `show_result` have files to show or failed, in which
+/// case none are; and without those with nothing to build, unless every
+/// one fits.
+async fn report_results(built: &Built, show_result: usize, prefix: &str, out: &Output) {
+    let targets: Vec<Reported> = built.targets.iter().filter(|(_, target, _)| target.kind.as_str() != "source file").map(|target| target_result(target, built)).collect();
+    let aspects: Vec<Reported> = built.aspects.iter().map(|aspect| aspect_result(aspect, built)).collect();
+    let essential = targets.iter().chain(&aspects).filter(|result| !matches!(&result.outcome, Outcome::Built(files) if files.is_empty())).count();
+    if essential > show_result {
         return;
     }
-    let shown = bazel_query::display_label(label, &built.main_mapping);
-    let defaults: Vec<Artifact> = default_files(target).into_iter().filter(|artifact| !artifact.is_source()).collect();
-    if defaults.is_empty() {
-        out.stderr(&format!("Target {shown} up-to-date (nothing to build)\n")).await;
-        return;
-    }
-    if !all_built(target, files) {
-        out.stderr(&format!("Target {shown} failed to build\n")).await;
-        return;
-    }
+    let omit_nothing_to_build = targets.len() + aspects.len() > show_result;
     let output_directory = &built.config.get().output_directory;
-    let mut text = format!("Target {shown} up-to-date:\n");
-    for artifact in defaults {
-        text.push_str(&format!("  {}\n", display_path(&artifact, prefix, output_directory)));
+    let mut text = String::new();
+    for result in targets.iter().filter(|result| matches!(result.outcome, Outcome::Skipped)) {
+        text.push_str(&format!("{} was skipped\n", result.shown));
+    }
+    for results in [&targets, &aspects] {
+        for result in results.iter() {
+            let Outcome::Built(files) = &result.outcome else {
+                continue;
+            };
+            if files.is_empty() && !omit_nothing_to_build {
+                text.push_str(&format!("{} up-to-date (nothing to build)\n", result.shown));
+            }
+            if files.is_empty() {
+                continue;
+            }
+            text.push_str(&format!("{} up-to-date:\n", result.shown));
+            for artifact in files {
+                text.push_str(&format!("  {}\n", display_path(artifact, prefix, output_directory)));
+            }
+        }
+        for result in results.iter().filter(|result| matches!(result.outcome, Outcome::Failed)) {
+            text.push_str(&format!("{} failed to build\n", result.shown));
+        }
     }
     out.stderr(&text).await;
 }
 
-fn default_files(target: &ConfiguredTarget) -> Vec<Artifact> {
+fn target_result((label, target, files): &(Label, Arc<ConfiguredTarget>, Vec<OutputFile>), built: &Built) -> Reported {
+    let shown = format!("Target {}", bazel_query::display_label(*label, &built.main_mapping));
+    let outcome = match target.incompatible {
+        Some(_) => Outcome::Skipped,
+        None => outcome(target, files, &built.groups),
+    };
+    Reported { shown, outcome }
+}
+
+fn aspect_result(aspect: &BuiltAspect, built: &Built) -> Reported {
+    let shown = format!("Aspect {} of {}", aspect.aspect, bazel_query::display_label(aspect.label, &built.main_mapping));
+    Reported {
+        shown,
+        outcome: outcome(&aspect.target, &aspect.files, &built.groups),
+    }
+}
+
+/// Whether every file of a target's requested output groups was built,
+/// and those generated, which a build shows.
+fn outcome(target: &ConfiguredTarget, files: &[OutputFile], groups: &[String]) -> Outcome {
+    let generated: Vec<Artifact> = shown_files(target, groups).into_iter().filter(|artifact| !artifact.is_source()).collect();
+    match generated.iter().all(|artifact| files.iter().any(|file| file.path == artifact.exec_path)) {
+        true => Outcome::Built(generated),
+        false => Outcome::Failed,
+    }
+}
+
+/// The files of a target's requested output groups.
+fn shown_files(target: &ConfiguredTarget, groups: &[String]) -> Vec<Artifact> {
     let providers = target.providers().ok();
     match providers.as_ref().and_then(|providers| providers.get()) {
-        Some(value) => depset_files(value.default_info("files")),
+        Some(value) => crate::top_level::shown(value, groups),
         None => Vec::new(),
     }
 }

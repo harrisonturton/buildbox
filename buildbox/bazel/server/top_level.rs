@@ -2,15 +2,62 @@
 //! configured target, so that a build of unchanged targets doesn't flatten
 //! their runfiles again.
 
-use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Runfiles, runfiles_repo_name};
+use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Runfiles, TargetValue, runfiles_repo_name};
 use bazel_label::RepoName;
+use bazel_options::ParsedOptions;
+use bazel_starlark::provider::ProviderInstance;
 use skycodec::{Decode, Encode, Fingerprint, Fingerprinter};
 use skyframe::{Ctx, Key, SkyError, encoded_value};
 use std::collections::BTreeSet;
 
-/// The files a top-level target builds.
+/// The files a top-level target builds: those of the output groups
+/// requested.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
-pub struct TopLevelKey(pub ConfiguredTargetKey);
+pub struct TopLevelKey {
+    pub target: ConfiguredTargetKey,
+    pub groups: Vec<String>,
+}
+
+/// The output group of a target's default outputs, and its runfiles.
+const DEFAULT_GROUP: &str = "default";
+
+/// The output groups `--output_groups` requests, sorted: those it names,
+/// or if each it names adds `+group` or removes `-group`, `default` with
+/// those changes.
+pub fn output_groups(options: &ParsedOptions) -> Vec<String> {
+    let given: Vec<&str> = options.all("output_groups").iter().flat_map(|text| text.split(',')).filter(|group| !group.is_empty()).collect();
+    let mut groups = std::collections::BTreeSet::new();
+    if given.iter().all(|group| group.starts_with('+') || group.starts_with('-')) {
+        groups.insert(DEFAULT_GROUP.to_string());
+    }
+    for group in given {
+        match (group.strip_prefix('+'), group.strip_prefix('-')) {
+            (Some(added), _) => groups.insert(added.to_string()),
+            (_, Some(removed)) => groups.remove(removed),
+            _ => groups.insert(group.to_string()),
+        };
+    }
+    groups.into_iter().collect()
+}
+
+/// The files of the output groups that a build reports a target built:
+/// its default outputs, for `default`, and every other group's files.
+pub fn shown(target: &TargetValue<'_>, groups: &[String]) -> Vec<Artifact> {
+    let mut artifacts = Vec::new();
+    for group in groups {
+        match group.as_str() {
+            DEFAULT_GROUP => artifacts.extend(crate::build::depset_files(target.default_info("files"))),
+            _ => artifacts.extend(group_files(target, group)),
+        }
+    }
+    artifacts
+}
+
+/// The files of one of a target's output groups.
+fn group_files(target: &TargetValue<'_>, group: &str) -> Vec<Artifact> {
+    let groups = target.provider("OutputGroupInfo").and_then(ProviderInstance::from_value);
+    crate::build::depset_files(groups.and_then(|groups| groups.field(group)))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct TopLevel {
@@ -38,8 +85,9 @@ impl Key for TopLevelKey {
     const KIND: &'static str = "TOP_LEVEL";
 
     async fn compute(&self, ctx: &Ctx) -> Result<TopLevel, SkyError> {
-        let target = ctx.compute(&self.0).await?;
-        let flattened = bazel_loading::blocking(move || flatten(&target)).await?;
+        let target = ctx.compute(&self.target).await?;
+        let groups = self.groups.clone();
+        let flattened = bazel_loading::blocking(move || flatten(&target, &groups)).await?;
         let Flattened { mut artifacts, runfiles } = flattened;
         let runfiles = match runfiles {
             Some((executable, entries)) => {
@@ -59,8 +107,9 @@ struct Flattened {
     runfiles: Option<(Artifact, Vec<(String, Artifact)>)>,
 }
 
-/// A target's default outputs and its executable's runfiles, flattened.
-fn flatten(target: &ConfiguredTarget) -> Flattened {
+/// The files of a target's output groups, with, for `default`, its
+/// executable's runfiles, flattened.
+fn flatten(target: &ConfiguredTarget, groups: &[String]) -> Flattened {
     let providers = target.providers().ok();
     let Some(value) = providers.as_ref().and_then(|providers| providers.get()) else {
         return Flattened {
@@ -68,7 +117,10 @@ fn flatten(target: &ConfiguredTarget) -> Flattened {
             runfiles: None,
         };
     };
-    let mut artifacts = crate::build::depset_files(value.default_info("files"));
+    let mut artifacts = shown(value, groups);
+    if !groups.iter().any(|group| group == DEFAULT_GROUP) {
+        return Flattened { artifacts, runfiles: None };
+    }
     let executable = value.default_info("executable").and_then(FileValue::artifact);
     let runfiles = value.default_info("default_runfiles").and_then(Runfiles::from_value);
     let Some((executable, runfiles)) = executable.zip(runfiles) else {

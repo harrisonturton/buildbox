@@ -7,6 +7,7 @@
 //! providers, which its dependents see, and the actions its rule registered.
 
 mod action;
+pub mod aspect;
 mod actions;
 mod args;
 mod artifact;

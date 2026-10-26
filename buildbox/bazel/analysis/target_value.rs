@@ -115,3 +115,81 @@ where
         Ok(())
     }
 }
+
+/// A target with the providers of the aspects applied to it: the target's,
+/// then each aspect's, with their output groups merged, as Bazel merges
+/// them. Any other provider given twice is an error.
+pub fn merge<'v>(targets: &[Value<'v>], heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+    let Some((first, rest)) = targets.split_first() else {
+        anyhow::bail!("no target to merge");
+    };
+    let Some(base) = TargetValue::from_value(*first) else {
+        return Ok(*first);
+    };
+    if rest.is_empty() {
+        return Ok(*first);
+    }
+    let mut providers: SmallMap<String, Value<'v>> = base.providers.iter().map(|(key, value)| (key.clone(), *value)).collect();
+    let mut output_groups: Vec<Value<'v>> = providers.shift_remove(OUTPUT_GROUP_INFO).into_iter().collect();
+    for aspect in rest {
+        let Some(aspect) = TargetValue::from_value(*aspect) else {
+            continue;
+        };
+        for (key, value) in aspect.providers.iter() {
+            if key == OUTPUT_GROUP_INFO {
+                output_groups.push(*value);
+                continue;
+            }
+            if providers.insert(key.clone(), *value).is_some() {
+                anyhow::bail!("Provider {key} provided twice");
+            }
+        }
+    }
+    if let Some(groups) = merged_output_groups(&output_groups, heap)? {
+        providers.insert(OUTPUT_GROUP_INFO.to_string(), groups);
+    }
+    Ok(heap.alloc(TargetValue {
+        label: base.label,
+        providers,
+        is_file: base.is_file,
+    }))
+}
+
+/// The key `OutputGroupInfo` is stored under.
+const OUTPUT_GROUP_INFO: &str = "OutputGroupInfo";
+
+/// One `OutputGroupInfo` with every group of several: a group more than one
+/// has holds the files of each.
+fn merged_output_groups<'v>(infos: &[Value<'v>], heap: Heap<'v>) -> anyhow::Result<Option<Value<'v>>> {
+    let Some((first, rest)) = infos.split_first() else {
+        return Ok(None);
+    };
+    if rest.is_empty() {
+        return Ok(Some(*first));
+    }
+    let mut groups: SmallMap<String, Vec<Value<'v>>> = SmallMap::new();
+    for info in infos {
+        let Some(instance) = ProviderInstance::from_value(*info) else {
+            continue;
+        };
+        for (name, files) in instance.fields.iter() {
+            groups.entry(name.to_string()).or_default().push(files.to_value());
+        }
+    }
+    let fields: Vec<(String, Value<'v>)> = groups
+        .into_iter()
+        .map(|(name, files)| {
+            let files = match files.as_slice() {
+                [files] => *files,
+                _ => heap.alloc(bazel_starlark::depset::Depset {
+                    direct: Vec::new(),
+                    transitive: files,
+                    order: bazel_starlark::depset::Order::Default,
+                }),
+            };
+            (name, files)
+        })
+        .collect();
+    let fields = fields.iter().map(|(name, files)| (name.as_str(), *files)).collect();
+    Ok(Some(crate::providers::instance(OUTPUT_GROUP_INFO, fields, heap)?))
+}

@@ -41,6 +41,9 @@ pub struct RuleClass {
     pub incoming_transition: bool,
     /// For build setting rules: how their targets' values are set.
     pub build_setting: Option<BuildSettingSpec>,
+    /// The providers `rule(provides = [...])` says its targets give, by
+    /// key, which decide the aspects that apply to them.
+    pub advertised_providers: Vec<String>,
 }
 
 /// How a build setting is set: whether it's a flag, which the command line
@@ -67,6 +70,16 @@ pub struct AttrSchema {
     pub is_dependency: bool,
     /// For string attributes: the allowed values, if restricted.
     pub values: Vec<String>,
+    /// For label attributes: the aspects applied to their dependencies.
+    pub aspects: Vec<AspectRef>,
+}
+
+/// An aspect, by the `.bzl` file that exports it and the name it's
+/// exported as.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
+pub struct AspectRef {
+    pub file: Label,
+    pub name: Symbol,
 }
 
 /// An attribute's value when a rule doesn't give one.
@@ -113,6 +126,7 @@ impl AttrSchema {
             executable: false,
             is_dependency: ty.has_labels(),
             values: Vec::new(),
+            aspects: Vec::new(),
         }
     }
 

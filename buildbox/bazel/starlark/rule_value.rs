@@ -7,7 +7,7 @@ use crate::instantiate::instantiate;
 use crate::native_rules;
 use allocative::Allocative;
 use bazel_label::Label;
-use bazel_packages::{AttrDefault, AttrSchema, AttrType, AttrValue, Cfg, RuleClass, RuleClassRef};
+use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, Cfg, RuleClass, RuleClassRef};
 use intern::Symbol;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
@@ -237,6 +237,7 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     class.exec_groups = exec_groups(rule)?;
     class.incoming_transition = rule.option("cfg").is_some_and(|cfg| crate::transition::Transition::from_value(cfg).is_some());
     class.build_setting = build_setting(rule).map(crate::config_module::BuildSettingType::spec);
+    class.advertised_providers = advertised_providers(rule);
     Ok(class)
 }
 
@@ -290,7 +291,7 @@ fn subrule_attrs(subrule: &crate::subrule::Subrule<'_>, context: &EvalContext) -
     Ok(schemas)
 }
 
-fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelParser<'_>) -> anyhow::Result<AttrSchema> {
+pub(crate) fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelParser<'_>) -> anyhow::Result<AttrSchema> {
     let ty = attribute.ty;
     let default = match attribute.default {
         None => AttrDefault::Value(AttrValue::default_for(ty)),
@@ -321,7 +322,43 @@ fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelParser<'_>) 
         executable: attribute.executable,
         is_dependency: ty.has_labels(),
         values,
+        aspects: attached_aspects(name, attribute)?,
     })
+}
+
+/// The aspects `attr.label(aspects = [...])` applies to an attribute's
+/// dependencies, but those of Bazel's own that bb only stands in for.
+fn attached_aspects(name: &str, attribute: &Attribute<'_>) -> anyhow::Result<Vec<AspectRef>> {
+    let Some(aspects) = attribute.aspects.filter(|aspects| !aspects.is_none()) else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = convert::items(aspects) else {
+        anyhow::bail!("attribute '{name}': aspects must be a list");
+    };
+    let modelled = items.into_iter().filter(|item| item.downcast_ref::<crate::opaque::Opaque>().is_none());
+    modelled.map(crate::aspect::aspect_ref).collect()
+}
+
+/// The keys of the providers `rule(provides = [...])` names.
+fn advertised_providers<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> Vec<String> {
+    let provides = rule.option("provides").and_then(convert::items).unwrap_or_default();
+    provides.into_iter().filter_map(provider_key).collect()
+}
+
+/// The key a provider's instances are found by in a target: a Starlark
+/// provider's, or a higher layer's provider's name.
+pub(crate) fn provider_key(provider: Value<'_>) -> Option<String> {
+    match crate::provider::Provider::from_value(provider) {
+        Some(provider) => Some(provider.key()),
+        None => native_provider_name(provider),
+    }
+}
+
+/// The name of a provider a higher layer defines, such as `CcInfo`, by how
+/// it prints: `<provider NAME>`.
+fn native_provider_name(provider: Value<'_>) -> Option<String> {
+    let printed = provider.to_str();
+    printed.strip_prefix("<provider ")?.strip_suffix('>').map(str::to_string)
 }
 
 /// A build setting rule's `build_setting = config.<type>(...)`, if it has
@@ -372,6 +409,12 @@ fn toolchain_types<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, parser: &Lab
     for subrule in crate::subrule::subrules(rule.option("subrules"))? {
         toolchains.extend(subrule.rule_toolchains()?);
     }
+    toolchain_labels(toolchains, parser)
+}
+
+/// The toolchain types a `toolchains = [...]` list names, and those of them
+/// that are optional.
+pub(crate) fn toolchain_labels(toolchains: Vec<Value<'_>>, parser: &LabelParser<'_>) -> anyhow::Result<(Vec<Label>, Vec<Label>)> {
     let mut labels = Vec::with_capacity(toolchains.len());
     let mut optional = Vec::new();
     for toolchain in toolchains {

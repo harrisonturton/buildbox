@@ -106,6 +106,7 @@ pub fn rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool
         exec_groups: Vec::new(),
         incoming_transition: false,
         build_setting: None,
+        advertised_providers: Vec::new(),
     }
 }
 

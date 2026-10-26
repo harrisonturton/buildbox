@@ -140,9 +140,10 @@ const STRICT_DEPS_MODES: &[&str] = &["off", "warn", "error", "strict", "default"
 /// The native options bb knows, sorted by name, with Bazel 9.3.1's types
 /// and defaults: those `config_setting`s match in the rule sets bb has met,
 /// those bb reads, and every one Bazel's exec transition reads or writes.
-/// One is bb's own: `toolchain execution platform`, the execution platform
-/// of the rule a toolchain target is analyzed for, which Bazel keeps in the
-/// target's key instead.
+/// Two are bb's own, which Bazel keeps in targets' keys instead:
+/// `toolchain execution platform`, the execution platform of the rule a
+/// toolchain target is analyzed for, and `applied aspects`, the aspects
+/// whose application to a target a key names.
 pub static NATIVE_OPTIONS: &[NativeOption] = {
     use OptionDefault::*;
     use OptionType::*;
@@ -157,6 +158,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("android_manifest_merger_order", String, Text("alphabetical")),
         option("apple configuration distinguisher", String, Text("unknown")),
         option("apple_platform_type", String, Text("macos")),
+        multiple("applied aspects", Strings),
         option("archived_tree_artifact_mnemonics_filter", String, Text("-.*")),
         option("break_build_on_parallel_dex2oat_failure", Bool, Text("false")),
         option("build_python_zip", TriState, Text("auto")),

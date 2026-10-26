@@ -47,6 +47,9 @@ pub struct BuildConfiguration {
     /// For a toolchain target: the execution platform of the rule it's
     /// analyzed for, on which its tools run.
     pub toolchain_exec_platform: Option<Label>,
+    /// For a target's key that names aspects applied to it: those aspects,
+    /// in the order they apply.
+    pub aspects: Vec<AspectDescriptor>,
     /// The name of its output directory under `bazel-out`, such as
     /// `k8-fastbuild` or `k8-opt-exec-ST-d57f47055a04`.
     pub output_directory: String,
@@ -124,6 +127,7 @@ impl BuildConfiguration {
         let platform = options.labels("platforms").first().copied().unwrap_or(host_platform);
         let is_exec = options.bool("is exec configuration");
         let toolchain_exec_platform = options.label(TOOLCHAIN_EXEC_PLATFORM);
+        let aspects = options.strings(APPLIED_ASPECTS).iter().filter_map(|text| AspectDescriptor::parse(text)).collect();
         let named = platform_in_output_directory(&options, platform, is_exec);
         let descriptor = match named {
             true => platform_descriptor(&options, platform, &cpu),
@@ -147,6 +151,7 @@ impl BuildConfiguration {
             host_platform,
             is_exec,
             toolchain_exec_platform,
+            aspects,
             output_directory,
             checksum: digest[..7].to_string(),
         }
@@ -168,13 +173,42 @@ impl BuildConfiguration {
     }
 
     /// The configuration a target's dependencies are built in: this one,
-    /// less the execution platform a toolchain target is analyzed for.
+    /// less the execution platform a toolchain target is analyzed for and
+    /// the aspects applied to the target.
     pub fn for_dependencies(&self) -> ConfigId {
-        if self.toolchain_exec_platform.is_none() {
+        if self.toolchain_exec_platform.is_none() && self.aspects.is_empty() {
             return self.id;
         }
         let mut options = self.options.clone();
         options.set(TOOLCHAIN_EXEC_PLATFORM, OptionValue::Null).expect("a native option");
+        options.set(APPLIED_ASPECTS, OptionValue::Strings(Vec::new())).expect("a native option");
+        ConfigId::intern(&options)
+    }
+
+    /// The configuration naming `aspects` applied, after those this one
+    /// names, each once.
+    pub fn with_aspects(&self, aspects: &[AspectDescriptor]) -> ConfigId {
+        let mut applied = self.aspects.clone();
+        for aspect in aspects {
+            if !applied.contains(aspect) {
+                applied.push(aspect.clone());
+            }
+        }
+        self.applying(&applied)
+    }
+
+    /// This configuration, naming no aspects.
+    pub fn without_aspects(&self) -> ConfigId {
+        match self.aspects.is_empty() {
+            true => self.id,
+            false => self.applying(&[]),
+        }
+    }
+
+    fn applying(&self, aspects: &[AspectDescriptor]) -> ConfigId {
+        let applied = aspects.iter().map(AspectDescriptor::to_string).collect();
+        let mut options = self.options.clone();
+        options.set(APPLIED_ASPECTS, OptionValue::Strings(applied)).expect("a native option");
         ConfigId::intern(&options)
     }
 
@@ -251,7 +285,7 @@ fn transitioned_directory(mnemonic: &str, options: &BuildOptions, baseline: &Bui
 fn changed_settings(options: &BuildOptions, baseline: &BuildOptions, in_mnemonic: &str) -> Vec<String> {
     let mut changed = std::collections::BTreeMap::new();
     for option in NATIVE_OPTIONS {
-        if option.name == in_mnemonic || matches!(option.name, "compilation_mode" | TOOLCHAIN_EXEC_PLATFORM) {
+        if option.name == in_mnemonic || matches!(option.name, "compilation_mode" | TOOLCHAIN_EXEC_PLATFORM | APPLIED_ASPECTS) {
             continue;
         }
         let (Ok(value), Ok(base)) = (options.get(option.name), baseline.get(option.name)) else {
@@ -295,6 +329,78 @@ fn varint(mut n: usize) -> Vec<u8> {
 /// bb's own option for the execution platform a toolchain target is
 /// analyzed for.
 const TOOLCHAIN_EXEC_PLATFORM: &str = "toolchain execution platform";
+
+/// bb's own option for the aspects a key applies to its target.
+const APPLIED_ASPECTS: &str = "applied aspects";
+
+/// An aspect applied to targets: the `.bzl` file that exports it, its
+/// name, and the values of its parameters, as Bazel writes them:
+/// `//pkg:defs.bzl%name[param="value"]`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AspectDescriptor {
+    pub file: Label,
+    pub name: String,
+    /// Each parameter's name and value, as Starlark writes the value,
+    /// sorted by name.
+    pub params: Vec<(String, String)>,
+}
+
+impl AspectDescriptor {
+    /// Read a descriptor as `Display` writes it.
+    pub fn parse(text: &str) -> Option<AspectDescriptor> {
+        let (aspect, params) = match text.split_once('[') {
+            Some((aspect, params)) => (aspect, params.strip_suffix(']')?),
+            None => (text, ""),
+        };
+        let (file, name) = aspect.rsplit_once('%')?;
+        let mut parsed = Vec::new();
+        for param in split_params(params) {
+            let (name, value) = param.split_once('=')?;
+            parsed.push((name.to_string(), value.to_string()));
+        }
+        Some(AspectDescriptor {
+            file: Label::parse_canonical(file).ok()?,
+            name: name.to_string(),
+            params: parsed,
+        })
+    }
+}
+
+impl fmt::Display for AspectDescriptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}%{}", self.file, self.name)?;
+        if self.params.is_empty() {
+            return Ok(());
+        }
+        let params: Vec<String> = self.params.iter().map(|(name, value)| format!("{name}={value}")).collect();
+        write!(f, "[{}]", params.join(","))
+    }
+}
+
+/// Parameters as `Display` joins them, split at the commas outside quoted
+/// strings.
+fn split_params(params: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, c) in params.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                parts.push(&params[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < params.len() {
+        parts.push(&params[start..]);
+    }
+    parts
+}
 
 /// The platform tools run on when `--host_platform` doesn't say.
 static DEFAULT_HOST_PLATFORM: LazyLock<Label> = LazyLock::new(|| Label::parse_canonical("@@platforms//host:host").expect("a canonical label"));
@@ -361,6 +467,18 @@ mod tests {
         listed.set_flag(label, FlagValue::Strings(vec!["p".into(), "q".into()]), &FlagValue::Strings(vec!["a".into()]));
         listed.set_flag(Label::parse_canonical("//:b").unwrap(), FlagValue::Bool(true), &FlagValue::Bool(false));
         assert_eq!(ConfigId::intern(&listed).get().output_directory, format!("{}-fastbuild-ST-045eccb39967", host_cpu()));
+    }
+
+    #[test]
+    fn aspect_descriptors_read_back_as_they_are_written() {
+        let text = r#"//:defs.bzl%count[mode="a,b",n=3]"#;
+        let descriptor = AspectDescriptor::parse(text).unwrap();
+        assert_eq!(descriptor.params, [("mode".to_string(), r#""a,b""#.to_string()), ("n".to_string(), "3".to_string())]);
+        assert_eq!(descriptor.to_string(), text);
+        let applied = ConfigId::intern(&options()).get().with_aspects(&[descriptor.clone()]).get();
+        assert_eq!(applied.aspects, [descriptor]);
+        assert_eq!(applied.output_directory, format!("{}-fastbuild", host_cpu()));
+        assert_eq!(applied.for_dependencies(), ConfigId::intern(&options()));
     }
 
     #[test]

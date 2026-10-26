@@ -29,21 +29,20 @@ use starlark::values::{Heap, OwnedFrozenValue, Value, ValueLike};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The configurations the dependencies through each attribute with a
-/// transition are analyzed in, keyed as a split names them.
+/// The configurations the dependencies through attributes with
+/// transitions or aspects are analyzed in, keyed as a split names them.
 pub type AttrConfigs = Vec<(Symbol, Vec<(String, ConfigId)>)>;
 
-/// The configurations of the dependencies through an attribute: the
-/// execution platform's for tools, those its transition gives, or else the
-/// rule's own.
+/// The configurations of the dependencies through an attribute: those
+/// `attr_configs` gives it, for a transition or aspects, or else the
+/// execution platform's for tools, or the rule's own.
 pub fn dep_configs(cfg: Cfg, attr: Symbol, config: ConfigId, exec_config: ConfigId, attr_configs: &AttrConfigs) -> Vec<(String, ConfigId)> {
+    if let Some((_, configs)) = attr_configs.iter().find(|(name, _)| *name == attr) {
+        return configs.clone();
+    }
     match cfg {
         Cfg::Exec => vec![(String::new(), exec_config)],
-        Cfg::Transition => match attr_configs.iter().find(|(name, _)| *name == attr) {
-            Some((_, configs)) => configs.clone(),
-            None => vec![(String::new(), config)],
-        },
-        Cfg::Target => vec![(String::new(), config)],
+        Cfg::Target | Cfg::Transition => vec![(String::new(), config)],
     }
 }
 

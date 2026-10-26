@@ -49,6 +49,29 @@ pub struct Defaults {
 /// Gather what a rule implementation returned into its `Target`: a list
 /// of providers, one provider, or `None`.
 pub fn collect<'v>(label: Label, returned: Value<'v>, defaults: &Defaults, heap: Heap<'v>) -> anyhow::Result<TargetValue<'v>> {
+    let mut providers = returned_providers(label, returned)?;
+    let given = providers.get(DEFAULT_INFO).copied();
+    let default_info = default_info(label, given, defaults, heap)?;
+    providers.insert(DEFAULT_INFO.to_string(), default_info);
+    Ok(TargetValue {
+        label,
+        providers,
+        is_file: false,
+    })
+}
+
+/// Gather what an aspect implementation returned into the providers it
+/// adds to its target.
+pub fn collect_aspect<'v>(label: Label, returned: Value<'v>) -> anyhow::Result<TargetValue<'v>> {
+    Ok(TargetValue {
+        label,
+        providers: returned_providers(label, returned)?,
+        is_file: false,
+    })
+}
+
+/// The providers an implementation returned, by key.
+fn returned_providers<'v>(label: Label, returned: Value<'v>) -> anyhow::Result<SmallMap<String, Value<'v>>> {
     let items = if returned.is_none() {
         Vec::new()
     } else if ProviderInstance::from_value(returned).is_some() || native_provider_key(returned).is_some() {
@@ -74,14 +97,7 @@ pub fn collect<'v>(label: Label, returned: Value<'v>, defaults: &Defaults, heap:
             anyhow::bail!("{label}: the rule returned more than one {key}");
         }
     }
-    let given = providers.get(DEFAULT_INFO).copied();
-    let default_info = default_info(label, given, defaults, heap)?;
-    providers.insert(DEFAULT_INFO.to_string(), default_info);
-    Ok(TargetValue {
-        label,
-        providers,
-        is_file: false,
-    })
+    Ok(providers)
 }
 
 /// The provider an instance of a natively implemented provider, such as a

@@ -1,6 +1,7 @@
 //! Bazel's dialect of Starlark: the values and builtins BUILD and `.bzl`
 //! files use while packages are loaded.
 
+pub mod aspect;
 pub mod attr_module;
 pub mod build_api;
 pub mod bzl_api;
@@ -202,6 +203,7 @@ fn bzl_globals_builder() -> GlobalsBuilder {
         .with(rule_value::rule_function)
         .with(subrule::subrule_function)
         .with(transition::transition_function)
+        .with(aspect::aspect_function)
         .with(provider::provider_function)
         .with(bzl_api::bzl_functions)
         .with(bzl_api::macro_function)

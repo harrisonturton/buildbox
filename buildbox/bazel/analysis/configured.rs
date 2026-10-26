@@ -123,7 +123,8 @@ impl Key for ConfiguredTargetKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<ConfiguredTarget, SkyError> {
         let configured = configure(ctx, *self).await;
-        if let Ok(progress) = ctx.global::<Progress>() {
+        let is_aspect = !self.config.get().aspects.is_empty();
+        if let (false, Ok(progress)) = (is_aspect, ctx.global::<Progress>()) {
             progress.target_configured();
         }
         configured
@@ -139,6 +140,9 @@ async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarg
     let Some(target) = package.0.target(key.label.name) else {
         return Err(SkyError::new(no_such_target(ctx, key.label, &package.0).await));
     };
+    if !key.config.get().aspects.is_empty() {
+        return crate::aspect::analyze(ctx, key, &package.0, target).await;
+    }
     match target {
         Target::Rule(rule) => match analyze_rule(ctx, key, &package.0, rule).await {
             Err(error) if error.origin().is_none() => Err(analysis_failed(ctx, key, error).await),
@@ -160,7 +164,7 @@ async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarg
 
 /// A rule's error as Bazel reports it: then that the target's analysis
 /// failed, at the rule, with the target as the error's origin.
-async fn analysis_failed(ctx: &Ctx, key: ConfiguredTargetKey, error: SkyError) -> SkyError {
+pub(crate) async fn analysis_failed(ctx: &Ctx, key: ConfiguredTargetKey, error: SkyError) -> SkyError {
     let failed = format!("Analysis of target '{}' (config: {}) failed", key.label, key.config.get().checksum);
     let failed = match bazel_loading::target_location(ctx, key.label).await {
         Some(location) => format!("{location}: {failed}"),
@@ -223,12 +227,52 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         return alias(ctx, key, rule).await;
     }
     let class = bazel_loading::rule_class(ctx, &class_ref).await?;
+    let is_test = class.test;
+    let setup = match setup(ctx, key, rule, &class_ref, class).await? {
+        Setup::Ready(setup) => setup,
+        Setup::Incompatible(reason) => return incompatible(ctx, key, class_ref.kind, is_test, reason),
+    };
+    let deps = match is_stub(&setup.implementation) {
+        true => BTreeMap::new(),
+        false => analyze_deps(ctx, label, &setup.class, &setup.attrs, setup.deps_config, setup.exec_config, &setup.attr_configs).await?,
+    };
+    if let Some(reason) = incompatible_dep(key, &deps) {
+        return incompatible(ctx, key, class_ref.kind, is_test, reason);
+    }
+    let fingerprint = fingerprint(key, rule, &setup.implementation, &deps, &setup.toolchains);
+    let input = rule_input(ctx, key, package, setup, deps).await?;
+    let analyzed = evaluate_reporting(ctx, label, input, heap_name("target", key, fingerprint)).await?;
+    Ok(configured(ctx, key, class_ref.kind, is_test, analyzed, fingerprint))
+}
+
+/// What a rule's analysis needs before its dependencies are analyzed.
+pub(crate) struct RuleSetup {
+    pub class: Arc<RuleClass>,
+    pub attrs: Vec<(Symbol, AttrValue)>,
+    pub implementation: Implementation,
+    pub deps_config: ConfigId,
+    pub attr_configs: AttrConfigs,
+    pub toolchains: ResolvedToolchains,
+    pub exec_config: ConfigId,
+}
+
+/// A rule set up for analysis, or why it can't be built for the target
+/// platform.
+pub(crate) enum Setup {
+    Ready(RuleSetup),
+    Incompatible(Incompatibility),
+}
+
+/// Set up a rule's analysis: resolve its attributes, check it's
+/// compatible with the target platform, find its implementation, the
+/// configurations of its dependencies and its toolchains.
+pub(crate) async fn setup(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule, class_ref: &RuleClassRef, class: Arc<RuleClass>) -> Result<Setup, SkyError> {
+    let label = key.label;
     let attrs = resolve_attrs(ctx, rule, &class, key.config).await?;
     if let Some(constraint) = unsatisfied_constraint(ctx, &attrs, key.config).await? {
-        let reason = Incompatibility { chain: vec![key], constraint };
-        return incompatible(ctx, key, class_ref.kind, class.test, reason);
+        return Ok(Setup::Incompatible(Incompatibility { chain: vec![key], constraint }));
     }
-    let implementation = implementation(ctx, &class_ref)
+    let implementation = implementation(ctx, class_ref)
         .await
         .map_err(|error| format!("in {} rule {label}: {}", class_ref.kind, error.message()));
     let implementation = match implementation {
@@ -248,50 +292,61 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     };
     let exec_platform = toolchains.exec_platform.unwrap_or(config.host_platform);
     let exec_config = exec_config(ctx, &class, deps_config, exec_platform).await?;
-    let deps = match is_stub(&implementation) {
-        true => BTreeMap::new(),
-        false => analyze_deps(ctx, label, &class, &attrs, deps_config, exec_config, &attr_configs).await?,
-    };
-    if let Some(reason) = incompatible_dep(key, &deps) {
-        return incompatible(ctx, key, class_ref.kind, class.test, reason);
-    }
+    let attr_configs = crate::aspect::with_attached_aspects(ctx, &class, &attrs, deps_config, exec_config, attr_configs).await?;
+    Ok(Setup::Ready(RuleSetup {
+        class,
+        attrs,
+        implementation,
+        deps_config,
+        attr_configs,
+        toolchains,
+        exec_config,
+    }))
+}
+
+/// Everything a rule's implementation is run with, from its setup and its
+/// analyzed dependencies.
+pub(crate) async fn rule_input(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, setup: RuleSetup, deps: BTreeMap<(Label, ConfigId), Dep>) -> Result<RuleInput, SkyError> {
+    let config = key.config.get();
     let platform = ctx.compute(&PlatformKey(config.platform)).await?;
-    let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
-    let mappings = match &implementation {
+    let mapping = ctx.compute(&RepoMappingKey(key.label.repo())).await?;
+    let mappings = match &setup.implementation {
         Implementation::Starlark { module, .. } => bazel_loading::mappings(ctx, &module.repos).await?,
         Implementation::Builtin { .. } | Implementation::Native(_) => Default::default(),
     };
-    let fingerprint = fingerprint(key, rule, &implementation, &deps, &toolchains);
-
-    let input = RuleInput {
-        label,
+    Ok(RuleInput {
+        label: key.label,
         config,
-        class: class.clone(),
-        attrs,
-        attr_configs,
-        deps_config,
-        exec_config,
+        class: setup.class,
+        attrs: setup.attrs,
+        attr_configs: setup.attr_configs,
+        deps_config: setup.deps_config,
+        exec_config: setup.exec_config,
         deps,
         build_file: package.build_file,
-        implementation,
+        implementation: setup.implementation,
         mapping: Arc::new(mapping.0.clone()),
         mappings,
         target_constraints: platform.values(),
         target_cpu: platform.cpu(),
-        toolchains,
-    };
-    let name = heap_name("target", key, fingerprint);
+        aspect: None,
+        toolchains: setup.toolchains,
+    })
+}
+
+/// Run an implementation, reporting what it printed, with its errors at
+/// the target.
+pub(crate) async fn evaluate_reporting(ctx: &Ctx, label: Label, input: RuleInput, name: FrozenHeapName) -> Result<Analyzed, SkyError> {
     let (analyzed, printed) = bazel_loading::blocking(move || evaluate(input, name)).await?;
     bazel_loading::report_printed(ctx, &printed).await;
-    let analyzed = match analyzed {
-        Ok(analyzed) => analyzed,
-        Err(message) => return Err(located(ctx, label, message).await),
-    };
-    Ok(configured(ctx, key, class_ref.kind, class.test, analyzed, fingerprint))
+    match analyzed {
+        Ok(analyzed) => Ok(analyzed),
+        Err(message) => Err(located(ctx, label, message).await),
+    }
 }
 
 /// The labels a label list attribute has, such as `exec_compatible_with`.
-fn attr_labels(attrs: &[(Symbol, AttrValue)], name: &str) -> Vec<Label> {
+pub(crate) fn attr_labels(attrs: &[(Symbol, AttrValue)], name: &str) -> Vec<Label> {
     let name = Symbol::intern(name);
     match attrs.iter().find(|(attr, _)| *attr == name) {
         Some((_, AttrValue::LabelList(labels))) => labels.clone(),
@@ -301,7 +356,7 @@ fn attr_labels(attrs: &[(Symbol, AttrValue)], name: &str) -> Vec<Label> {
 
 /// The configuration of a rule's tools, which run on `platform`: its exec
 /// configuration, if it has attributes for tools.
-async fn exec_config(ctx: &Ctx, class: &RuleClass, config: ConfigId, platform: Label) -> Result<ConfigId, SkyError> {
+pub(crate) async fn exec_config(ctx: &Ctx, class: &RuleClass, config: ConfigId, platform: Label) -> Result<ConfigId, SkyError> {
     if !class.attrs.iter().any(|schema| schema.cfg == Cfg::Exec) {
         return Ok(config);
     }
@@ -311,7 +366,7 @@ async fn exec_config(ctx: &Ctx, class: &RuleClass, config: ConfigId, platform: L
 
 /// An error in analyzing a rule, at where the rule was declared, as Bazel
 /// reports it.
-async fn located(ctx: &Ctx, label: Label, message: String) -> SkyError {
+pub(crate) async fn located(ctx: &Ctx, label: Label, message: String) -> SkyError {
     match bazel_loading::target_location(ctx, label).await {
         Some(location) => SkyError::new(format!("{location}: {message}")),
         None => SkyError::new(message),
@@ -339,6 +394,7 @@ async fn unsatisfied_constraint(ctx: &Ctx, attrs: &[(Symbol, AttrValue)], config
 fn incompatible_dep(key: ConfiguredTargetKey, deps: &BTreeMap<(Label, ConfigId), Dep>) -> Option<Incompatibility> {
     let reason = deps.values().find_map(|dep| match dep {
         Dep::Target(target) => target.incompatible.clone(),
+        Dep::Aspect(applied) => applied.first().and_then(|target| target.incompatible.clone()),
         Dep::File(..) => None,
     })?;
     let mut chain = vec![key];
@@ -356,7 +412,7 @@ fn is_stub(implementation: &Implementation) -> bool {
 }
 
 /// Analyze every dependency the rule's attributes name.
-async fn analyze_deps(
+pub(crate) async fn analyze_deps(
     ctx: &Ctx,
     referrer: Label,
     class: &RuleClass,
@@ -430,8 +486,22 @@ fn labels_of_unknown_repos(value: &AttrValue) -> Vec<Label> {
     labels
 }
 
-/// One dependency: a file, or an analyzed rule.
+/// One dependency: a file, or an analyzed rule, with the aspects its
+/// configuration names applied.
 async fn dep(ctx: &Ctx, label: Label, config: ConfigId) -> Result<Dep, DepError> {
+    let aspects = config.get().aspects.clone();
+    if aspects.is_empty() {
+        return plain_dep(ctx, label, config).await;
+    }
+    let plain = plain_dep(ctx, label, config.get().without_aspects()).await?;
+    let Dep::Target(target) = plain else {
+        return Ok(plain);
+    };
+    crate::aspect::applied(ctx, target, &aspects).await.map_err(DepError::Failed)
+}
+
+/// One dependency, without aspects.
+async fn plain_dep(ctx: &Ctx, label: Label, config: ConfigId) -> Result<Dep, DepError> {
     let package = match ctx.compute(&PackageKey(label.package)).await {
         Ok(package) => package,
         Err(error) => return Err(DepError::Missing(error.message().to_string())),
@@ -499,7 +569,7 @@ async fn implementation(ctx: &Ctx, class: &RuleClassRef) -> Result<Implementatio
 }
 
 /// Identifies what a rule's analysis depends on.
-fn fingerprint(
+pub(crate) fn fingerprint(
     key: ConfiguredTargetKey,
     rule: &Rule,
     implementation: &Implementation,
@@ -527,7 +597,7 @@ fn fingerprint(
 }
 
 /// An alias is its actual target, under its own label.
-async fn alias(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule) -> Result<ConfiguredTarget, SkyError> {
+pub(crate) async fn alias(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule) -> Result<ConfiguredTarget, SkyError> {
     let actual = rule.attr(Symbol::intern("actual")).cloned().unwrap_or(AttrValue::None);
     let AttrValue::Label(actual) = crate::attrs::resolve_value(ctx, &actual, key.config).await? else {
         return Err(SkyError::new(format!("{}: alias has no 'actual'", key.label)));
@@ -559,9 +629,9 @@ pub struct Analyzed {
 }
 
 /// The name the target value is kept under in its frozen module.
-const TARGET: &str = "target";
+pub(crate) const TARGET: &str = "target";
 
-fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool, analyzed: Analyzed, fingerprint: Fingerprint) -> ConfiguredTarget {
+pub(crate) fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool, analyzed: Analyzed, fingerprint: Fingerprint) -> ConfiguredTarget {
     let mut generating: Vec<(PathId, u32)> = Vec::new();
     for (index, action) in analyzed.actions.iter().enumerate() {
         generating.extend(action.outputs.iter().map(|output| (output.exec_path, index as u32)));
@@ -601,7 +671,7 @@ fn incompatible(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_test: bool
 
 /// Run the rule's implementation, on a blocking thread, returning what
 /// it printed too.
-fn evaluate(input: RuleInput, name: FrozenHeapName) -> (Result<Analyzed, String>, Vec<Printed>) {
+pub(crate) fn evaluate(input: RuleInput, name: FrozenHeapName) -> (Result<Analyzed, String>, Vec<Printed>) {
     let mut printed = Vec::new();
     let analyzed = Module::with_temp_heap(|module| {
         module.frozen_heap().add_reference(bazel_starlark::provider::builtin_providers_heap());
@@ -685,13 +755,13 @@ async fn package_group(ctx: &Ctx, key: ConfiguredTargetKey, group: &bazel_packag
 /// by name when they're paged, so the name has the configuration, which
 /// targets in different configurations may otherwise share, such as a
 /// source file's.
-fn heap_name(what: &str, key: ConfiguredTargetKey, fingerprint: Fingerprint) -> starlark::values::FrozenHeapName {
+pub(crate) fn heap_name(what: &str, key: ConfiguredTargetKey, fingerprint: Fingerprint) -> starlark::values::FrozenHeapName {
     let target = format!("{} {}", key.label, key.config.get().output_directory);
     bazel_starlark::heap_name(what, target, fingerprint)
 }
 
 /// A configured target with only an empty `DefaultInfo`.
-fn empty_target(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, is_test: bool, fingerprint: Fingerprint) -> Result<ConfiguredTarget, SkyError> {
+pub(crate) fn empty_target(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, is_test: bool, fingerprint: Fingerprint) -> Result<ConfiguredTarget, SkyError> {
     let analyzed = Module::with_temp_heap(|module| -> anyhow::Result<Analyzed> {
         module.frozen_heap().add_reference(bazel_starlark::provider::builtin_providers_heap());
         let defaults = providers::Defaults {

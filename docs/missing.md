@@ -35,13 +35,29 @@ the exec configuration being right.
 
 ## 2. Aspects
 
-`aspect()` returns an opaque value and `ctx.aspect_ids` is always empty.
-There is no propagation along attributes, no `--aspects`, no
-`required_providers`, and no aspects on aspects.
+Starlark aspects work as Bazel's do for the common cases:
 
-This blocks protobuf's language rules (`cc_proto_library` and its siblings
-are built on aspects), rules_rust's clippy, rustfmt and rust-analyzer
-support, rules_lint, IDE plugins and `compile_commands.json` generators.
+- attached with `attr.label(aspects = [...])`, taking parameters from the
+  rule's attributes of the same names and types;
+- propagated along `attr_aspects`, including `*`;
+- applied only to rules whose `provides` satisfy `required_providers`;
+- with private and exec attributes, and toolchains;
+- with `ctx.rule` and `ctx.aspect_ids`, and their providers merged into the
+  dependent's view of the target, output groups included;
+- applied at the top level with `--aspects` and `--aspects_parameters`,
+  built with `--output_groups` and reported as Bazel reports them.
+
+Still missing:
+
+- `requires` and `required_aspect_providers` (aspects that see other
+  aspects' providers);
+- `apply_to_generating_rules`, `propagation_predicate`, `exec_groups` and
+  `toolchains_aspects`;
+- Bazel's native aspects;
+- aspects in `cquery` and `aquery`.
+
+An error in an aspect's implementation is worded as a rule's would be,
+not as Bazel words an aspect's.
 
 ## 3. Execution platforms and exec groups
 
@@ -109,6 +125,11 @@ There's no Build Event Protocol (`--bes_backend`,
 `--build_event_json_file`), no execution log and no `--profile` JSON trace.
 CI integrations and remote build services depend on these.
 
+The counts of packages loaded and targets configured that analysis reports
+differ from Bazel's, which counts more targets and fewer packages: on a
+small workspace, Bazel reports 5 packages and 13 targets where bb reports
+69 and 4. Aspect applications are counted as Bazel counts them.
+
 ## 9. Bzlmod and fetching
 
 - **Lockfile:** `MODULE.bazel.lock` is neither read nor written;
@@ -139,7 +160,7 @@ Bazel rejects.
 ## Suggested order
 
 1. cquery, now that configurations are Bazel's.
-2. Aspects, which much of the remaining ecosystem depends on.
+2. Aspects that require other aspects, which protobuf's language rules use.
 
 ## Not yet audited
 
