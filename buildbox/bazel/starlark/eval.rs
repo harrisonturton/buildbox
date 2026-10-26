@@ -6,7 +6,7 @@ use crate::dialect;
 use starlark::values::FrozenHeapName;
 use starlark::environment::Globals;
 use bazel_label::Label;
-use bazel_packages::{Package, PackageError};
+use bazel_packages::{Package, PackageError, SourcePosition};
 use crate::reported;
 use starlark::environment::{FrozenModule, Module};
 use starlark::eval::{Evaluator, FileLoader};
@@ -92,6 +92,21 @@ pub fn loads(ast: &AstModule) -> Vec<String> {
     ast.loads().into_iter().map(|load| load.module_id.to_string()).collect()
 }
 
+/// Where each module a file's `load` statements name is named: where its
+/// string starts, as Bazel places errors loading it.
+pub fn load_positions(ast: &AstModule) -> Vec<SourcePosition> {
+    let mut positions = Vec::new();
+    for load in ast.loads() {
+        let mut position = reported::start_position(&load.span);
+        let source = load.span.source_span();
+        if let Some(offset) = source.find(['"', '\'']) {
+            position.column += source[..offset].chars().count() as u32;
+        }
+        positions.push(position);
+    }
+    positions
+}
+
 /// Gives evaluation the modules a file loads, by the strings its `load`
 /// statements use.
 pub struct Loads<'a> {
@@ -121,10 +136,11 @@ pub fn eval_bzl(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: E
     let module = Module::with_temp_heap(|module| {
         module.frozen_heap().add_reference(crate::provider::builtin_providers_heap());
         {
+            let candidates = names_in_scope(&ast, globals);
             let mut eval = Evaluator::new(&module);
             eval.extra = Some(&context);
             eval.set_loader(loads);
-            eval.eval_module(ast, globals).map_err(EvalError::new)?;
+            eval.eval_module(ast, globals).map_err(|error| EvalError::with_candidates(error, &candidates))?;
         }
         module.freeze_named(name).map_err(|error| EvalError::new(format!("{error:?}")))
     });

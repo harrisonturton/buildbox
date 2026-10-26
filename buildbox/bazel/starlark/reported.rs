@@ -10,6 +10,9 @@ use starlark::ErrorKind;
 /// an undefined name is checked against for a spelling suggestion.
 pub fn package_error(error: &starlark::Error, candidates: &[String]) -> PackageError {
     let raw = error.without_diagnostic().to_string();
+    if let Some(error) = missing_symbol(error, &raw) {
+        return error;
+    }
     let message = bazel_wording(&raw, candidates);
     if matches!(error.kind(), ErrorKind::Parser(_) | ErrorKind::Scope(_)) {
         return match error.span() {
@@ -18,6 +21,28 @@ pub fn package_error(error: &starlark::Error, candidates: &[String]) -> PackageE
         };
     }
     traceback(error, &raw, message)
+}
+
+/// A `load` of a symbol its module doesn't have, as Bazel reports it: at
+/// the symbol's name, inside its string, naming the module as the `load`
+/// does, with a suggestion if Bazel would make one.
+fn missing_symbol(error: &starlark::Error, raw: &str) -> Option<PackageError> {
+    let rest = raw.trim().strip_prefix("Module has no symbol `")?;
+    let (symbol, rest) = rest.split_once('`')?;
+    let span = error.span()?;
+    let line = span.file.source_line(span.resolve_span().begin.line);
+    let module = line.split_once("load(")?.1.trim_start();
+    let quote = module.chars().next().filter(|quote| *quote == '"' || *quote == '\'')?;
+    let module = module[1..].split_once(quote)?.0;
+    let suggested: Vec<String> = rest.split_once("did you mean `").and_then(|(_, rest)| rest.split_once('`')).map(|(name, _)| name.to_string()).into_iter().collect();
+    let mut position = start_position(span);
+    position.column += 1;
+    let message = format!("file '{module}' does not contain symbol '{symbol}'{}", did_you_mean(symbol, &suggested));
+    Some(PackageError {
+        position: None,
+        traceback: vec![frame(position, "<toplevel>", span)],
+        message: format!("Error: {message}"),
+    })
 }
 
 /// A failed evaluation's traceback. Each call starlark-rust records names

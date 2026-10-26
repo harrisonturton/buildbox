@@ -4,10 +4,12 @@
 use crate::RepoRootKey;
 use bazel_fs::RootedPath;
 use bazel_label::Label;
+use bazel_packages::PackageError;
 use bazel_progress::{Event, Progress};
 use bazel_starlark::print::Printed;
 use intern::PathId;
 use skyframe::Ctx;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Show what was printed to the user, at each file's path on disk.
@@ -37,4 +39,19 @@ pub async fn source_path(ctx: &Ctx, label: Label) -> Option<PathBuf> {
     let root = ctx.compute(&RepoRootKey(label.repo())).await.ok()?;
     let name = PathId::parse(label.name.as_str()).ok()?;
     RootedPath::new(root.0, label.package.path.join_path(name)).resolve(ctx).ok()
+}
+
+/// The paths of the source files an error names, by their labels, as
+/// messages name them.
+pub async fn error_paths(ctx: &Ctx, error: &PackageError) -> HashMap<String, String> {
+    let mut paths = HashMap::new();
+    for file in error.files() {
+        let Ok(label) = Label::parse_canonical(file) else {
+            continue;
+        };
+        if let Some(path) = source_path(ctx, label).await {
+            paths.insert(file.to_string(), path.display().to_string());
+        }
+    }
+    paths
 }

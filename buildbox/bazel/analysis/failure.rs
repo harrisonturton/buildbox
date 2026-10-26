@@ -1,9 +1,7 @@
 //! How a rule's or an aspect's implementation failed, as Bazel reports it.
 
-use bazel_label::Label;
 use bazel_packages::PackageError;
 use skyframe::Ctx;
-use std::collections::HashMap;
 
 /// An implementation that failed, or returned what isn't providers: what
 /// Bazel reports after `in <kind> rule <label>: `.
@@ -46,7 +44,7 @@ impl ImplementationFailed {
     /// The error as Bazel reports it after `in <target>: `, with files
     /// named by their paths.
     pub async fn describe(&self, ctx: &Ctx) -> String {
-        let paths = paths(ctx, &self.error).await;
+        let paths = bazel_loading::error_paths(ctx, &self.error).await;
         let described = self.error.describe(&|file| paths.get(file).cloned().unwrap_or_else(|| file.to_string()));
         match self.own_line {
             true => format!("\n{described}"),
@@ -59,17 +57,3 @@ impl ImplementationFailed {
 #[derive(Debug, thiserror::Error)]
 #[error("Provider {0} provided twice")]
 pub struct ProvidersClash(pub String);
-
-/// The paths of the source files `error` names, by their labels.
-async fn paths(ctx: &Ctx, error: &PackageError) -> HashMap<String, String> {
-    let mut paths = HashMap::new();
-    for file in error.files() {
-        let Ok(label) = Label::parse_canonical(file) else {
-            continue;
-        };
-        if let Some(path) = bazel_loading::source_path(ctx, label).await {
-            paths.insert(file.to_string(), path.display().to_string());
-        }
-    }
-    paths
-}

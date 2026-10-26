@@ -13,10 +13,10 @@ mod recursive;
 mod rule_class;
 
 pub use builtins::{BUILTINS_REPO, Builtins, BuiltinsDir, BuiltinsKey, builtins_mapping};
-pub use bzl::{BzlLoadKey, BzlModule, mappings};
+pub use bzl::{BzlLoadKey, BzlModule, mappings, reworded, split_reported};
 
 pub use package::{LoadedPackage, PackageKey, PackageLookup, PackageLookupKey, build_file_path, display as display_package, no_such_target, target_location};
-pub use printed::{read_source, report_printed, source_path};
+pub use printed::{error_paths, read_source, report_printed, source_path};
 pub use recursive::{PackagesUnderDirectory, PackagesUnderDirectoryKey, packages_beneath};
 pub use rule_class::{RuleClassKey, RuleClassValue, rule_class};
 

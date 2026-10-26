@@ -102,7 +102,8 @@ async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyErro
         Ok(ast) => ast,
         Err(errors) => return Ok(LoadedPackage(failed_package(id, build_file, errors))),
     };
-    let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), &mapping.0).await?;
+    let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), None, &mapping.0).await;
+    let loaded = loaded.map_err(|error| crate::reworded(&error, |why| format!("error loading package '{}': {why}", display(id))))?;
     let repos = transitive_repos(id.repo, loaded.iter().map(|(_, module)| &**module));
     let mappings = mappings(ctx, &repos).await?;
     let load_labels = loaded.iter().map(|(_, module)| module.label).collect();

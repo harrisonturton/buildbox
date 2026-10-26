@@ -112,6 +112,9 @@ pub struct Built {
     /// Whether the build's only errors were top-level targets, or aspects
     /// applied to them, that failed to analyze, as `--keep_going` allows.
     pub analysis_incomplete: bool,
+    /// Whether the build's only errors, but those of analysis, were target
+    /// patterns `--keep_going` went past.
+    pub patterns_failed: bool,
 }
 
 /// An aspect applied to a top-level target, and the files it built.
@@ -137,7 +140,9 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
         Err(code) => return failed(code, started, out).await,
     };
     report(context, &options, &built, out).await;
-    if built.analysis_incomplete {
+    if built.patterns_failed {
+        out.error("command succeeded, but there were errors parsing the target pattern").await;
+    } else if built.analysis_incomplete {
         out.error("command succeeded, but not all targets were analyzed").await;
     }
     report_stats(started, out).await;
@@ -281,7 +286,7 @@ async fn analyze_and_build(
     };
     let keep_going = options.flag("keep_going", false);
     out.phase(Phase::Loading).await;
-    let (labels, explicit) = match targets(context, session, options, &main_mapping, out).await {
+    let Requested { labels, explicit, patterns_failed } = match targets(context, session, options, &main_mapping, out).await {
         Ok(requested) => requested,
         Err(code) => return Err(code),
     };
@@ -324,7 +329,9 @@ async fn analyze_and_build(
     if !execute_actions {
         report_skipped(&skipped, keep_going, analyzed.len(), labels.len(), "Analysis", out).await;
     }
-    out.info(&bazel_ui::analyzed(&what, &out.snapshot().await)).await;
+    if summarizes_analysis(execute_actions, &labels) {
+        out.info(&bazel_ui::analyzed(&what, &out.snapshot().await)).await;
+    }
     let found = found(&analyzed, testing);
     let analysis_failed = !failed.is_empty() || !failed_aspects.is_empty();
     out.phase(Phase::Executing).await;
@@ -390,8 +397,9 @@ async fn analyze_and_build(
         skipped,
         found,
         exec_root,
-        errors: errors || analysis_failed,
-        analysis_incomplete: analysis_failed && !errors,
+        errors: errors || analysis_failed || patterns_failed,
+        analysis_incomplete: analysis_failed && !errors && !patterns_failed,
+        patterns_failed: patterns_failed && !errors,
     })
 }
 
@@ -513,11 +521,7 @@ impl FailedAspect {
     /// Its errors, as Bazel reports them: those reported as they happen,
     /// and the last, which Bazel gives as why the build was aborted.
     fn split(&self) -> (&str, &str) {
-        let message = self.error.message();
-        match message.rsplit_once("\nERROR: ") {
-            Some((reported, last)) => (reported, last),
-            None => ("", message),
-        }
+        bazel_loading::split_reported(self.error.message())
     }
 }
 
@@ -606,6 +610,13 @@ fn analyzing(labels: &[Label], mapping: &RepoMappingTable) -> String {
         [label] => format!("target {}", bazel_query::display_label(*label, mapping)),
         _ => format!("{} targets", bazel_ui::format_count(labels.len() as u64)),
     }
+}
+
+/// Whether Bazel summarizes analysis: unless analysis and execution run
+/// together, as they do when actions run, when analysis ends once the last
+/// top-level target is analyzed, so never if there are none.
+fn summarizes_analysis(execute_actions: bool, labels: &[Label]) -> bool {
+    !execute_actions || !labels.is_empty()
 }
 
 /// How many targets were analyzed, and of them how many are tests, as
@@ -764,12 +775,13 @@ fn plural(count: usize, word: &str) -> String {
 }
 
 /// Report a target pattern that couldn't be resolved, as Bazel does: the
-/// errors of the packages it loaded and those resolving found, then the
-/// pattern's.
+/// errors of the packages it loaded and those resolving found, then why
+/// the pattern failed.
 async fn pattern_failed(universe: &Universe<&Session>, pattern: &str, message: &str, out: &Output) -> i32 {
     for error in universe.errors().await {
         out.error(&error).await;
     }
+    let (_, message) = bazel_loading::split_reported(message);
     out.warning("Target pattern parsing failed.").await;
     out.error(&format!("Skipping '{pattern}': {message}")).await;
     out.error(message).await;
@@ -785,8 +797,10 @@ async fn targets(
     options: &ParsedOptions,
     main_mapping: &Arc<RepoMappingTable>,
     out: &Output,
-) -> Result<(Vec<Label>, BTreeSet<Label>), i32> {
+) -> Result<Requested, i32> {
     let package = working_package(&context.workspace_root, &context.working_directory);
+    let keep_going = options.flag("keep_going", false);
+    let mut skipped = Vec::new();
     let query_options = QueryOptions {
         implicit_deps: true,
         tool_deps: true,
@@ -801,13 +815,15 @@ async fn targets(
             Some(text) => (true, text),
             None => (false, pattern.as_str()),
         };
-        let mut labels = match universe.resolve(text).await {
-            Ok(labels) => labels,
-            Err(error) => return Err(pattern_failed(&universe, pattern, &error.0, out).await),
+        let resolved = universe.resolve(text).await.map_err(|error| error.0);
+        let mut labels = match (resolved, universe.pattern_failure()) {
+            (Ok(labels), None) => labels,
+            (Err(message), _) | (Ok(_), Some(message)) if keep_going => {
+                skipped.push((pattern.clone(), message));
+                continue;
+            }
+            (Err(message), _) | (Ok(_), Some(message)) => return Err(pattern_failed(&universe, pattern, &message, out).await),
         };
-        if let Some(message) = universe.pattern_failure() {
-            return Err(pattern_failed(&universe, pattern, &message, out).await);
-        }
         let wildcard = is_wildcard(text, package, main_mapping);
         if wildcard {
             labels = buildable_by_wildcard(&universe, labels).await;
@@ -828,8 +844,37 @@ async fn targets(
         out.error("No targets specified").await;
         return Err(exit::BUILD_FAILURE);
     }
+    if !skipped.is_empty() {
+        patterns_skipped(&universe, &skipped, out).await;
+    }
     let labels = included.into_iter().filter(|label| !excluded.contains(label)).collect();
-    Ok((labels, explicit))
+    Ok(Requested {
+        labels,
+        explicit,
+        patterns_failed: !skipped.is_empty(),
+    })
+}
+
+/// The targets the command line's patterns name.
+struct Requested {
+    labels: Vec<Label>,
+    /// Those named other than by a wildcard.
+    explicit: BTreeSet<Label>,
+    /// Whether `--keep_going` went past patterns that couldn't be resolved.
+    patterns_failed: bool,
+}
+
+/// Report the target patterns `--keep_going` went past, as Bazel does: the
+/// errors that led to each, then that it's skipped.
+async fn patterns_skipped(universe: &Universe<&Session>, skipped: &[(String, String)], out: &Output) {
+    for error in universe.errors().await {
+        out.error(&error).await;
+    }
+    out.warning("Target pattern parsing failed.").await;
+    for (pattern, message) in skipped {
+        let (_, message) = bazel_loading::split_reported(message);
+        out.error(&format!("Skipping '{pattern}': {message}")).await;
+    }
 }
 
 fn is_wildcard(text: &str, package: bazel_label::PackageId, mapping: &RepoMappingTable) -> bool {

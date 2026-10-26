@@ -4,6 +4,7 @@ use crate::package::{PackageLookup, PackageLookupKey};
 use crate::{RepoMappingKey, RepoRootKey, blocking};
 use bazel_fs::RootedPath;
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName};
+use bazel_packages::{PackageError, SourcePosition};
 use bazel_starlark::{EvalContext, FileKind, Loads};
 use skycodec::{Decode, Encode, Fingerprint, Fingerprinter};
 use skyframe::{Ctx, Key, SkyError, Storage, Value};
@@ -58,8 +59,12 @@ impl Key for BzlLoadKey {
         let label = self.0;
         let source = read_bzl(ctx, label).await?;
         let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
-        let ast = bazel_starlark::parse(label, source.clone()).map_err(|error| SkyError::new(error.message))?;
-        let loaded = load_all(ctx, label, &bazel_starlark::loads(&ast), &mapping.0).await?;
+        let ast = match bazel_starlark::parse_reporting_all(label, source.clone()) {
+            Ok(ast) => ast,
+            Err(errors) => return Err(failed_module(ctx, label, &errors, "compilation").await),
+        };
+        let positions = bazel_starlark::load_positions(&ast);
+        let loaded = load_all(ctx, label, &bazel_starlark::loads(&ast), Some(&positions), &mapping.0).await?;
         let repos = transitive_repos(label.repo(), loaded.iter().map(|(_, module)| &**module));
         let mappings = mappings(ctx, &repos).await?;
         let builtins = ctx.compute(&crate::BuiltinsKey).await?;
@@ -77,7 +82,13 @@ impl Key for BzlLoadKey {
         .await?;
         let (module, printed) = module;
         crate::report_printed(ctx, &printed).await;
-        let module = module.map_err(|error| SkyError::new(error.message))?;
+        let module = match module {
+            Ok(module) => module,
+            Err(error) => {
+                let phase = if error.reported.position.is_some() { "compilation" } else { "initialization" };
+                return Err(failed_module(ctx, label, &[error.reported], phase).await);
+            }
+        };
         Ok(BzlModule {
             label,
             module,
@@ -85,6 +96,47 @@ impl Key for BzlLoadKey {
             repos,
             loads: load_labels,
         })
+    }
+}
+
+/// The error of a module that failed to compile or initialize, `phase`, as
+/// Bazel reports it: the errors it failed with, as they were reported, then
+/// that it failed, which a module or package loading it gives as why.
+async fn failed_module(ctx: &Ctx, label: Label, errors: &[PackageError], phase: &str) -> SkyError {
+    let mut reported = Vec::with_capacity(errors.len() + 1);
+    for error in errors {
+        let paths = crate::error_paths(ctx, error).await;
+        reported.push(error.report(&|file| paths.get(file).cloned().unwrap_or_else(|| file.to_string())));
+    }
+    let path = label.package.path.join_path(intern::PathId::parse(label.name.as_str()).unwrap_or(intern::PathId::ROOT));
+    reported.push(format!("{phase} of module '{path}' failed"));
+    SkyError::new(reported.join(REPORTED_SEPARATOR))
+}
+
+/// What separates the errors an error's message holds, which are reported
+/// each as its own error: those reported as they happened, then the last,
+/// which they led to.
+const REPORTED_SEPARATOR: &str = "\nERROR: ";
+
+/// A message's errors reported as they happened, and its last, which they
+/// led to.
+pub fn split_reported(message: &str) -> (&str, &str) {
+    message.rsplit_once(REPORTED_SEPARATOR).unwrap_or(("", message))
+}
+
+/// An error with its last error, which the others led to, reworded by
+/// `reword`, as each layer that the error fails gives its own reason.
+pub fn reworded(error: &SkyError, reword: impl FnOnce(&str) -> String) -> SkyError {
+    let (reported, last) = split_reported(error.message());
+    let last = reword(last);
+    let message = match reported.is_empty() {
+        true => last,
+        false => format!("{reported}{REPORTED_SEPARATOR}{last}"),
+    };
+    let reworded = SkyError::with_kind(error.kind(), message);
+    match error.origin() {
+        Some(origin) => reworded.with_origin(origin),
+        None => reworded,
     }
 }
 
@@ -105,11 +157,14 @@ async fn read_bzl(ctx: &Ctx, label: Label) -> Result<String, SkyError> {
 }
 
 /// Resolve and load the modules a file's `load` statements name, in
-/// parallel.
+/// parallel. For a `.bzl` file, `positions` are where its statements name
+/// them, at which a module that failed to load is reported, as Bazel
+/// reports it.
 pub(crate) async fn load_all(
     ctx: &Ctx,
     from: Label,
     loads: &[String],
+    positions: Option<&[SourcePosition]>,
     mapping: &RepoMappingTable,
 ) -> Result<Vec<(String, Arc<BzlModule>)>, SkyError> {
     let context = LabelContext {
@@ -127,11 +182,25 @@ pub(crate) async fn load_all(
     }
     let modules = ctx.compute_many(&keys).await;
     let mut loaded = Vec::with_capacity(loads.len());
-    for (load, module) in loads.iter().zip(modules) {
-        let module = module.map_err(|error| error.context(format!("{from}: error loading '{load}'")))?;
+    for (index, (load, module)) in loads.iter().zip(modules).enumerate() {
+        let module = match (module, positions.and_then(|positions| positions.get(index))) {
+            (Ok(module), _) => module,
+            (Err(error), Some(position)) => return Err(failed_load(ctx, from, position, &error).await),
+            (Err(error), None) => return Err(error),
+        };
         loaded.push((load.clone(), module));
     }
     Ok(loaded)
+}
+
+/// The error of a `.bzl` file whose load of a module failed with `error`,
+/// as Bazel words it: at the load.
+async fn failed_load(ctx: &Ctx, from: Label, position: &SourcePosition, error: &SkyError) -> SkyError {
+    let path = match crate::source_path(ctx, from).await {
+        Some(path) => path.display().to_string(),
+        None => from.to_string(),
+    };
+    reworded(error, |why| format!("at {path}:{}:{}: {why}", position.line, position.column))
 }
 
 /// The repositories whose mappings code in a file may need: its own, those

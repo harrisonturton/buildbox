@@ -150,10 +150,11 @@ impl<C: Compute> Universe<C> {
         }
     }
 
-    /// The error of the first pattern resolved that named targets of a
-    /// package with errors, as a build fails with it.
+    /// The error of the first pattern resolved since this was last asked
+    /// that named targets of a package with errors, as a build fails with
+    /// it.
     pub fn pattern_failure(&self) -> Option<String> {
-        self.pattern_failure.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.pattern_failure.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 
     fn report(&self, message: String) {
@@ -170,11 +171,13 @@ impl<C: Compute> Universe<C> {
     }
 
     /// Fail with `message`, unless keeping going, in which case it's
-    /// reported as skipped.
+    /// reported as skipped: why, after the errors that led to it, which
+    /// [`Universe::errors`] gives.
     pub fn error(&self, pattern: &str, message: String) -> Result<(), QueryError> {
         if !self.options.keep_going {
             return Err(QueryError(message));
         }
+        let (_, message) = bazel_loading::split_reported(&message);
         self.report(format!("Skipping '{pattern}': {message}"));
         self.kept_going.store(true, Ordering::Relaxed);
         Ok(())
@@ -249,13 +252,21 @@ impl<C: Compute> Universe<C> {
     /// The errors to report, in order: those of packages loaded that no
     /// pattern or dependency led to, then those found.
     pub async fn errors(&self) -> Vec<String> {
-        let loaded: Vec<Arc<LoadedPackage>> = {
+        let (loaded, unloaded) = {
             let packages = self.packages.lock().unwrap_or_else(|p| p.into_inner());
             let mut failed: Vec<Arc<LoadedPackage>> = packages.values().filter_map(|package| package.as_ref().ok()).filter(|package| !package.0.errors.is_empty()).cloned().collect();
             failed.sort_by_key(|package| package.0.id);
-            failed
+            let mut unloaded: Vec<(PackageId, String)> = packages.iter().filter_map(|(id, package)| Some((*id, package.as_ref().err()?.clone()))).collect();
+            unloaded.sort();
+            (failed, unloaded)
         };
         let mut errors = Vec::new();
+        for (id, message) in unloaded {
+            let (reported, _) = bazel_loading::split_reported(&message);
+            if !reported.is_empty() && self.reported.lock().unwrap_or_else(|p| p.into_inner()).insert(id) {
+                errors.push(reported.to_string());
+            }
+        }
         for package in loaded {
             if self.reported.lock().unwrap_or_else(|p| p.into_inner()).insert(package.0.id) {
                 errors.extend(self.package_errors(&package.0).await);

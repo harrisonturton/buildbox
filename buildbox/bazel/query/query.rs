@@ -60,6 +60,7 @@ pub async fn run<C: Compute>(compute: C, request: QueryRequest) -> Result<QueryR
         Ok((output, targets)) => (Some(output), targets, evaluation_failure),
         Err(error) => (None, 0, Some(evaluation_failure.unwrap_or(error.0))),
     };
+    let failure = failure.map(|failure| bazel_loading::split_reported(&failure).1.to_string());
     Ok(QueryResult {
         output,
         targets,
