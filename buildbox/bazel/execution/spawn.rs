@@ -47,38 +47,11 @@ pub struct SpawnResult {
 }
 
 /// Run a command, or reuse a cached successful result. A command that runs
-/// and exits with a non-zero code still has a result.
-pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnResult, SkyError> {
-    let span = tracing::info_span!("input_tree", inputs = request.inputs.len());
-    let tree = input_tree(backend, &request.inputs, &request.output_directories).instrument(span).await?;
-    let command = command_proto(&request);
-    let command_bytes = command.encode_to_vec();
-    let command_digest = cas::Digest::of_bytes(&command_bytes);
-    let proto = reapi::Action {
-        command_digest: command_digest.to_proto().into(),
-        input_root_digest: tree.root.to_proto().into(),
-        do_not_cache: !request.cacheable,
-        timeout: request.timeout.map(|timeout| buffa_types::google::protobuf::Duration {
-            seconds: timeout.as_secs() as i64,
-            ..Default::default()
-        }).into(),
-        ..Default::default()
-    };
-    let action_bytes = proto.encode_to_vec();
-    let action_digest = cas::Digest::of_bytes(&action_bytes);
-
-    let mut blobs = tree.blobs;
-    blobs.push((command_digest, command_bytes));
-    blobs.push((action_digest.clone(), action_bytes));
-    let sources: Vec<&Input> = request.inputs.values().collect();
-    let span = tracing::info_span!("upload_inputs", blobs = blobs.len(), inputs = sources.len());
-    async {
-        upload_blobs(backend, blobs).await?;
-        upload(backend, &sources).await
-    }
-    .instrument(span)
-    .await?;
-
+/// and exits with a non-zero code still has a result. The request's inputs
+/// are dropped once they're uploaded, before the command runs.
+pub async fn execute(backend: &Backend, mut request: SpawnRequest) -> Result<SpawnResult, SkyError> {
+    let inputs = std::mem::take(&mut request.inputs);
+    let Prepared { action_digest, command, input_root } = prepare(backend, inputs, &request).await?;
     if request.cacheable {
         let span = tracing::info_span!("action_cache_lookup");
         if let Some(result) = cached(backend, &action_digest).instrument(span).await? {
@@ -88,7 +61,7 @@ pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnRe
     let executable = executor::Action {
         digest: action_digest.clone(),
         command,
-        input_root: tree.root,
+        input_root,
         timeout: request.timeout,
         platform: Vec::new(),
     };
@@ -107,6 +80,52 @@ pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnRe
             .map_err(|error| SkyError::transient(format!("action cache: {error}")))?;
     }
     Ok(SpawnResult { result, cached: false })
+}
+
+/// An action whose command and input tree are in the CAS.
+struct Prepared {
+    action_digest: cas::Digest,
+    command: reapi::Command,
+    input_root: cas::Digest,
+}
+
+/// Build a request's input tree, and upload it with the inputs and the
+/// command.
+async fn prepare(backend: &Backend, inputs: BTreeMap<String, Input>, request: &SpawnRequest) -> Result<Prepared, SkyError> {
+    let span = tracing::info_span!("input_tree", inputs = inputs.len());
+    let tree = input_tree(backend, &inputs, &request.output_directories).instrument(span).await?;
+    let command = command_proto(request);
+    let command_bytes = command.encode_to_vec();
+    let command_digest = cas::Digest::of_bytes(&command_bytes);
+    let proto = reapi::Action {
+        command_digest: command_digest.to_proto().into(),
+        input_root_digest: tree.root.to_proto().into(),
+        do_not_cache: !request.cacheable,
+        timeout: request.timeout.map(|timeout| buffa_types::google::protobuf::Duration {
+            seconds: timeout.as_secs() as i64,
+            ..Default::default()
+        }).into(),
+        ..Default::default()
+    };
+    let action_bytes = proto.encode_to_vec();
+    let action_digest = cas::Digest::of_bytes(&action_bytes);
+
+    let mut blobs = tree.blobs;
+    blobs.push((command_digest, command_bytes));
+    blobs.push((action_digest.clone(), action_bytes));
+    let sources: Vec<&Input> = inputs.values().collect();
+    let span = tracing::info_span!("upload_inputs", blobs = blobs.len(), inputs = sources.len());
+    async {
+        upload_blobs(backend, blobs).await?;
+        upload(backend, &sources).await
+    }
+    .instrument(span)
+    .await?;
+    Ok(Prepared {
+        action_digest,
+        command,
+        input_root: tree.root,
+    })
 }
 
 /// Run a spawn action, or reuse its cached result.
