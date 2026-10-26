@@ -112,7 +112,7 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
     let Some(printed) = result.output else {
         return exit::ANALYSIS_FAILURE;
     };
-    out.stdout(&terminated(printed, &options)).await;
+    out.stdout_bytes(&printed).await;
     let partial = result.kept_going || result.failure.is_some();
     if partial {
         out.warning("--keep_going specified, ignoring errors. Results may be inaccurate").await;
@@ -163,9 +163,7 @@ pub(crate) fn universe_scope(options: &ParsedOptions) -> Option<Vec<String>> {
 fn output_options(options: &ParsedOptions) -> Result<OutputOptions, String> {
     let name = options.get("output").unwrap_or("label");
     let Some(format) = OutputFormat::parse(name) else {
-        let mut valid = OutputFormat::NAMES.to_vec();
-        valid.extend(["proto", "streamed_jsonproto", "streamed_proto"]);
-        return Err(format!("Invalid output format '{name}'. Valid values are: {}", valid.join(", ")));
+        return Err(format!("Invalid output format '{name}'. Valid values are: {}", OutputFormat::NAMES.join(", ")));
     };
     let order = order_output(options)?;
     let limit = |name: &str, default: i64| match options.int(name, default) {
@@ -182,6 +180,7 @@ fn output_options(options: &ParsedOptions) -> Result<OutputOptions, String> {
         },
         relative_locations: options.flag("relative_locations", false),
         xml_default_values: options.flag("xml:default_values", false),
+        null_terminated: null_terminated(options),
     })
 }
 
@@ -195,12 +194,9 @@ pub(crate) fn order_output(options: &ParsedOptions) -> Result<OrderOutput, Strin
     OrderOutput::parse(name).ok_or_else(|| format!("While parsing option --order_output={name}: Not a valid Order output setting: '{name}' (should be no, deps, auto or full)"))
 }
 
-/// What a query printed, with lines ended by NULs if the options ask.
-pub(crate) fn terminated(printed: String, options: &ParsedOptions) -> String {
-    match options.flag("null", false) || options.flag("line_terminator_null", false) {
-        true => printed.replace('\n', "\0"),
-        false => printed,
-    }
+/// Whether the options ask for lines ended by NULs.
+pub(crate) fn null_terminated(options: &ParsedOptions) -> bool {
+    options.flag("null", false) || options.flag("line_terminator_null", false)
 }
 
 /// The query expression: the command line's, or `--query_file`'s.

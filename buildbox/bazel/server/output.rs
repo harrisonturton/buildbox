@@ -113,9 +113,14 @@ impl Output {
     }
 
     pub async fn stdout(&self, text: &str) {
+        self.stdout_bytes(text.as_bytes()).await;
+    }
+
+    /// Output for stdout that may not be text, such as a binary proto.
+    pub async fn stdout_bytes(&self, bytes: &[u8]) {
         let mut ui = self.ui.lock().await;
         ui.show_events().await;
-        ui.write_stdout(text).await;
+        ui.write_stdout(bytes).await;
     }
 
     /// Output for stderr as it is, such as what an action printed.
@@ -207,11 +212,11 @@ impl Ui {
 
     /// Write to stdout, clearing the progress bar first in case stdout is
     /// the same terminal.
-    async fn write_stdout(&mut self, text: &str) {
+    async fn write_stdout(&mut self, bytes: &[u8]) {
         let bar = self.bar(Some(Instant::now()));
         let cleared = self.screen.redraw(&[]);
         self.send_stderr(cleared).await;
-        self.send(run_response::Output::Stdout(text.as_bytes().to_vec())).await;
+        self.send(run_response::Output::Stdout(bytes.to_vec())).await;
         let drawn = self.screen.redraw(&bar);
         self.drawn = bar;
         self.send_stderr(drawn).await;
@@ -254,7 +259,7 @@ impl Ui {
             self.write_stderr(&stderr).await;
         }
         if !shown.stdout.is_empty() {
-            self.write_stdout(&shown.stdout).await;
+            self.write_stdout(shown.stdout.as_bytes()).await;
         }
     }
 

@@ -6,7 +6,9 @@ use crate::graph::{Digraph, DotStyle};
 use crate::nodes::NodeSet;
 use crate::parse::Expr;
 use crate::universe::{TargetRef, Universe};
-use crate::{build_output, xml_output};
+use crate::build_output::AttrValues;
+use crate::proto::{self, Message};
+use crate::{build_output, target_proto, xml_output};
 use bazel_label::{Label, PackageId, RepoMappingTable};
 use bazel_packages::{AttrValue, Target};
 use skyframe::Compute;
@@ -26,11 +28,27 @@ pub enum OutputFormat {
     MaxRank,
     Graph,
     Xml,
+    Proto,
+    StreamedProto,
+    StreamedJsonProto,
 }
 
 impl OutputFormat {
     /// The formats `query --output` takes, as Bazel lists them.
-    pub const NAMES: &'static [&'static str] = &["label", "label_kind", "build", "minrank", "maxrank", "package", "location", "graph", "xml"];
+    pub const NAMES: &'static [&'static str] = &[
+        "label",
+        "label_kind",
+        "build",
+        "minrank",
+        "maxrank",
+        "package",
+        "location",
+        "graph",
+        "xml",
+        "proto",
+        "streamed_jsonproto",
+        "streamed_proto",
+    ];
 
     pub fn parse(name: &str) -> Option<OutputFormat> {
         Some(match name {
@@ -43,13 +61,16 @@ impl OutputFormat {
             "maxrank" => OutputFormat::MaxRank,
             "graph" => OutputFormat::Graph,
             "xml" => OutputFormat::Xml,
+            "proto" => OutputFormat::Proto,
+            "streamed_proto" => OutputFormat::StreamedProto,
+            "streamed_jsonproto" => OutputFormat::StreamedJsonProto,
             _ => return None,
         })
     }
 
     /// Whether Bazel prints the format target by target, which
     /// `--order_output=auto` sorts by label.
-    fn is_streamed(self) -> bool {
+    pub fn is_streamed(self) -> bool {
         !matches!(self, OutputFormat::MinRank | OutputFormat::MaxRank | OutputFormat::Graph)
     }
 }
@@ -86,6 +107,8 @@ pub struct OutputOptions {
     /// Whether the XML output lists attributes' default values,
     /// `--xml:default_values`.
     pub xml_default_values: bool,
+    /// Whether text lines end with NULs rather than newlines, `--null`.
+    pub null_terminated: bool,
 }
 
 impl Default for OutputOptions {
@@ -96,6 +119,7 @@ impl Default for OutputOptions {
             graph: DotStyle::default(),
             relative_locations: false,
             xml_default_values: false,
+            null_terminated: false,
         }
     }
 }
@@ -118,7 +142,20 @@ pub fn display_package(package: PackageId, mapping: &RepoMappingTable) -> String
 }
 
 /// Print the result of `expr` as `options` say.
-pub async fn format<C: Compute>(universe: &Universe<C>, result: &NodeSet<Label>, expr: &Expr, options: &OutputOptions) -> Result<String, QueryError> {
+pub async fn format<C: Compute>(universe: &Universe<C>, result: &NodeSet<Label>, expr: &Expr, options: &OutputOptions) -> Result<Vec<u8>, QueryError> {
+    if let OutputFormat::Proto | OutputFormat::StreamedProto | OutputFormat::StreamedJsonProto = options.format {
+        let ordered = ordered(universe, result, expr, options.order).await?;
+        return proto_output(universe, &ordered, options).await;
+    }
+    let text = format_text(universe, result, expr, options).await?;
+    Ok(match options.null_terminated {
+        true => text.replace('\n', "\0").into_bytes(),
+        false => text.into_bytes(),
+    })
+}
+
+/// The result in a text format.
+async fn format_text<C: Compute>(universe: &Universe<C>, result: &NodeSet<Label>, expr: &Expr, options: &OutputOptions) -> Result<String, QueryError> {
     let mapping = universe.main_mapping.clone();
     let mut out = String::new();
     match options.format {
@@ -199,9 +236,34 @@ async fn write_streamed<C: Compute>(universe: &Universe<C>, labels: &[Label], fo
             }
         }
         OutputFormat::Xml => xml_output::write(universe, labels, &paths, options, out).await?,
-        OutputFormat::MinRank | OutputFormat::MaxRank | OutputFormat::Graph => {}
+        _ => {}
     }
     Ok(())
+}
+
+/// The targets as `build.proto` messages: a `QueryResult`, or each
+/// `Target` prefixed by its length, or as JSON on a line of its own.
+async fn proto_output<C: Compute>(universe: &Universe<C>, labels: &[Label], options: &OutputOptions) -> Result<Vec<u8>, QueryError> {
+    let paths = RepoPaths::new(universe);
+    let mut result = Message::new();
+    let mut out = Vec::new();
+    for target in universe.targets_in_order(labels).await? {
+        let message = target_proto::target_message(universe, &target, AttrValues::Given, &paths, options.relative_locations).await?;
+        match options.format {
+            OutputFormat::StreamedProto => out.extend(proto::delimited(&message)),
+            OutputFormat::StreamedJsonProto => {
+                out.extend(message.to_json(true).into_bytes());
+                out.push(b'\n');
+            }
+            _ => {
+                result.repeated(1, "target", message);
+            }
+        }
+    }
+    if options.format == OutputFormat::Proto {
+        out = result.to_bytes();
+    }
+    Ok(out)
 }
 
 /// A package as `--output=package` prints it: without a leading `//`.

@@ -14,7 +14,9 @@ mod lexer;
 mod nodes;
 mod output;
 mod parse;
+pub mod proto;
 mod target_graph;
+mod target_proto;
 mod universe;
 mod xml_output;
 
@@ -26,6 +28,7 @@ pub use nodes::NodeSet;
 pub use output::{OrderOutput, OutputFormat, OutputOptions, RepoPaths, display_label, display_package, format};
 pub use parse::{AQUERY_FUNCTIONS, Arg, ArgKind, CQUERY_FUNCTIONS, DEFAULT_FUNCTIONS, Expr, Function, ParseError, SetOp, UNIVERSE_FUNCTIONS, parse, truncate};
 pub use target_graph::{attr_string, is_manual, possible_values};
+pub use target_proto::target_message;
 pub use universe::{QueryOptions, TargetRef, TargetSet, Universe, attr_value};
 
 use bazel_label::{PackageId, RepoMappingTable};
@@ -51,7 +54,7 @@ pub struct QueryRequest {
 /// What a query printed, and the errors it met.
 pub struct QueryResult {
     /// What the query printed, unless it failed.
-    pub output: Option<String>,
+    pub output: Option<Vec<u8>>,
     pub targets: usize,
     /// The errors to report, in order, but for the last.
     pub errors: Vec<String>,

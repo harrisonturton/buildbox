@@ -103,7 +103,7 @@ impl<C: Compute> QueryEnvironment for Universe<C> {
             return Ok(true);
         }
         let target = self.target(*target).await?;
-        for label in visibility(&target) {
+        for label in visibility_of(&target) {
             if self.visibility_allows(label, from.package).await? {
                 return Ok(true);
             }
@@ -173,7 +173,7 @@ impl<C: Compute> Universe<C> {
 
 /// The labels of a target's visibility: its own, its package's default,
 /// or for a generated file, its rule's.
-fn visibility(target: &TargetRef) -> Vec<Label> {
+pub(crate) fn visibility_of(target: &TargetRef) -> Vec<Label> {
     let package = target.package();
     let visibility = Symbol::intern("visibility");
     let rule = match target.target() {
