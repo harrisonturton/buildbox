@@ -259,7 +259,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         return incompatible(ctx, key, class_ref.kind, is_test, reason);
     }
     let fingerprint = fingerprint(key, rule, &setup.implementation, &deps, &setup.toolchains);
-    let edges = dependency_edges(key, package, rule, &setup, &deps)?;
+    let edges = dependency_edges(ctx, key, package, rule, &setup, &deps).await?;
     let exec_platform = setup.toolchains.exec_platform.unwrap_or(key.config.get().host_platform);
     let input = rule_input(ctx, key, package, setup, deps).await?;
     let analyzed = evaluate_reporting(ctx, label, input, heap_name("target", key, fingerprint)).await?;
@@ -532,11 +532,12 @@ fn wanted_deps(
 }
 
 /// A rule's direct dependencies, as `cquery` follows them: what its
-/// attributes name, a test suite's implicit tests, the conditions of its
-/// `select()`s, and for a rule that resolves toolchains, its toolchains
+/// attributes name, its package's default licenses, which Bazel analyzes
+/// in a configuration of no options, a test suite's implicit tests, the
+/// conditions of its `select()`s, and for a rule that resolves toolchains, its toolchains
 /// and the platforms it resolves them for. The BUILD file names those of attributes it sets and the
 /// conditions; the rest are implicit.
-fn dependency_edges(key: ConfiguredTargetKey, package: &Package, rule: &Rule, setup: &RuleSetup, deps: &BTreeMap<(Label, ConfigId), Dep>) -> Result<Vec<ConfiguredDep>, SkyError> {
+async fn dependency_edges(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, rule: &Rule, setup: &RuleSetup, deps: &BTreeMap<(Label, ConfigId), Dep>) -> Result<Vec<ConfiguredDep>, SkyError> {
     let mut edges: Vec<ConfiguredDep> = Vec::new();
     for (label, config, attr) in wanted_deps(&setup.class, &setup.attrs, setup.deps_config, setup.exec_config, &setup.attr_configs)? {
         let implicit = rule.attr(attr).is_none();
@@ -544,20 +545,23 @@ fn dependency_edges(key: ConfiguredTargetKey, package: &Package, rule: &Rule, se
             add_edge(&mut edges, dep_edge(label, config, dep, implicit));
         }
     }
+    for license in package.default_licenses(rule) {
+        add_edge(&mut edges, ConfiguredDep { label: license, config: Some(bazel_config::no_config()), implicit: true });
+    }
     if setup.class.kind.as_str() == "test_suite" {
         for test in package.implicit_tests(rule) {
             add_edge(&mut edges, ConfiguredDep { label: test, config: Some(setup.deps_config), implicit: false });
         }
     }
-    let mut conditions = Vec::new();
-    for (_, value) in &rule.attrs {
-        value.conditions(&mut conditions);
-    }
-    for condition in conditions.into_iter().filter(|condition| condition.to_string() != bazel_packages::DEFAULT_CONDITION) {
-        add_edge(&mut edges, ConfiguredDep { label: condition, config: Some(setup.deps_config), implicit: false });
+    for condition in conditions(rule, &setup.class) {
+        let condition = configured_key(ctx, condition, setup.deps_config).await?;
+        add_edge(&mut edges, ConfiguredDep { label: condition.label, config: Some(condition.config), implicit: false });
     }
     if !resolves_toolchains(&setup.class) {
         return Ok(edges);
+    }
+    for toolchain_type in setup.class.toolchain_types.iter().chain(&setup.class.optional_toolchain_types) {
+        add_edge(&mut edges, ConfiguredDep { label: *toolchain_type, config: Some(setup.deps_config), implicit: true });
     }
     for target in setup.toolchains.resolved.iter().filter_map(|(_, target)| target.as_ref()) {
         add_edge(&mut edges, ConfiguredDep { label: target.label, config: Some(target.config), implicit: true });
@@ -569,6 +573,22 @@ fn dependency_edges(key: ConfiguredTargetKey, package: &Package, rule: &Rule, se
         add_edge(&mut edges, ConfiguredDep { label: platform, config: Some(no_config), implicit: true });
     }
     Ok(edges)
+}
+
+/// The conditions of the `select()`s of a rule's attributes, as given or
+/// by default, but for `//conditions:default`.
+fn conditions(rule: &Rule, class: &RuleClass) -> Vec<Label> {
+    let mut conditions = Vec::new();
+    for schema in &class.attrs {
+        match (rule.attr(schema.name), &schema.default) {
+            (Some(value), _) | (None, bazel_packages::AttrDefault::Value(value)) => value.conditions(&mut conditions),
+            _ => {}
+        }
+    }
+    conditions.retain(|condition| condition.to_string() != bazel_packages::DEFAULT_CONDITION);
+    conditions.sort();
+    conditions.dedup();
+    conditions
 }
 
 /// The edge to `label`, a dependency analyzed as `dep`: in the target's
@@ -763,7 +783,8 @@ pub(crate) fn fingerprint(
     fingerprinter.finish()
 }
 
-/// An alias is its actual target, under its own label.
+/// An alias is its actual target, under its own label, which depends on
+/// it and the conditions of a `select()` choosing it.
 pub(crate) async fn alias(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule) -> Result<ConfiguredTarget, SkyError> {
     let actual = rule.attr(Symbol::intern("actual")).cloned().unwrap_or(AttrValue::None);
     let AttrValue::Label(actual) = crate::attrs::resolve_value(ctx, &actual, key.config).await? else {
@@ -775,7 +796,16 @@ pub(crate) async fn alias(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule) -> R
             config: key.config,
         })
         .await?;
-    forwarded(key, &target)
+    let mut alias = forwarded(key, &target)?;
+    let mut conditions = Vec::new();
+    for (_, value) in &rule.attrs {
+        value.conditions(&mut conditions);
+    }
+    for condition in conditions.into_iter().filter(|condition| condition.to_string() != bazel_packages::DEFAULT_CONDITION) {
+        let condition = configured_key(ctx, condition, key.config).await?;
+        add_edge(&mut alias.deps, ConfiguredDep { label: condition.label, config: Some(condition.config), implicit: false });
+    }
+    Ok(alias)
 }
 
 /// The target `key` names, providing what `target` provides: an alias's,

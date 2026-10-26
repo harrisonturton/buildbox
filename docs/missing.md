@@ -118,6 +118,13 @@ Their outputs match Bazel 9.3.1's on the formats people and tools read,
   no test-trimmed configurations: where Bazel analyzes non-test targets in
   a configuration without test options, bb uses the same one.
 - **aquery's action keys** are bb's hash of the action, not Bazel's.
+- **Params files:** bb writes the params file of `args.use_param_file(...,
+  use_always = True)` with an action of its own, which aquery lists, where
+  Bazel writes it as part of the spawn and shows its arguments inline.
+- rules_rust names outputs by `hash(repr(label))`, and bb's `repr` of a
+  `Label` is its canonical form where Bazel's is `Label("//pkg:name")`, so
+  those names differ. Changing it needs starlark-rust to format labels
+  with `str()` in `%s` and `print()`, as Bazel's Starlark does.
 - `cquery --output=transitions`, `--show_config_fragments`, and the
   Starlark output's `FileProvider` and `FilesToRunProvider`.
 - Proto outputs leave out the internal attributes bb doesn't model, such

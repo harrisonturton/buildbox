@@ -121,7 +121,26 @@ pub fn visibility_label(label: Label) -> Label {
     }
 }
 
+/// Rules used to resolve dependencies, which package defaults such as
+/// licenses don't apply to.
+const DEPENDENCY_RESOLUTION_RULES: [&str; 7] = ["config_setting", "constraint_setting", "constraint_value", "platform", "toolchain", "toolchain_type", "alias"];
+
 impl Package {
+    /// The licenses `package(default_applicable_licenses = ...)` applies to
+    /// a rule of the package that doesn't set its own, unless it's one of
+    /// them or a rule used to resolve dependencies.
+    pub fn default_licenses(&self, rule: &Rule) -> Vec<Label> {
+        let defaults = &self.args.default_applicable_licenses;
+        let kind = self.rule_class(rule).kind;
+        if defaults.is_empty() || DEPENDENCY_RESOLUTION_RULES.contains(&kind.as_str()) || defaults.contains(&self.label(rule.name)) {
+            return Vec::new();
+        }
+        match rule.attr(Symbol::intern("applicable_licenses")) {
+            Some(_) => Vec::new(),
+            None => defaults.clone(),
+        }
+    }
+
     pub fn target(&self, name: Symbol) -> Option<&Target> {
         let index = self.targets.binary_search_by(|target| target.name().cmp(&name)).ok()?;
         Some(&self.targets[index])

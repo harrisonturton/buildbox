@@ -233,19 +233,28 @@ async fn exec_options(ctx: &Ctx, transition: &OwnedFrozenValue, config: ConfigId
 }
 
 /// The key of a target requested in a configuration: in the configuration
-/// its rule's incoming transition gives, if the rule has one.
+/// its rule's incoming transition gives, if the rule has one, or in none
+/// for a constraint.
 pub async fn configured_key(compute: &impl Compute, label: Label, config: ConfigId) -> Result<ConfiguredTargetKey, SkyError> {
     let package = compute.compute(&PackageKey(label.package)).await?;
     let Some(Target::Rule(rule)) = package.0.target(label.name) else {
         return Ok(ConfiguredTargetKey { label, config });
     };
-    let class = bazel_loading::rule_class(compute, package.0.rule_class(rule)).await?;
+    let class_ref = package.0.rule_class(rule);
+    if class_ref.definition.is_none() && NO_CONFIG_RULES.contains(&class_ref.kind.as_str()) {
+        return Ok(ConfiguredTargetKey { label, config: bazel_config::no_config() });
+    }
+    let class = bazel_loading::rule_class(compute, class_ref).await?;
     if !class.incoming_transition {
         return Ok(ConfiguredTargetKey { label, config });
     }
     let transitioned = compute.compute(&RuleTransitionKey { label, config }).await?;
     Ok(ConfiguredTargetKey { label, config: transitioned.0 })
 }
+
+/// The rules Bazel analyzes in a configuration of no options, whatever
+/// requests them: they define constraints, which mean the same in any.
+const NO_CONFIG_RULES: [&str; 2] = ["constraint_setting", "constraint_value"];
 
 /// The configuration a rule's incoming transition gives a target requested
 /// in `config`.
