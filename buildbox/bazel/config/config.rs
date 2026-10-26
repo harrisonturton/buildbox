@@ -59,18 +59,25 @@ impl ConfigId {
 
     /// The configuration with this id.
     pub fn get(self) -> Arc<BuildConfiguration> {
+        if let Some(config) = self.decoded() {
+            return config;
+        }
+        let options: BuildOptions = skycodec::from_bytes(CONFIGS.table.bytes(self.0)).expect("interned options decode");
+        let config = Arc::new(BuildConfiguration::new(self, options));
         let mut decoded = CONFIGS.decoded.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let index = self.0 as usize;
         if decoded.len() <= index {
             decoded.resize(index + 1, None);
         }
-        if let Some(config) = &decoded[index] {
-            return config.clone();
-        }
-        let options: BuildOptions = skycodec::from_bytes(CONFIGS.table.bytes(self.0)).expect("interned options decode");
-        let config = Arc::new(BuildConfiguration::new(self, options));
-        decoded[index] = Some(config.clone());
-        config
+        decoded[index].get_or_insert(config).clone()
+    }
+
+    /// The configuration, if it's been decoded already. Decoding happens
+    /// outside the lock, since naming a configuration made by a transition
+    /// gets its baseline's.
+    fn decoded(self) -> Option<Arc<BuildConfiguration>> {
+        let decoded = CONFIGS.decoded.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        decoded.get(self.0 as usize).cloned().flatten()
     }
 
     pub fn id(self) -> u32 {
@@ -94,12 +101,10 @@ impl BuildConfiguration {
         let host_platform = options.label("host_platform").unwrap_or(*DEFAULT_HOST_PLATFORM);
         let platform = options.labels("platforms").first().copied().unwrap_or(host_platform);
         let is_exec = options.bool("is exec configuration");
-        let output_directory = if is_exec {
-            format!("{cpu}-{compilation_mode}-exec-ST-{}", &digest[..12])
-        } else if options.starlark_flags.is_empty() {
-            format!("{cpu}-{compilation_mode}")
-        } else {
-            format!("{cpu}-{compilation_mode}-ST-{}", &digest[..12])
+        let output_directory = match (is_exec, options.baseline) {
+            (true, _) => format!("{cpu}-{compilation_mode}-exec-ST-{}", &digest[..12]),
+            (false, None) => format!("{cpu}-{compilation_mode}"),
+            (false, Some(baseline)) => transitioned_directory(&format!("{cpu}-{compilation_mode}"), &options, &baseline.get().options),
         };
         BuildConfiguration {
             id,
@@ -124,6 +129,7 @@ impl BuildConfiguration {
     /// execution platform's, optimised, as Bazel's exec transition gives.
     pub fn exec(&self) -> ConfigId {
         let mut options = self.options.clone();
+        options.baseline = None;
         let exec_options = [
             ("is exec configuration", OptionValue::Bool(true)),
             ("compilation_mode", OptionValue::String("opt".to_string())),
@@ -133,6 +139,72 @@ impl BuildConfiguration {
             options.set(name, value).expect("exec options are native options");
         }
         ConfigId::intern(&options)
+    }
+}
+
+/// The output directory of options a transition made: `mnemonic`, then,
+/// if they differ from the baseline's in more than the mnemonic says, a
+/// hash of how, as Bazel names it.
+fn transitioned_directory(mnemonic: &str, options: &BuildOptions, baseline: &BuildOptions) -> String {
+    let changed = changed_settings(options, baseline);
+    if changed.is_empty() {
+        return mnemonic.to_string();
+    }
+    let mut fingerprint = ring::digest::Context::new(&ring::digest::SHA256);
+    for setting in &changed {
+        fingerprint.update(&varint(setting.len()));
+        fingerprint.update(setting.as_bytes());
+    }
+    let digest = fingerprint.finish();
+    let hex: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{mnemonic}-ST-{}", &hex[..12])
+}
+
+/// The settings that differ from the baseline's, each as `name=value`, or
+/// `name@null` for none, sorted by name. The options the mnemonic names
+/// are left out.
+fn changed_settings(options: &BuildOptions, baseline: &BuildOptions) -> Vec<String> {
+    let mut changed = std::collections::BTreeMap::new();
+    for option in NATIVE_OPTIONS {
+        if matches!(option.name, "cpu" | "compilation_mode") {
+            continue;
+        }
+        let (Ok(value), Ok(base)) = (options.get(option.name), baseline.get(option.name)) else {
+            continue;
+        };
+        if value != base {
+            changed.insert(format!("//command_line_option:{}", option.name), option.java_text(value));
+        }
+    }
+    let flag = |options: &BuildOptions, label: &Label| options.starlark_flags.iter().find(|(flag, _)| flag == label).map(|(_, value)| value.clone());
+    let labels: std::collections::BTreeSet<Label> = options.starlark_flags.iter().chain(&baseline.starlark_flags).map(|(label, _)| *label).collect();
+    for label in labels {
+        let value = flag(options, &label);
+        if value != flag(baseline, &label) {
+            changed.insert(label.to_string(), value);
+        }
+    }
+    changed
+        .into_iter()
+        .map(|(name, value)| match value {
+            Some(value) => format!("{name}={value}"),
+            None => format!("{name}@null"),
+        })
+        .collect()
+}
+
+/// `n` as a protobuf varint, as Bazel's fingerprints prefix strings with
+/// their lengths.
+fn varint(mut n: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    loop {
+        let low = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            bytes.push(low);
+            return bytes;
+        }
+        bytes.push(low | 0x80);
     }
 }
 
@@ -181,6 +253,20 @@ mod tests {
         assert_eq!(exec.platform, target.host_platform);
         assert!(exec.output_directory.starts_with(&format!("{}-opt-exec-ST-", host_cpu())));
         assert_eq!(exec.exec(), target.exec());
+    }
+
+    #[test]
+    fn transitioned_options_are_named_as_bazel_names_them() {
+        let baseline = ConfigId::intern(&options());
+        let mut transitioned = options();
+        transitioned.baseline = Some(baseline);
+        assert_eq!(ConfigId::intern(&transitioned).get().output_directory, format!("{}-fastbuild", host_cpu()));
+        transitioned.apply("compilation_mode", "opt", &parse_label).unwrap();
+        assert_eq!(ConfigId::intern(&transitioned).get().output_directory, format!("{}-opt", host_cpu()));
+        transitioned.apply("compilation_mode", "fastbuild", &parse_label).unwrap();
+        transitioned.apply("copt", "-DX", &parse_label).unwrap();
+        transitioned.starlark_flags.push((Label::parse_canonical("//:flag").unwrap(), "b".to_string()));
+        assert_eq!(ConfigId::intern(&transitioned).get().output_directory, format!("{}-fastbuild-ST-b4b1d2ee8ba0", host_cpu()));
     }
 
     #[test]

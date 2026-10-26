@@ -15,6 +15,7 @@ rust_library(
         "//buildbox/bazel/label",
         "//buildbox/intern",
         "//buildbox/skycodec",
+        "@crates//:ring",
         "@crates//:thiserror",
     ],
 )

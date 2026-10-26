@@ -57,6 +57,9 @@ pub struct NativeOption {
     /// the order Bazel lists them, and what Bazel calls them.
     pub allowed: &'static [&'static str],
     pub allowed_name: &'static str,
+    /// Whether Bazel prints the option's values in upper case, as it does
+    /// Java enums that don't name their values.
+    pub prints_upper: bool,
 }
 
 /// The value of a native option.
@@ -95,6 +98,7 @@ const fn option(name: &'static str, ty: OptionType, default: OptionDefault) -> N
         multiple: false,
         allowed: &[],
         allowed_name: "",
+        prints_upper: false,
     }
 }
 
@@ -106,6 +110,7 @@ const fn multiple(name: &'static str, ty: OptionType) -> NativeOption {
         multiple: true,
         allowed: &[],
         allowed_name: "",
+        prints_upper: false,
     }
 }
 
@@ -117,6 +122,15 @@ const fn choice(name: &'static str, default: &'static str, allowed_name: &'stati
         multiple: false,
         allowed,
         allowed_name,
+        prints_upper: false,
+    }
+}
+
+/// A [`choice`] whose values Bazel prints in upper case.
+const fn upper_choice(name: &'static str, default: &'static str, allowed_name: &'static str, allowed: &'static [&'static str]) -> NativeOption {
+    NativeOption {
+        prints_upper: true,
+        ..choice(name, default, allowed_name, allowed)
     }
 }
 
@@ -138,7 +152,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("crosstool_top", Label, Null),
         multiple("cxxopt", Strings),
         multiple("define", Assignments),
-        choice("dynamic_mode", "default", "dynamic mode", &["off", "default", "fully"]),
+        upper_choice("dynamic_mode", "default", "dynamic mode", &["off", "default", "fully"]),
         option("enable_runfiles", TriState, Text("auto")),
         option("experimental_platform_in_output_dir", TriState, Text("auto")),
         option("experimental_proto_descriptor_sets_include_source_info", Bool, Text("false")),
@@ -161,8 +175,8 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("proto_compiler", Label, Text("@@bazel_tools//tools/proto:protoc")),
         multiple("protocopt", Strings),
         option("stamp", Bool, Text("false")),
-        choice("strict_proto_deps", "error", STRICT_DEPS, STRICT_DEPS_MODES),
-        choice("strict_public_imports", "off", STRICT_DEPS, STRICT_DEPS_MODES),
+        upper_choice("strict_proto_deps", "error", STRICT_DEPS, STRICT_DEPS_MODES),
+        upper_choice("strict_public_imports", "off", STRICT_DEPS, STRICT_DEPS_MODES),
         choice("strip", "sometimes", "strip mode", &["always", "sometimes", "never"]),
     ]
 };
@@ -211,6 +225,23 @@ fn null_value(ty: OptionType) -> OptionValue {
 }
 
 impl NativeOption {
+    /// A value as Bazel's Java prints it, which output directories' names
+    /// hash, or `None` for no value.
+    pub fn java_text(&self, value: &OptionValue) -> Option<String> {
+        let list = |items: Vec<String>| format!("[{}]", items.join(", "));
+        Some(match value {
+            OptionValue::Null => return None,
+            OptionValue::Bool(value) => value.to_string(),
+            OptionValue::Int(value) => value.to_string(),
+            OptionValue::String(value) if self.prints_upper || self.ty == OptionType::TriState => value.to_ascii_uppercase(),
+            OptionValue::String(value) => value.clone(),
+            OptionValue::Label(label) => label.to_string(),
+            OptionValue::Strings(values) => list(values.clone()),
+            OptionValue::Labels(labels) => list(labels.iter().map(Label::to_string).collect()),
+            OptionValue::Assignments(pairs) => list(pairs.iter().map(|(name, value)| format!("{name}={value}")).collect()),
+        })
+    }
+
     /// Whether the option's value is a list.
     pub fn is_list(&self) -> bool {
         matches!(self.ty, OptionType::Strings | OptionType::CommaStrings | OptionType::Labels | OptionType::Assignments)
@@ -222,7 +253,9 @@ impl NativeOption {
             .map_err(|problem| OptionError::Invalid(format!("While parsing option --{}={text}: {problem}", self.name)))
     }
 
-    fn convert(&self, text: &str, parse_label: LabelParser<'_>) -> Result<OptionValue, String> {
+    /// The value `text` gives, or the converter's message for why it gives
+    /// none, which doesn't say which option it's for.
+    pub fn convert(&self, text: &str, parse_label: LabelParser<'_>) -> Result<OptionValue, String> {
         let not_a = |kind: &str| format!("'{text}' is not {kind}");
         match self.ty {
             OptionType::Bool => parse_bool(text).map(OptionValue::Bool).ok_or_else(|| not_a("a boolean")),
@@ -328,6 +361,9 @@ pub struct BuildOptions {
     native: Vec<(String, OptionValue)>,
     /// Starlark flags, `--//pkg:flag=value`, sorted by label.
     pub starlark_flags: Vec<(Label, String)>,
+    /// For options a transition made: the top-level configuration they
+    /// came from, which their output directory is named against.
+    pub baseline: Option<crate::ConfigId>,
     /// The environment of actions that use the default shell environment,
     /// resolved against the client's, sorted by name.
     pub action_env: Vec<(String, String)>,
