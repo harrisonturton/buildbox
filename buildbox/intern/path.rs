@@ -201,12 +201,27 @@ impl PathId {
 }
 
 impl Ord for PathId {
+    /// As their text orders, without writing it out.
     fn cmp(&self, other: &PathId) -> Ordering {
         if self == other {
             return Ordering::Equal;
         }
-        self.to_string().cmp(&other.to_string())
+        if self.parent() == other.parent() {
+            return self.name().as_str().cmp(other.name().as_str());
+        }
+        let ours = self.segments();
+        let theirs = other.segments();
+        let common = ours.iter().zip(&theirs).take_while(|(a, b)| a == b).count();
+        text_bytes(&ours[common..]).cmp(text_bytes(&theirs[common..]))
     }
+}
+
+/// The bytes of `segments` joined with `/`.
+fn text_bytes(segments: &[Symbol]) -> impl Iterator<Item = u8> + '_ {
+    segments.iter().enumerate().flat_map(|(i, segment)| {
+        let separator: &[u8] = if i > 0 { b"/" } else { b"" };
+        separator.iter().copied().chain(segment.as_str().bytes())
+    })
 }
 
 impl PartialOrd for PathId {
@@ -269,6 +284,16 @@ mod tests {
         assert!(matches!(PathId::parse("/abs"), Err(PathError::Absolute(_))));
         for text in ["a//b", "a/./b", "../a", "a/"] {
             assert!(matches!(PathId::parse(text), Err(PathError::NotNormalized(_))), "{text}");
+        }
+    }
+
+    #[test]
+    fn paths_order_as_their_text() {
+        let texts = ["", "a", "a-b", "a.b", "a/b", "a/b/c", "a/x", "ab", "b/a", "a.b/c", "a/b-c", "a/b/d"];
+        for a in texts {
+            for b in texts {
+                assert_eq!(path(a).cmp(&path(b)), a.cmp(b), "{a} vs {b}");
+            }
         }
     }
 
