@@ -2,11 +2,41 @@
 //! `select()`s resolved.
 
 use crate::condition::ConditionKey;
+use crate::configured::ConfiguredTargetKey;
 use bazel_config::ConfigId;
 use bazel_label::Label;
-use bazel_packages::{AttrDefault, AttrSchema, AttrValue, DEFAULT_CONDITION, Rule, RuleClass, Select, SelectorPart};
+use bazel_loading::PackageKey;
+use bazel_packages::{AttrDefault, AttrSchema, AttrValue, DEFAULT_CONDITION, Rule, RuleClass, Select, SelectorPart, Target};
 use intern::Symbol;
-use skyframe::{Ctx, SkyError};
+use skycodec::{Decode, Encode};
+use skyframe::{Ctx, Key, SkyError, encoded_value};
+
+/// A rule's attributes in a configuration, as `cquery` prints them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct ConfiguredAttrsKey(pub ConfiguredTargetKey);
+
+/// The value of every attribute of a rule in a configuration, in its
+/// class's order; none for a target that isn't a rule.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct ConfiguredAttrs(pub Vec<(Symbol, AttrValue)>);
+
+encoded_value!(ConfiguredAttrs);
+
+impl Key for ConfiguredAttrsKey {
+    type Value = ConfiguredAttrs;
+    const KIND: &'static str = "CONFIGURED_ATTRIBUTES";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<ConfiguredAttrs, SkyError> {
+        let label = self.0.label;
+        let package = ctx.compute(&PackageKey(label.package)).await?;
+        let Some(Target::Rule(rule)) = package.0.target(label.name) else {
+            return Ok(ConfiguredAttrs(Vec::new()));
+        };
+        let class = bazel_loading::rule_class(ctx, package.0.rule_class(rule)).await?;
+        let config = self.0.config.get().without_aspects();
+        Ok(ConfiguredAttrs(resolve_attrs(ctx, rule, &class, config).await?))
+    }
+}
 
 /// The value of every attribute of a rule in a configuration, in its
 /// class's order.

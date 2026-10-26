@@ -15,6 +15,11 @@ struct CommandHelp {
 /// The Bazel commands bb supports, in the order `help` lists them.
 const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
+        name: "aquery",
+        summary: "Analyzes the given targets and queries the action graph.",
+        page: include_str!("help/aquery.txt"),
+    },
+    CommandHelp {
         name: "build",
         summary: "Builds the specified targets.",
         page: include_str!("help/build.txt"),
@@ -23,6 +28,11 @@ const COMMANDS: &[CommandHelp] = &[
         name: "clean",
         summary: "Removes output files and optionally stops the server.",
         page: include_str!("help/clean.txt"),
+    },
+    CommandHelp {
+        name: "cquery",
+        summary: "Loads, analyzes, and queries the specified targets w/ configurations.",
+        page: include_str!("help/cquery.txt"),
     },
     CommandHelp {
         name: "dump",
@@ -176,6 +186,8 @@ fn command_options(command: &str) -> Option<OptionSpec> {
     match command {
         "build" | "test" | "run" => Some(crate::build::build_spec()),
         "query" => Some(crate::queries::query_spec()),
+        "cquery" => Some(crate::queries::cquery_spec()),
+        "aquery" => Some(crate::queries::aquery_spec()),
         _ => None,
     }
 }

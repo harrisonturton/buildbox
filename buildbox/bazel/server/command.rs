@@ -111,6 +111,8 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
 
     match command.as_str() {
         "query" => crate::queries::query(&context, args, out).await,
+        "cquery" => crate::queries::cquery(&context, args, out).await,
+        "aquery" => crate::queries::aquery(&context, args, out).await,
         "info" => crate::commands::info(&context, args, out).await,
         "shutdown" => crate::commands::shutdown(&context, out).await,
         "clean" => crate::commands::clean(&context, args, out).await,
@@ -126,11 +128,9 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
 /// The commands Bazel has that bb doesn't support yet.
 const UNSUPPORTED_COMMANDS: &[&str] = &[
     "analyze-profile",
-    "aquery",
     "canonicalize-flags",
     "config",
     "coverage",
-    "cquery",
     "fetch",
     "mobile-install",
     "mod",

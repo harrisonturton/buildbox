@@ -30,7 +30,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     let workspace = context.server.workspaces().get(&context.workspace_root);
     workspace.refresh(crate::command::repo_environment(context, &options)).await;
     let session = workspace.graph.session().await;
-    let built = match build::run_command(context, &session, &options, true, out).await {
+    let built = match build::run_command(context, &session, &options, build::Purpose::Test, out).await {
         Ok(built) => built,
         Err(code) => return build::failed(code, started, out).await,
     };

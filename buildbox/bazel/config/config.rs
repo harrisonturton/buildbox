@@ -158,6 +158,20 @@ impl BuildConfiguration {
         }
     }
 
+    /// The target platform as the options name it, which may be an alias:
+    /// the first of `--platforms`, or without it, `--host_platform`, whose
+    /// default Bazel names `@bazel_tools//tools:host_platform`. A build
+    /// sets `--platforms` to the host platform when it isn't given.
+    pub fn requested_platform(&self) -> Label {
+        let platforms = self.options.labels("platforms");
+        let defaulted = platforms.is_empty() || platforms == [self.host_platform];
+        match (defaulted, self.host_platform == *DEFAULT_HOST_PLATFORM) {
+            (true, true) => *BAZEL_HOST_PLATFORM,
+            (true, false) => self.host_platform,
+            (false, _) => platforms[0],
+        }
+    }
+
     /// The directory outputs of `repo`'s packages go in, relative to the
     /// execution root, such as `bazel-out/k8-fastbuild/bin`.
     pub fn bin_dir(&self) -> String {
@@ -453,6 +467,16 @@ fn split_params(params: &str) -> Vec<&str> {
     }
     parts
 }
+
+/// The configuration Bazel analyzes the platforms a rule resolves
+/// toolchains for in: no options but the defaults.
+pub fn no_config() -> ConfigId {
+    static NO_CONFIG: LazyLock<ConfigId> = LazyLock::new(|| ConfigId::intern(&BuildOptions::default()));
+    *NO_CONFIG
+}
+
+/// The alias Bazel's `--host_platform` names by default.
+static BAZEL_HOST_PLATFORM: LazyLock<Label> = LazyLock::new(|| Label::parse_canonical("@@bazel_tools//tools:host_platform").expect("a canonical label"));
 
 /// The platform tools run on when `--host_platform` doesn't say.
 static DEFAULT_HOST_PLATFORM: LazyLock<Label> = LazyLock::new(|| Label::parse_canonical("@@platforms//host:host").expect("a canonical label"));

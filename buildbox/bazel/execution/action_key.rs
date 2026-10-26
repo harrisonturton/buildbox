@@ -120,18 +120,10 @@ pub fn progress(ctx: &Ctx) -> Option<Arc<Progress>> {
     ctx.global::<Progress>().ok()
 }
 
-/// What progress output calls an action, as Bazel does: its progress
-/// message, or its mnemonic and first output, marked if it builds a tool.
+/// What progress output calls an action, as Bazel does: see
+/// [`Action::description`].
 pub fn description(action: &Action, owner: ConfiguredTargetKey) -> String {
-    let message = match (action.progress_message.is_empty(), action.outputs.first()) {
-        (false, _) => action.progress_message.clone(),
-        (true, Some(output)) => format!("{} {}", action.mnemonic, output.root_relative()),
-        (true, None) => format!("{} {}", action.mnemonic, owner.label),
-    };
-    match owner.config.get().is_exec {
-        true => format!("{message} [for tool]"),
-        false => message,
-    }
+    action.description(&owner)
 }
 
 /// An input an action reads: its digest, and where it is on disk if it's a

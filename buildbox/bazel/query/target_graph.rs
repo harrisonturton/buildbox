@@ -8,7 +8,7 @@ use crate::parse::{Arg, DEFAULT_FUNCTIONS, Function, UNIVERSE_FUNCTIONS};
 use crate::universe::{TargetRef, Universe, attr_value};
 use async_trait::async_trait;
 use bazel_label::{Label, PackageId, RepoName};
-use bazel_packages::{AttrValue, Package, RuleClass, RuleClassRef, SelectorPart, Target};
+use bazel_packages::{AttrValue, RuleClass, RuleClassRef, SelectorPart, Target};
 use intern::{PathId, Symbol};
 use skyframe::Compute;
 use std::collections::BTreeSet;
@@ -76,7 +76,7 @@ impl<C: Compute> QueryEnvironment for Universe<C> {
             return Ok(Vec::new());
         };
         if attr.as_str() == "$implicit_tests" {
-            return self.implicit_tests(target.package(), rule).await;
+            return Ok(target.package().implicit_tests(rule));
         }
         let class = Universe::rule_class(self, target.package().rule_class(rule)).await?;
         let Some(schema) = class.attr(attr) else {
@@ -333,34 +333,3 @@ pub fn attr_string(value: &AttrValue) -> String {
     }
 }
 
-impl<C: Compute> Universe<C> {
-    /// A test suite's `$implicit_tests`: when it names no tests, those of
-    /// its package that aren't tagged `manual`, which its tags select, in
-    /// label order.
-    pub async fn implicit_tests(&self, package: &Package, suite: &bazel_packages::Rule) -> Result<Vec<Label>, QueryError> {
-        if let Some(AttrValue::LabelList(tests)) = suite.attr(Symbol::intern("tests")) {
-            if !tests.is_empty() {
-                return Ok(Vec::new());
-            }
-        }
-        let tags = match suite.attr(Symbol::intern("tags")) {
-            Some(AttrValue::StringList(tags)) => tags.clone(),
-            _ => Vec::new(),
-        };
-        let filter = crate::functions::TagFilter::of(&tags);
-        let mut tests = Vec::new();
-        for rule in package.rules() {
-            let candidate = self.target(package.label(rule.name)).await?;
-            if crate::functions::is_test_rule(&candidate) && !is_manual(rule) && filter.includes(&candidate) {
-                tests.push(package.label(rule.name));
-            }
-        }
-        tests.sort();
-        Ok(tests)
-    }
-}
-
-/// Whether a rule is tagged `manual`, which wildcards and test suites skip.
-pub fn is_manual(rule: &bazel_packages::Rule) -> bool {
-    matches!(rule.attr(Symbol::intern("tags")), Some(AttrValue::StringList(tags)) if tags.iter().any(|tag| tag == "manual"))
-}

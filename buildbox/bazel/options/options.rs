@@ -62,6 +62,11 @@ pub struct ParsedOptions {
 }
 
 impl ParsedOptions {
+    /// Set `name` to `value`, as if the command line ended with it.
+    pub fn set(&mut self, name: &str, value: &str) {
+        self.values.push((name.to_string(), value.to_string()));
+    }
+
     /// The last value given for `name`.
     pub fn get(&self, name: &str) -> Option<&str> {
         self.values.iter().rev().find(|(option, _)| option == name).map(|(_, value)| value.as_str())

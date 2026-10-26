@@ -114,6 +114,31 @@ impl Message {
         self.push_repeated(number, name, Value::Message(value))
     }
 
+    /// A `proto3` string, which isn't written if it's empty.
+    pub fn string3(&mut self, number: u32, name: &'static str, value: impl Into<String>) -> &mut Message {
+        let value = value.into();
+        if value.is_empty() {
+            return self;
+        }
+        self.string(number, name, value)
+    }
+
+    /// A `proto3` integer, which isn't written if it's zero.
+    pub fn int3(&mut self, number: u32, name: &'static str, value: i64) -> &mut Message {
+        if value == 0 {
+            return self;
+        }
+        self.int(number, name, value)
+    }
+
+    /// A `proto3` boolean, which isn't written if it's false.
+    pub fn bool3(&mut self, number: u32, name: &'static str, value: bool) -> &mut Message {
+        if !value {
+            return self;
+        }
+        self.bool(number, name, value)
+    }
+
     /// Whether the message has no fields.
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
@@ -203,17 +228,25 @@ impl Message {
     /// The message in text format.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
-        self.write_text(&mut out, 0);
+        self.write_text(&mut out, 0, "  ");
         out
     }
 
-    fn write_text(&self, out: &mut String, depth: usize) {
-        let indent = "  ".repeat(depth);
+    /// The message in text format, its nested messages not indented, as
+    /// `aquery` writes them.
+    pub fn to_flat_text(&self) -> String {
+        let mut out = String::new();
+        self.write_text(&mut out, 0, "");
+        out
+    }
+
+    fn write_text(&self, out: &mut String, depth: usize, unit: &str) {
+        let indent = unit.repeat(depth);
         for field in self.in_order() {
             match &field.value {
                 Value::Message(message) => {
                     writeln!(out, "{indent}{} {{", field.name).ok();
-                    message.write_text(out, depth + 1);
+                    message.write_text(out, depth + 1, unit);
                     writeln!(out, "{indent}}}").ok();
                 }
                 Value::Packed(values) => {

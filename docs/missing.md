@@ -63,8 +63,8 @@ Starlark aspects work as Bazel's do:
 Bazel 9 has no native aspects that users apply, only its validation
 aspect, which bb doesn't have.
 
-Still missing: aspects in `cquery` and `aquery`, which bb doesn't have
-yet.
+Still missing: aspects in `cquery` and `aquery` (`--include_aspects`),
+which neither shows yet.
 
 ## 3. Execution platforms and exec groups
 
@@ -107,11 +107,26 @@ than a silently wrong analysis. Two gaps remain:
 
 ## 5. Query tooling
 
-- No `cquery` or `aquery`. cquery depends on section 1.
-- `query` has no machine-readable output formats (`proto`,
-  `streamed_proto`, `jsonproto`, `xml`), which IDE plugins, Gazelle and
-  most query-based tools consume.
-- No `--universe_scope`, so no `allrdeps`.
+`query`, `cquery` and `aquery` share one query language
+(`buildbox/bazel/query`): `query` reads the package graph, and `cquery` and
+`aquery` the configured graph analysis builds (`buildbox/bazel/cquery`).
+Their outputs match Bazel 9.3.1's on the formats people and tools read,
+`proto`, `jsonproto` and `xml` included. Still missing:
+
+- **Configuration checksums** are bb's own hash of its options, not
+  Bazel's, so `cquery` names configurations by different ids, and bb has
+  no test-trimmed configurations: where Bazel analyzes non-test targets in
+  a configuration without test options, bb uses the same one.
+- **aquery's action keys** are bb's hash of the action, not Bazel's.
+- `cquery --output=transitions`, `--show_config_fragments`, and the
+  Starlark output's `FileProvider` and `FilesToRunProvider`.
+- Proto outputs leave out the internal attributes bb doesn't model, such
+  as `:action_listener`, `transitive_configs` and
+  `$rule_implementation_hash`.
+- Error messages for invalid regular expressions are Rust's, not Java's.
+- Where Bazel's own order varies from run to run, as for graphs, ranks and
+  `cquery`'s results, bb prints results in one of the orders Bazel may:
+  `--order_output=full`'s, or by label and configuration.
 
 ## 6. The test runner
 
@@ -166,8 +181,8 @@ Bazel rejects.
 
 ## Suggested order
 
-1. cquery, now that configurations are Bazel's.
-2. Aspects that require other aspects, which protobuf's language rules use.
+1. Execution platforms and exec groups (section 3).
+2. Checking dependencies and visibility (sections 10 and 11).
 
 ## Not yet audited
 

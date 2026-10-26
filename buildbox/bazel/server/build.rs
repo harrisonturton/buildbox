@@ -5,7 +5,7 @@ use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
 use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey, output_groups};
 use crate::written::Written;
-use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Incompatibility};
+use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, Incompatibility};
 use bazel_analysis::settings::BuildSetting;
 use bazel_config::{AspectDescriptor, BuildOptions, ConfigId, FlagValue, LabelParser, NativeOption, OptionType, OptionValue};
 use bazel_execution::{ActionKey, OutputFile};
@@ -15,7 +15,6 @@ use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
 use bazel_packages::{AttrValue, Target};
 use bazel_query::{QueryOptions, TargetSet, Universe};
 use bazel_ui::Phase;
-use bazel_starlark::depset::Depset;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::stream::FuturesUnordered;
@@ -202,12 +201,24 @@ pub async fn parse(context: &CommandContext<'_>, command: &str, args: &[String],
     }
 }
 
-/// Analyze the targets the options name and build their files.
-pub async fn run(context: &CommandContext<'_>, session: &Session, options: &ParsedOptions, out: &Output) -> Result<Built, i32> {
-    run_command(context, session, options, false, out).await
+/// What a command analyzes the targets its patterns name for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    /// To build them.
+    Build,
+    /// To test them, reporting its test targets.
+    Test,
+    /// As the universe of a query of the configured graph: every target
+    /// the patterns name, as they name them, test suites and all.
+    Query,
 }
 
-/// [`run`], for a command that tests, which reports its test targets.
+/// Analyze the targets the options name and build their files.
+pub async fn run(context: &CommandContext<'_>, session: &Session, options: &ParsedOptions, out: &Output) -> Result<Built, i32> {
+    run_command(context, session, options, Purpose::Build, out).await
+}
+
+/// [`run`], for a command with another [`Purpose`].
 ///
 /// Each target's files start building as soon as it's analyzed, while
 /// other targets are still being analyzed, as Bazel's do. The build waits
@@ -218,7 +229,7 @@ pub async fn run_command(
     context: &CommandContext<'_>,
     session: &Session,
     options: &ParsedOptions,
-    testing: bool,
+    purpose: Purpose,
     out: &Output,
 ) -> Result<Built, i32> {
     let workspace = context.server.workspaces().get(&context.workspace_root);
@@ -231,7 +242,7 @@ pub async fn run_command(
     let execute_actions = options.flag("build", true);
     let analyzed = execute_actions.then_some(analyzed);
     let groups = output_groups(options);
-    let (built, ()) = futures::join!(analyze_and_build(context, session, options, testing, analyzed, out), head_starts_of(session, head_starts, &groups));
+    let (built, ()) = futures::join!(analyze_and_build(context, session, options, purpose, analyzed, out), head_starts_of(session, head_starts, &groups));
     built
 }
 
@@ -272,7 +283,7 @@ async fn analyze_and_build(
     context: &CommandContext<'_>,
     session: &Session,
     options: &ParsedOptions,
-    testing: bool,
+    purpose: Purpose,
     analyzed: Option<UnboundedSender<Arc<ConfiguredTarget>>>,
     out: &Output,
 ) -> Result<Built, i32> {
@@ -286,7 +297,7 @@ async fn analyze_and_build(
     };
     let keep_going = options.flag("keep_going", false);
     out.phase(Phase::Loading).await;
-    let Requested { labels, explicit, patterns_failed } = match targets(context, session, options, &main_mapping, out).await {
+    let Requested { labels, explicit, patterns_failed } = match targets(context, session, options, &main_mapping, purpose, out).await {
         Ok(requested) => requested,
         Err(code) => return Err(code),
     };
@@ -332,7 +343,7 @@ async fn analyze_and_build(
     if summarizes_analysis(execute_actions, &labels) {
         out.info(&bazel_ui::analyzed(&what, &out.snapshot().await)).await;
     }
-    let found = found(&analyzed, testing);
+    let found = found(&analyzed, purpose == Purpose::Test);
     let analysis_failed = !failed.is_empty() || !failed_aspects.is_empty();
     out.phase(Phase::Executing).await;
 
@@ -789,13 +800,15 @@ async fn pattern_failed(universe: &Universe<&Session>, pattern: &str, message: &
 }
 
 /// The targets the command line's patterns name, and those of them named
-/// other than by a wildcard. Wildcards skip targets tagged `manual`;
-/// patterns starting with `-` are subtracted.
+/// other than by a wildcard. Wildcards skip targets tagged `manual`, and
+/// test suites are their tests, but for a query's universe; patterns
+/// starting with `-` are subtracted.
 async fn targets(
     context: &CommandContext<'_>,
     session: &Session,
     options: &ParsedOptions,
     main_mapping: &Arc<RepoMappingTable>,
+    purpose: Purpose,
     out: &Output,
 ) -> Result<Requested, i32> {
     let package = working_package(&context.workspace_root, &context.working_directory);
@@ -825,16 +838,18 @@ async fn targets(
             (Err(message), _) | (Ok(_), Some(message)) => return Err(pattern_failed(&universe, pattern, &message, out).await),
         };
         let wildcard = is_wildcard(text, package, main_mapping);
-        if wildcard {
+        if wildcard && purpose != Purpose::Query {
             labels = buildable_by_wildcard(&universe, labels).await;
         }
         if !wildcard && !negative {
             explicit.extend(labels.iter().copied());
         }
-        labels = match expand_test_suites(&universe, labels).await {
-            Ok(labels) => labels,
-            Err(message) => return Err(pattern_failed(&universe, pattern, &message, out).await),
-        };
+        if purpose != Purpose::Query {
+            labels = match expand_test_suites(&universe, labels).await {
+                Ok(labels) => labels,
+                Err(message) => return Err(pattern_failed(&universe, pattern, &message, out).await),
+            };
+        }
         match negative {
             true => excluded.extend(labels),
             false => included.extend(labels),
@@ -896,7 +911,7 @@ async fn buildable_by_wildcard(universe: &Universe<&Session>, labels: TargetSet)
         };
         if let Target::Rule(rule) = target.target() {
             let kind = target.package().rule_class(rule).kind;
-            if is_manual(rule) || NOT_BUILT_BY_WILDCARDS.contains(&kind.as_str()) {
+            if bazel_packages::is_manual(rule) || NOT_BUILT_BY_WILDCARDS.contains(&kind.as_str()) {
                 continue;
             }
         }
@@ -905,12 +920,10 @@ async fn buildable_by_wildcard(universe: &Universe<&Session>, labels: TargetSet)
     kept
 }
 
-fn is_manual(rule: &bazel_packages::Rule) -> bool {
-    matches!(rule.attr(Symbol::intern("tags")), Some(AttrValue::StringList(tags)) if tags.iter().any(|tag| tag == "manual"))
-}
 
-/// Replace each `test_suite` with the tests it names, or with every test of
-/// its package when it names none.
+
+/// Replace each `test_suite` with the tests it names, or with its
+/// package's tests that its tags select when it names none.
 async fn expand_test_suites(universe: &Universe<&Session>, labels: TargetSet) -> Result<TargetSet, String> {
     let mut expanded = TargetSet::new();
     let mut pending: Vec<Label> = labels.into_iter().collect();
@@ -931,25 +944,11 @@ async fn expand_test_suites(universe: &Universe<&Session>, labels: TargetSet) ->
         }
         let tests = match rule.attr(Symbol::intern("tests")) {
             Some(AttrValue::LabelList(tests)) if !tests.is_empty() => tests.clone(),
-            _ => package_tests(universe, package).await,
+            _ => package.implicit_tests(rule),
         };
         pending.extend(tests);
     }
     Ok(expanded)
-}
-
-/// The tests of a package that aren't tagged `manual`.
-async fn package_tests(universe: &Universe<&Session>, package: &bazel_packages::Package) -> Vec<Label> {
-    let mut tests = Vec::new();
-    for rule in package.rules() {
-        let Ok(class) = universe.rule_class(package.rule_class(rule)).await else {
-            continue;
-        };
-        if class.test && !is_manual(rule) {
-            tests.push(package.label(rule.name));
-        }
-    }
-    tests
 }
 
 /// The configuration targets are built in, from the options. As in Bazel,
@@ -1130,13 +1129,6 @@ async fn analyze_one(
     result
 }
 
-/// The files of a depset of files.
-pub(crate) fn depset_files(value: Option<starlark::values::Value<'_>>) -> Vec<Artifact> {
-    let Some(depset) = value.and_then(Depset::from_value) else {
-        return Vec::new();
-    };
-    depset.to_list().into_iter().filter_map(FileValue::artifact).collect()
-}
 
 /// Run the actions that generate artifacts, returning their outputs and
 /// whether any failed.

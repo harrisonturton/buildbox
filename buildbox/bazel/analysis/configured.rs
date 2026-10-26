@@ -54,7 +54,23 @@ pub struct ConfiguredTarget {
     /// Why the target can't be built for the target platform, if it can't.
     /// Such a target has no providers or actions.
     pub incompatible: Option<Arc<Incompatibility>>,
+    /// The targets it depends on directly, as `cquery` follows them.
+    pub deps: Vec<ConfiguredDep>,
+    /// The platform its actions run on, for a rule.
+    pub exec_platform: Option<Label>,
     size: usize,
+}
+
+/// A configured target's direct dependency, as `cquery` follows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConfiguredDep {
+    pub label: Label,
+    /// Its configuration, or `None` for a source file or a package group,
+    /// which have none.
+    pub config: Option<ConfigId>,
+    /// Whether the BUILD file doesn't name it: an attribute's default
+    /// value, or a dependency toolchain resolution adds.
+    pub implicit: bool,
 }
 
 /// Why a target is incompatible with the target platform.
@@ -154,7 +170,9 @@ async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarg
             let owner = configured_key(ctx, key.label.sibling(*rule), key.config).await?;
             ctx.compute(&owner).await?;
             let artifact = Artifact::derived(owner.label, &key.config.get(), artifact::name_path(key.label), false);
-            file(ctx, key, "generated file", artifact)
+            let mut target = file(ctx, key, "generated file", artifact)?;
+            target.deps = vec![ConfiguredDep { label: owner.label, config: Some(owner.config), implicit: false }];
+            Ok(target)
         }
         Target::PackageGroup(group) => package_group(ctx, key, group).await,
     }
@@ -181,6 +199,9 @@ async fn toolchain_error(ctx: &Ctx, key: ConfiguredTargetKey, error: SkyError) -
     };
     SkyError::with_kind(error.kind(), message).with_origin(key.label.to_string())
 }
+
+/// The kind of a package group's configured target.
+const PACKAGE_GROUP: &str = "package group";
 
 /// Several errors as one error's message, which the server reports as
 /// Bazel does, each with its own `ERROR:`.
@@ -238,9 +259,14 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
         return incompatible(ctx, key, class_ref.kind, is_test, reason);
     }
     let fingerprint = fingerprint(key, rule, &setup.implementation, &deps, &setup.toolchains);
+    let edges = dependency_edges(key, package, rule, &setup, &deps)?;
+    let exec_platform = setup.toolchains.exec_platform.unwrap_or(key.config.get().host_platform);
     let input = rule_input(ctx, key, package, setup, deps).await?;
     let analyzed = evaluate_reporting(ctx, label, input, heap_name("target", key, fingerprint)).await?;
-    Ok(configured(ctx, key, class_ref.kind, is_test, analyzed, fingerprint))
+    let mut target = configured(ctx, key, class_ref.kind, is_test, analyzed, fingerprint);
+    target.deps = edges;
+    target.exec_platform = Some(exec_platform);
+    Ok(target)
 }
 
 /// What a rule's analysis needs before its dependencies are analyzed.
@@ -458,25 +484,7 @@ pub(crate) async fn analyze_deps(
     exec_config: ConfigId,
     attr_configs: &AttrConfigs,
 ) -> Result<BTreeMap<(Label, ConfigId), Dep>, SkyError> {
-    let mut wanted = Vec::new();
-    for (schema, (_, value)) in class.attrs.iter().zip(attrs) {
-        if !schema.is_dependency || !schema.ty.has_labels() || schema.ty == AttrType::Output || is_late_bound(schema.name) {
-            continue;
-        }
-        let mut labels = Vec::new();
-        value.labels(&mut labels);
-        let known: Vec<Label> = labels.iter().copied().filter(|label| !label.repo().is_unknown()).collect();
-        for (_, dep_config) in dep_configs(schema.cfg, schema.name, config, exec_config, attr_configs) {
-            wanted.extend(known.iter().map(|label| (*label, dep_config)));
-        }
-        for label in labels_of_unknown_repos(value) {
-            return Err(SkyError::new(format!(
-                "attribute '{}': no repository visible as '@{}'",
-                schema.name,
-                label.repo().as_str().rsplit('+').next().unwrap_or_default()
-            )));
-        }
-    }
+    let mut wanted: Vec<(Label, ConfigId)> = wanted_deps(class, attrs, config, exec_config, attr_configs)?.into_iter().map(|(label, config, _)| (label, config)).collect();
     wanted.sort();
     wanted.dedup();
     let results = futures::future::join_all(wanted.iter().map(|(label, config)| dep(ctx, *label, *config))).await;
@@ -490,6 +498,119 @@ pub(crate) async fn analyze_deps(
         };
     }
     Ok(deps)
+}
+
+/// The dependencies a rule's attributes name, each in the configuration
+/// it's built in, with the attribute that names it.
+fn wanted_deps(
+    class: &RuleClass,
+    attrs: &[(Symbol, AttrValue)],
+    config: ConfigId,
+    exec_config: ConfigId,
+    attr_configs: &AttrConfigs,
+) -> Result<Vec<(Label, ConfigId, Symbol)>, SkyError> {
+    let mut wanted = Vec::new();
+    for (schema, (_, value)) in class.attrs.iter().zip(attrs) {
+        if !schema.is_dependency || !schema.ty.has_labels() || schema.ty == AttrType::Output || is_late_bound(schema.name) {
+            continue;
+        }
+        let mut labels = Vec::new();
+        value.labels(&mut labels);
+        let known: Vec<Label> = labels.iter().copied().filter(|label| !label.repo().is_unknown()).collect();
+        for (_, dep_config) in dep_configs(schema.cfg, schema.name, config, exec_config, attr_configs) {
+            wanted.extend(known.iter().map(|label| (*label, dep_config, schema.name)));
+        }
+        for label in labels_of_unknown_repos(value) {
+            return Err(SkyError::new(format!(
+                "attribute '{}': no repository visible as '@{}'",
+                schema.name,
+                label.repo().as_str().rsplit('+').next().unwrap_or_default()
+            )));
+        }
+    }
+    Ok(wanted)
+}
+
+/// A rule's direct dependencies, as `cquery` follows them: what its
+/// attributes name, a test suite's implicit tests, the conditions of its
+/// `select()`s, and for a rule that resolves toolchains, its toolchains
+/// and the platforms it resolves them for. The BUILD file names those of attributes it sets and the
+/// conditions; the rest are implicit.
+fn dependency_edges(key: ConfiguredTargetKey, package: &Package, rule: &Rule, setup: &RuleSetup, deps: &BTreeMap<(Label, ConfigId), Dep>) -> Result<Vec<ConfiguredDep>, SkyError> {
+    let mut edges: Vec<ConfiguredDep> = Vec::new();
+    for (label, config, attr) in wanted_deps(&setup.class, &setup.attrs, setup.deps_config, setup.exec_config, &setup.attr_configs)? {
+        let implicit = rule.attr(attr).is_none();
+        if let Some(dep) = deps.get(&(label, config)) {
+            add_edge(&mut edges, dep_edge(label, config, dep, implicit));
+        }
+    }
+    if setup.class.kind.as_str() == "test_suite" {
+        for test in package.implicit_tests(rule) {
+            add_edge(&mut edges, ConfiguredDep { label: test, config: Some(setup.deps_config), implicit: false });
+        }
+    }
+    let mut conditions = Vec::new();
+    for (_, value) in &rule.attrs {
+        value.conditions(&mut conditions);
+    }
+    for condition in conditions.into_iter().filter(|condition| condition.to_string() != bazel_packages::DEFAULT_CONDITION) {
+        add_edge(&mut edges, ConfiguredDep { label: condition, config: Some(setup.deps_config), implicit: false });
+    }
+    if !resolves_toolchains(&setup.class) {
+        return Ok(edges);
+    }
+    for target in setup.toolchains.resolved.iter().filter_map(|(_, target)| target.as_ref()) {
+        add_edge(&mut edges, ConfiguredDep { label: target.label, config: Some(target.config), implicit: true });
+    }
+    let config = key.config.get();
+    let no_config = bazel_config::no_config();
+    let exec_platform = setup.toolchains.exec_platform.unwrap_or(config.host_platform);
+    for platform in [config.requested_platform(), exec_platform] {
+        add_edge(&mut edges, ConfiguredDep { label: platform, config: Some(no_config), implicit: true });
+    }
+    Ok(edges)
+}
+
+/// The edge to `label`, a dependency analyzed as `dep`: in the target's
+/// own configuration, or a file's, which a source file hasn't. An alias
+/// is its own node, which depends on its actual target.
+fn dep_edge(label: Label, config: ConfigId, dep: &Dep, implicit: bool) -> ConfiguredDep {
+    let config = match dep {
+        Dep::Target(target) if target.kind.as_str() == PACKAGE_GROUP => None,
+        Dep::Target(target) => Some(target.config),
+        Dep::Aspect(applied) => Some(applied.first().map_or(config, |target| target.config)),
+        Dep::File(_, artifact) => artifact.config,
+    };
+    ConfiguredDep { label, config, implicit }
+}
+
+/// Add an edge, once: a dependency named both implicitly and explicitly
+/// is explicit, as Bazel has it.
+fn add_edge(edges: &mut Vec<ConfiguredDep>, edge: ConfiguredDep) {
+    match edges.iter_mut().find(|existing| existing.label == edge.label && existing.config == edge.config) {
+        Some(existing) => existing.implicit &= edge.implicit,
+        None => edges.push(edge),
+    }
+}
+
+/// Whether a rule resolves toolchains, as Bazel's do but for those that
+/// configure the build: build settings, platforms and constraints,
+/// toolchains, config settings and aliases.
+fn resolves_toolchains(class: &RuleClass) -> bool {
+    const CONFIGURING: &[&str] = &[
+        "alias",
+        "config_setting",
+        "config_feature_flag",
+        "constraint_setting",
+        "constraint_value",
+        "environment",
+        "label_flag",
+        "label_setting",
+        "platform",
+        "toolchain",
+        "toolchain_type",
+    ];
+    class.build_setting.is_none() && !CONFIGURING.contains(&class.kind.as_str())
 }
 
 /// Why a dependency can't be had.
@@ -661,6 +782,8 @@ pub(crate) async fn alias(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule) -> R
 /// or an aspect's on a generated file, which its generating rule's
 /// application provides.
 pub(crate) fn forwarded(key: ConfiguredTargetKey, target: &ConfiguredTarget) -> Result<ConfiguredTarget, SkyError> {
+    let mut fingerprinter = Fingerprinter::new();
+    fingerprinter.bytes(b"forwarded").bytes(key.label.to_string().as_bytes()).bytes(target.fingerprint.as_bytes());
     Ok(ConfiguredTarget {
         label: key.label,
         config: key.config,
@@ -669,8 +792,14 @@ pub(crate) fn forwarded(key: ConfiguredTargetKey, target: &ConfiguredTarget) -> 
         value: PagedValue::new(target.providers()?.owned().clone()),
         actions: Vec::new(),
         generating: Vec::new(),
-        fingerprint: target.fingerprint,
+        fingerprint: fingerprinter.finish(),
         incompatible: target.incompatible.clone(),
+        deps: vec![ConfiguredDep {
+            label: target.label,
+            config: Some(target.config),
+            implicit: false,
+        }],
+        exec_platform: target.exec_platform,
         size: 64,
     })
 }
@@ -703,6 +832,8 @@ pub(crate) fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_t
         generating,
         fingerprint,
         incompatible: None,
+        deps: Vec::new(),
+        exec_platform: None,
         size,
     }
 }
@@ -801,7 +932,7 @@ async fn package_group(ctx: &Ctx, key: ConfiguredTargetKey, group: &bazel_packag
         Ok(Analyzed { module, actions: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
-    Ok(configured(ctx, key, Symbol::intern("package group"), false, analyzed, fingerprint))
+    Ok(configured(ctx, key, Symbol::intern(PACKAGE_GROUP), false, analyzed, fingerprint))
 }
 
 /// The name of the frozen heap of `key`'s providers. Heaps are told apart

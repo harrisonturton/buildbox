@@ -140,7 +140,7 @@ async fn rule_element<C: Compute>(universe: &Universe<C>, target: &TargetRef, op
         element.children.push(value_element);
     }
     if class.kind.as_str() == "test_suite" {
-        if let Some(tests) = implicit_tests_element(universe, target, mapping).await? {
+        if let Some(tests) = implicit_tests_element(target, mapping) {
             element.children.push(tests);
         }
     }
@@ -158,17 +158,17 @@ async fn rule_element<C: Compute>(universe: &Universe<C>, target: &TargetRef, op
 
 /// A test suite's `$implicit_tests`, which Bazel sets when it names no
 /// tests.
-async fn implicit_tests_element<C: Compute>(universe: &Universe<C>, suite: &TargetRef, mapping: &RepoMappingTable) -> Result<Option<Element>, QueryError> {
+fn implicit_tests_element(suite: &TargetRef, mapping: &RepoMappingTable) -> Option<Element> {
     let Target::Rule(rule) = suite.target() else {
-        return Ok(None);
+        return None;
     };
     if matches!(rule.attr(intern::Symbol::intern("tests")), Some(AttrValue::LabelList(tests)) if !tests.is_empty()) {
-        return Ok(None);
+        return None;
     }
-    let tests = universe.implicit_tests(suite.package(), rule).await?;
+    let tests = suite.package().implicit_tests(rule);
     let mut element = Element::new("list").with("name", "$implicit_tests");
     element.children.extend(tests.into_iter().map(|test| label(test, mapping)));
-    Ok(Some(element))
+    Some(element)
 }
 
 /// The element for an attribute's value, or values, if it has a

@@ -9,6 +9,7 @@ rust_library(
         "error.rs",
         "packages.rs",
         "rule_class.rs",
+        "tests_of.rs",
     ],
     crate_name = "bazel_packages",
     crate_root = "packages.rs",

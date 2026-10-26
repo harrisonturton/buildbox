@@ -32,6 +32,8 @@ pub struct QueryError {
 enum FailedIn {
     /// None: the error is reported as it is, as a target pattern's is.
     Nothing,
+    /// The evaluation, but no expression of it in particular.
+    Evaluation,
     /// The expression being evaluated, once the evaluator knows which.
     Pending,
     /// This expression, and whether it's the whole query.
@@ -44,6 +46,15 @@ impl QueryError {
         QueryError {
             message: message.into(),
             failed_in: FailedIn::Nothing,
+        }
+    }
+
+    /// An error in evaluating the query, which Bazel doesn't attribute to
+    /// an expression of it.
+    pub fn in_evaluation(message: impl Into<String>) -> QueryError {
+        QueryError {
+            message: message.into(),
+            failed_in: FailedIn::Evaluation,
         }
     }
 
@@ -71,7 +82,7 @@ impl QueryError {
     pub fn describe(&self) -> String {
         match &self.failed_in {
             FailedIn::Nothing => self.message.clone(),
-            FailedIn::Pending => format!("Evaluation failed: {}", self.message),
+            FailedIn::Pending | FailedIn::Evaluation => format!("Evaluation failed: {}", self.message),
             FailedIn::Expression { text, top_level: true } => format!("Evaluation of query \"{text}\" failed: {}", self.message),
             FailedIn::Expression { text, top_level: false } => {
                 format!("Evaluation of subquery \"{text}\" failed (did you want to use --keep_going?): {}", self.message)

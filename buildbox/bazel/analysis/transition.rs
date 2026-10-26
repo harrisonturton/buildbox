@@ -516,7 +516,7 @@ fn build_setting<'a>(input: &'a TransitionInput<'_>, label: Label) -> anyhow::Re
 }
 
 /// The native option `name`'s value, as transitions see it.
-fn native_value<'v>(options: &BuildOptions, name: &str, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+pub fn native_value<'v>(options: &BuildOptions, name: &str, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
     let value = options.get(name).map_err(|_| unsupported_option(name))?;
     Ok(match value {
         OptionValue::Null => Value::new_none(),

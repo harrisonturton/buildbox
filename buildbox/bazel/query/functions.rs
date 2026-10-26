@@ -4,7 +4,7 @@ use crate::engine::{Context, QueryEnvironment, QueryError};
 use crate::nodes::NodeSet;
 use crate::parse::Arg;
 use crate::universe::TargetRef;
-use bazel_packages::{AttrValue, Target};
+use bazel_packages::{AttrValue, TagFilter, Target, is_test_kind};
 use intern::Symbol;
 use regex::Regex;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -329,54 +329,16 @@ async fn suite_members<E: QueryEnvironment>(env: &E, suite: &E::Node) -> Result<
     for attr in ["tests", "$implicit_tests"] {
         for node in env.attr_nodes(suite, Symbol::intern(attr)).await? {
             let target = env.target_of(&node).await?;
-            if is_test_suite(&target) || filter.includes(&target) {
+            let selected = match target.target() {
+                Target::Rule(rule) => is_test_suite(&target) || filter.includes(rule),
+                _ => false,
+            };
+            if selected {
                 members.push((node, target));
             }
         }
     }
     Ok(members)
-}
-
-/// Which tests a test suite's tags select: those with every required tag
-/// and none excluded, a tag starting with `-` excluding.
-pub struct TagFilter {
-    required: Vec<String>,
-    excluded: Vec<String>,
-}
-
-impl TagFilter {
-    pub fn of(tags: &[String]) -> TagFilter {
-        let mut filter = TagFilter {
-            required: Vec::new(),
-            excluded: Vec::new(),
-        };
-        for tag in tags {
-            if let Some(tag) = tag.strip_prefix('-') {
-                filter.excluded.push(tag.to_string());
-            } else if let Some(tag) = tag.strip_prefix('+') {
-                filter.required.push(tag.to_string());
-            } else if tag != "manual" {
-                filter.required.push(tag.clone());
-            }
-        }
-        filter
-    }
-
-    /// Whether the filter selects a test, by its tags and its size.
-    pub fn includes(&self, test: &TargetRef) -> bool {
-        let mut tags = string_list_attr(test, "tags");
-        let size = match test.target() {
-            Target::Rule(rule) => match rule.attr(Symbol::intern("size")) {
-                Some(AttrValue::String(size)) => size.clone(),
-                _ => "medium".to_string(),
-            },
-            _ => String::new(),
-        };
-        tags.push(size);
-        let excluded = self.excluded.iter().any(|tag| tags.contains(tag));
-        let required = self.required.iter().all(|tag| tags.contains(tag));
-        !excluded && required
-    }
 }
 
 /// A rule's string list attribute, as given.
@@ -394,7 +356,7 @@ pub fn string_list_attr(target: &TargetRef, name: &str) -> Vec<String> {
 /// kind ends `_test`.
 pub fn is_test_rule(target: &TargetRef) -> bool {
     match target.target() {
-        Target::Rule(rule) => target.package().rule_class(rule).kind.as_str().ends_with("_test"),
+        Target::Rule(rule) => is_test_kind(target.package().rule_class(rule).kind.as_str()),
         _ => false,
     }
 }

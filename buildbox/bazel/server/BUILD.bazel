@@ -42,8 +42,10 @@ rust_library(
         "written.rs",
     ],
     compile_data = [
+        "help/aquery.txt",
         "help/build.txt",
         "help/clean.txt",
+        "help/cquery.txt",
         "help/dump.txt",
         "help/help.txt",
         "help/info.txt",
@@ -75,6 +77,7 @@ rust_library(
         "//buildbox/bazel/options",
         "//buildbox/bazel/packages",
         "//buildbox/bazel/progress",
+        "//buildbox/bazel/cquery",
         "//buildbox/bazel/query",
         "//buildbox/bazel/starlark",
         "//buildbox/bazel/ui",

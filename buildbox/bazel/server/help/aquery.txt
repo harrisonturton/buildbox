@@ -1,0 +1,6 @@
+Usage: bb aquery <options> <targets>
+
+Queries the specified targets, taking options into account and returns analysis
+time information about the action graph.
+The aquery command works on the post analysis phase configured target graph. It
+understands and takes into account configurations and configuration transitions.

@@ -7,10 +7,12 @@
 mod attr;
 mod error;
 mod rule_class;
+mod tests_of;
 
 pub use attr::{AttrType, AttrValue, Select, SelectorPart, DEFAULT_CONDITION};
 pub use error::{CallFrame, PackageError, SourcePosition, TraceFrame};
 pub use rule_class::{AspectRef, AttrDefault, AttrSchema, BuildSettingSpec, Cfg, RuleClass, RuleClassRef};
+pub use tests_of::{TagFilter, is_manual, is_test_kind};
 
 use bazel_label::{Label, PackageId};
 use intern::Symbol;

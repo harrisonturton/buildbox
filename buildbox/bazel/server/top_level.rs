@@ -5,7 +5,6 @@
 use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, FileValue, Runfiles, TargetValue, runfiles_repo_name};
 use bazel_label::RepoName;
 use bazel_options::ParsedOptions;
-use bazel_starlark::provider::ProviderInstance;
 use skycodec::{Decode, Encode, Fingerprint, Fingerprinter};
 use skyframe::{Ctx, Key, SkyError, encoded_value};
 use std::collections::BTreeSet;
@@ -18,8 +17,7 @@ pub struct TopLevelKey {
     pub groups: Vec<String>,
 }
 
-/// The output group of a target's default outputs, and its runfiles.
-const DEFAULT_GROUP: &str = "default";
+use bazel_analysis::DEFAULT_GROUP;
 
 /// The output groups `--output_groups` requests, sorted: those it names,
 /// or if each it names adds `+group` or removes `-group`, `default` with
@@ -43,20 +41,7 @@ pub fn output_groups(options: &ParsedOptions) -> Vec<String> {
 /// The files of the output groups that a build reports a target built:
 /// its default outputs, for `default`, and every other group's files.
 pub fn shown(target: &TargetValue<'_>, groups: &[String]) -> Vec<Artifact> {
-    let mut artifacts = Vec::new();
-    for group in groups {
-        match group.as_str() {
-            DEFAULT_GROUP => artifacts.extend(crate::build::depset_files(target.default_info("files"))),
-            _ => artifacts.extend(group_files(target, group)),
-        }
-    }
-    artifacts
-}
-
-/// The files of one of a target's output groups.
-fn group_files(target: &TargetValue<'_>, group: &str) -> Vec<Artifact> {
-    let groups = target.provider("OutputGroupInfo").and_then(ProviderInstance::from_value);
-    crate::build::depset_files(groups.and_then(|groups| groups.field(group)))
+    target.output_group_files(groups)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]

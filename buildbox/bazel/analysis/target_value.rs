@@ -53,6 +53,33 @@ impl<'v, V: ValueLike<'v>> TargetValueGen<V> {
         let info = ProviderInstance::from_value(self.provider(DEFAULT_INFO)?)?;
         info.field(field)
     }
+
+    /// The files of output groups, as a build reports a target built them:
+    /// its default outputs, for `default`, and every other group's files.
+    pub fn output_group_files(&self, groups: &[String]) -> Vec<crate::Artifact> {
+        let mut artifacts = Vec::new();
+        for group in groups {
+            match group.as_str() {
+                DEFAULT_GROUP => artifacts.extend(depset_artifacts(self.default_info("files"))),
+                _ => {
+                    let instance = self.provider("OutputGroupInfo").and_then(ProviderInstance::from_value);
+                    artifacts.extend(depset_artifacts(instance.and_then(|groups| groups.field(group))));
+                }
+            }
+        }
+        artifacts
+    }
+}
+
+/// The output group of a target's default outputs.
+pub const DEFAULT_GROUP: &str = "default";
+
+/// The files of a depset of files.
+pub fn depset_artifacts(value: Option<Value<'_>>) -> Vec<crate::Artifact> {
+    let Some(depset) = value.and_then(bazel_starlark::depset::Depset::from_value) else {
+        return Vec::new();
+    };
+    depset.to_list().into_iter().filter_map(crate::FileValue::artifact).collect()
 }
 
 /// The key a provider, given to index a target, finds its instance by.

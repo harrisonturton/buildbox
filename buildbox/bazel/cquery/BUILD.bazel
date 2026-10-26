@@ -1,0 +1,41 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "cquery",
+    srcs = [
+        "action_output.rs",
+        "action_proto.rs",
+        "configured_graph.rs",
+        "cquery.rs",
+        "node.rs",
+        "output.rs",
+        "starlark_output.rs",
+    ],
+    crate_name = "bazel_cquery",
+    crate_root = "cquery.rs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/bazel/analysis",
+        "//buildbox/bazel/config",
+        "//buildbox/bazel/label",
+        "//buildbox/bazel/packages",
+        "//buildbox/bazel/query",
+        "//buildbox/bazel/starlark",
+        "//buildbox/bazel/ui",
+        "//buildbox/intern",
+        "//buildbox/skyframe",
+        "@crates//:allocative",
+        "@crates//:anyhow",
+        "@crates//:regex",
+        "@crates//:ring",
+        "@crates//:starlark",
+    ],
+)
+
+rust_test(
+    name = "cquery_unit_test",
+    crate = ":cquery",
+)

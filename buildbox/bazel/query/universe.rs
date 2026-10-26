@@ -501,7 +501,7 @@ impl<C: Compute> Universe<C> {
                 let mut deps = rule_deps(rule, &class, &self.options);
                 package_default_deps(target.package(), rule, class.kind, &mut deps);
                 if class.kind.as_str() == "test_suite" {
-                    deps.extend(self.implicit_tests(target.package(), rule).await?);
+                    deps.extend(target.package().implicit_tests(rule));
                 }
                 deps.sort();
                 deps.dedup();

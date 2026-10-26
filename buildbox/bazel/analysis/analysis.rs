@@ -42,12 +42,14 @@ mod workspace_status;
 pub use action::{Action, ActionKind, RunfilesTree, Spawn, StoredAction};
 pub use inputs::InputSet;
 pub use artifact::{Artifact, name_path, package_dir, repo_dir, runfiles_repo_name};
-pub use configured::{ConfiguredTarget, ConfiguredTargetKey, Incompatibility, Providers};
+pub use attrs::{ConfiguredAttrs, ConfiguredAttrsKey};
+pub use transition::native_value;
+pub use configured::{ConfiguredDep, ConfiguredTarget, ConfiguredTargetKey, Incompatibility, Providers};
 pub use file_value::FileValue;
 pub use platform::{Platform, PlatformKey};
 pub use runfiles::{FilesToRun, Runfiles};
 pub use state::runfiles_tree;
-pub use target_value::{DEFAULT_INFO, TargetValue};
+pub use target_value::{DEFAULT_GROUP, DEFAULT_INFO, TargetValue, depset_artifacts};
 
 /// Add the natives analysis provides to Starlark: the C++ and coverage
 /// APIs, and how subrules find their attributes. Call before any file is

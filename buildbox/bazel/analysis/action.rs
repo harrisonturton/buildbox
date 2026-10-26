@@ -60,6 +60,26 @@ pub struct RunfilesTree {
 }
 
 impl Action {
+    /// What progress output and `aquery` call the action, as Bazel does:
+    /// its progress message, or its kind's default for its first output,
+    /// marked if it builds a tool.
+    pub fn description(&self, owner: &crate::ConfiguredTargetKey) -> String {
+        let output = self.outputs.first().map(|output| output.root_relative().to_string());
+        let message = match (self.progress_message.is_empty(), output) {
+            (false, _) => self.progress_message.clone(),
+            (true, Some(output)) => match &self.kind {
+                ActionKind::Write { .. } => format!("Writing file {output}"),
+                ActionKind::Template { .. } => format!("Expanding template {output}"),
+                ActionKind::Symlink { .. } | ActionKind::Spawn(_) => format!("{} {output}", self.mnemonic),
+            },
+            (true, None) => format!("{} {}", self.mnemonic, owner.label),
+        };
+        match owner.config.get().is_exec {
+            true => format!("{message} [for tool]"),
+            false => message,
+        }
+    }
+
     /// Every artifact the action reads, including those of runfiles trees,
     /// once each.
     pub fn all_inputs(&self) -> Vec<Artifact> {

@@ -53,7 +53,7 @@ pub async fn write_rule_with<C: Compute>(
         }
     }
     if class.kind.as_str() == "test_suite" && !names_tests(rule) {
-        let tests = AttrValue::LabelList(universe.implicit_tests(target.package(), rule).await?);
+        let tests = AttrValue::LabelList(target.package().implicit_tests(rule));
         writeln!(out, "  _implicit_tests = {},", build_value(&tests, mapping)).ok();
     }
     writeln!(out, ")").ok();

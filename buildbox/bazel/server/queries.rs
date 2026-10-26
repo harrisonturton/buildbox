@@ -1,14 +1,18 @@
 //! The query commands: `query` over the package graph, and `cquery` and
 //! `aquery` over the configured graph.
 
+use crate::build::{self, Built, Purpose};
 use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
+use bazel_cquery::{AqueryFormat, AqueryOutput, ConfiguredGraph, ConfiguredNode, ConfiguredOptions, CqueryFormat, CqueryOutput, Formatter, Language, Printed};
 use bazel_label::RepoName;
 use bazel_loading::RepoMappingKey;
 use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
-use bazel_query::{DotStyle, OrderOutput, OutputFormat, OutputOptions, QueryOptions, QueryRequest};
+use bazel_query::{DotStyle, Expr, OrderOutput, OutputFormat, OutputOptions, QueryOptions, QueryRequest, Universe};
+use skyframe::Session;
 use bazel_ui::Phase;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// The options every query command takes.
 const COMMON_OPTIONS: &[(&str, OptionKind)] = &[
@@ -211,4 +215,209 @@ pub(crate) fn query_expression(options: &ParsedOptions) -> Result<String, String
         return Err("missing query expression. Type 'bb help query' for syntax and help.".into());
     }
     Ok(options.residue.join(" "))
+}
+
+/// The options `cquery` takes: those of a build, and its own.
+pub(crate) fn cquery_spec() -> OptionSpec {
+    use OptionKind::*;
+    let mut options = build::build_spec().options();
+    options.extend_from_slice(COMMON_OPTIONS);
+    options.extend_from_slice(&[
+        ("starlark:expr", Value),
+        ("starlark:file", Value),
+        ("include_aspects", Bool),
+        ("show_config_fragments", Value),
+        ("transitions", Value),
+        ("proto:default_values", Bool),
+        ("proto:include_configurations", Bool),
+        ("graph:factored", Bool),
+        ("graph:node_limit", Int),
+        ("graph:conditional_edges_limit", Int),
+    ]);
+    OptionSpec::new(&options)
+}
+
+pub async fn cquery(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {
+    configured_query(context, args, Language::Cquery, out).await
+}
+
+pub async fn aquery(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {
+    configured_query(context, args, Language::Aquery, out).await
+}
+
+/// How a query of the configured graph prints its result.
+enum ConfiguredOutput {
+    Cquery(CqueryOutput),
+    Aquery(AqueryOutput),
+}
+
+/// Run `cquery` or `aquery`: analyze the universe as a build that doesn't
+/// execute anything would, then query what it configured.
+async fn configured_query(context: &CommandContext<'_>, args: &[String], language: Language, out: &Output) -> i32 {
+    let started = Instant::now();
+    let (command, spec) = match language {
+        Language::Cquery => ("cquery", cquery_spec()),
+        Language::Aquery => ("aquery", aquery_spec()),
+    };
+    let options = match parse_options(context, command, args, &spec, out).await {
+        Ok(options) => options,
+        Err(code) => return code,
+    };
+    let output = match language {
+        Language::Cquery => cquery_output(&options).map(ConfiguredOutput::Cquery),
+        Language::Aquery => aquery_output(&options).map(ConfiguredOutput::Aquery),
+    };
+    let (expression, output) = match query_expression(&options).and_then(|expression| Ok((expression, output?))) {
+        Ok(found) => found,
+        Err(message) => {
+            out.error(&message).await;
+            return exit::COMMAND_LINE_ERROR;
+        }
+    };
+    let expr = match bazel_query::parse(&expression, &language.functions()) {
+        Ok(expr) => expr,
+        Err(error) => {
+            out.error(&format!("Error while parsing '{}': {}", bazel_query::truncate(&expression), error.0)).await;
+            return exit::COMMAND_LINE_ERROR;
+        }
+    };
+    let workspace = context.server.workspaces().get(&context.workspace_root);
+    workspace.refresh(crate::command::repo_environment(context, &options)).await;
+    let session = workspace.graph.session().await;
+    let purpose = match language {
+        Language::Cquery => Purpose::Query,
+        Language::Aquery => Purpose::Build,
+    };
+    let built = match analyze_universe(context, &session, &options, &expr, purpose, out).await {
+        Ok(built) => built,
+        Err(code) => return build::failed(code, started, out).await,
+    };
+    let graph = configured_graph(context, &session, &options, language, &built);
+    let printed = match &output {
+        ConfiguredOutput::Cquery(output) => bazel_cquery::run(&graph, &expr, output).await,
+        ConfiguredOutput::Aquery(output) => bazel_cquery::run_aquery(&graph, &expr, output).await.map(|output| Printed { output, errors: Vec::new() }),
+    };
+    match printed {
+        Ok(printed) => {
+            for error in &printed.errors {
+                out.error(error).await;
+            }
+            out.stdout_bytes(&printed.output).await;
+        }
+        Err(error) => {
+            out.error(&format!("Error doing post analysis query: {}", error.describe())).await;
+            return build::failed(exit::BUILD_FAILURE, started, out).await;
+        }
+    }
+    build::report_stats(started, out).await;
+    build::completed(0, out).await;
+    exit::SUCCESS
+}
+
+/// Analyze a configured query's universe: the targets `--universe_scope`
+/// names, or else those the expression's patterns do, as a build that
+/// doesn't execute anything would. `aquery`'s patterns name what a build's
+/// would, `cquery`'s every target they match.
+async fn analyze_universe(context: &CommandContext<'_>, session: &Session, options: &ParsedOptions, expr: &Expr, purpose: Purpose, out: &Output) -> Result<Built, i32> {
+    let mut universe = options.clone();
+    universe.residue = match universe_scope(options) {
+        Some(scope) => scope,
+        None => {
+            let mut patterns = Vec::new();
+            expr.target_patterns(&mut patterns);
+            let mut unique = Vec::with_capacity(patterns.len());
+            for pattern in patterns {
+                if !unique.contains(&pattern) {
+                    unique.push(pattern);
+                }
+            }
+            unique
+        }
+    };
+    universe.set("build", "false");
+    let built = build::run_command(context, session, &universe, purpose, out).await?;
+    out.info(&built.found).await;
+    Ok(built)
+}
+
+/// The configured graph of what analyzing the universe configured.
+fn configured_graph<'a>(context: &CommandContext<'_>, session: &'a Session, options: &ParsedOptions, language: Language, built: &Built) -> ConfiguredGraph<&'a Session> {
+    let packages = Universe::new(
+        session,
+        query_options(options),
+        working_package(&context.workspace_root, &context.working_directory),
+        built.main_mapping.clone(),
+        context.workspace_root.clone(),
+    );
+    let configured = ConfiguredOptions {
+        implicit_deps: options.flag("implicit_deps", true),
+        tool_deps: options.flag("tool_deps", true) && options.flag("host_deps", true),
+    };
+    let roots = built.targets.iter().map(|(_, target, _)| ConfiguredNode { label: target.label, config: Some(target.config) }).collect();
+    ConfiguredGraph::new(packages, configured, language, built.config, roots)
+}
+
+/// The options `aquery` takes: those of a build, and its own.
+pub(crate) fn aquery_spec() -> OptionSpec {
+    use OptionKind::*;
+    let mut options = build::build_spec().options();
+    options.extend_from_slice(COMMON_OPTIONS);
+    options.extend_from_slice(&[
+        ("include_commandline", Bool),
+        ("include_artifacts", Bool),
+        ("include_param_files", Bool),
+        ("include_file_write_contents", Bool),
+        ("include_aspects", Bool),
+        ("include_pruned_inputs", Bool),
+        ("skyframe_state", Bool),
+        ("proto:include_configurations", Bool),
+    ]);
+    OptionSpec::new(&options)
+}
+
+/// How `aquery` prints results, as the options say.
+fn aquery_output(options: &ParsedOptions) -> Result<AqueryOutput, String> {
+    let name = options.get("output").unwrap_or("text");
+    let Some(format) = AqueryFormat::parse(name) else {
+        return Err(format!("Invalid output format '{name}'. Valid values are: {}", AqueryFormat::NAMES.join(", ")));
+    };
+    Ok(AqueryOutput {
+        format,
+        include_commandline: options.flag("include_commandline", true),
+        include_artifacts: options.flag("include_artifacts", true),
+    })
+}
+
+/// How `cquery` prints results, as the options say.
+fn cquery_output(options: &ParsedOptions) -> Result<CqueryOutput, String> {
+    let name = options.get("output").unwrap_or("label");
+    if name == "transitions" {
+        return Err("--output=transitions isn't supported by bb yet".to_string());
+    }
+    let Some(format) = CqueryFormat::parse(name) else {
+        return Err(format!("Invalid output format '{name}'. Valid values are: {}", CqueryFormat::NAMES.join(", ")));
+    };
+    let starlark = match (options.get("starlark:file"), options.get("starlark:expr")) {
+        (Some(_), Some(expr)) if !expr.is_empty() => return Err("You must not specify both --starlark:expr and --starlark:file".to_string()),
+        (Some(file), _) if !file.is_empty() => {
+            let source = std::fs::read_to_string(file).map_err(|error| format!("invalid --starlark:file: failed to read {file} ({error})"))?;
+            Formatter::File(source)
+        }
+        (_, expr) => Formatter::Expr(expr.unwrap_or_default().to_string()),
+    };
+    let limit = |name: &str, default: i64| match options.int(name, default) {
+        limit if limit < 0 => None,
+        limit => Some(limit as usize),
+    };
+    Ok(CqueryOutput {
+        format,
+        graph: DotStyle {
+            factored: options.flag("graph:factored", true),
+            node_limit: limit("graph:node_limit", 512),
+            conditional_edges_limit: limit("graph:conditional_edges_limit", 4),
+        },
+        output_groups: crate::top_level::output_groups(options),
+        starlark,
+        null_terminated: null_terminated(options),
+    })
 }
