@@ -16,14 +16,8 @@ use bazel_config::{AspectDescriptor, ConfigId};
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule};
 use bazel_progress::Progress;
-use bazel_packages::{AttrDefault, AttrSchema, AttrType, AttrValue, Package, PackageError, Rule, RuleClass, RuleClassRef, Target};
-use bazel_starlark::attr_module::Attribute;
-use bazel_starlark::label_value::LabelValue;
-use bazel_starlark::{EvalContext, FileKind};
-use starlark::eval::Evaluator;
-use starlark::values::list::AllocList;
-use starlark::values::structs::AllocStruct;
-use starlark::values::Heap;
+use crate::propagation::{self, Propagation, PropagationFunction, PropagationTarget};
+use bazel_packages::{AttrDefault, AttrSchema, AttrType, AttrValue, Package, Rule, RuleClass, RuleClassRef, Target};
 use bazel_starlark::aspect::{Aspect, AspectGen, english_list};
 use intern::Symbol;
 use skycodec::{Fingerprint, Fingerprinter};
@@ -52,8 +46,13 @@ impl LoadedAspect {
         Ok(LoadedAspect { module, value })
     }
 
-    fn get(&self) -> &AspectGen<Value<'_>> {
+    pub(crate) fn get(&self) -> &AspectGen<Value<'_>> {
         Aspect::from_value(self.value.value()).expect("checked when loaded")
+    }
+
+    /// The aspect's value, for a heap to access.
+    pub(crate) fn owned(&self) -> &OwnedFrozenValue {
+        &self.value
     }
 
     /// Its attributes and toolchains, as a rule class's.
@@ -374,77 +373,18 @@ pub(crate) async fn analyze(ctx: &Ctx, key: ConfiguredTargetKey, package: &Packa
 
 /// Whether an aspect's `propagation_predicate`, if it has one, lets it
 /// apply to a rule's target, `label`, as Bazel asks it: of the target's
-/// label, kind and tags, and the aspect's parameters. What it prints is
-/// reported; if it fails, so is why, which it fails with.
+/// label, kind and tags, and the aspect's parameters.
 async fn predicate_allows(ctx: &Ctx, aspect: &LoadedAspect, descriptor: &AspectDescriptor, label: Label, rule: &Rule, class_ref: &RuleClassRef) -> Result<bool, SkyError> {
-    if aspect.get().propagation_predicate.is_none() {
-        return Ok(true);
-    }
-    let mut printed = Vec::new();
-    let allowed = Module::with_temp_heap(|module| -> Result<bool, PackageError> {
-        let heap = module.heap();
-        let value = heap.access_owned_frozen_value(&aspect.value);
-        let aspect = Aspect::from_value(value).ok_or_else(|| PackageError::new("not an aspect"))?;
-        let predicate = aspect.propagation_predicate.ok_or_else(|| PackageError::new("no propagation predicate"))?;
-        let context = propagation_context(aspect, descriptor, label, rule, class_ref, heap);
-        let eval_context = EvalContext::new(FileKind::Bzl, aspect.definition);
-        let mut eval = Evaluator::new(&module);
-        eval.extra = Some(&eval_context);
-        let returned = eval.eval_function(predicate, &[context], &[]);
-        printed = eval_context.printed.take();
-        let returned = returned.map_err(|error| bazel_starlark::reported::package_error(&error, &[]))?;
-        returned.unpack_bool().ok_or_else(|| PackageError::new("Expected a boolean"))
-    });
-    bazel_loading::report_printed(ctx, &printed).await;
-    match allowed {
-        Ok(allowed) => Ok(allowed),
-        Err(error) => Err(predicate_failed(ctx, &error).await),
-    }
-}
-
-/// A propagation predicate's error, as Bazel reports it: in full, with
-/// its traceback, then its message alone, which the analysis fails with.
-async fn predicate_failed(ctx: &Ctx, error: &PackageError) -> SkyError {
-    let paths = bazel_loading::error_paths(ctx, error).await;
-    let reported = error.describe(&|file| paths.get(file).cloned().unwrap_or_else(|| file.to_string()));
-    let message = match error.message.strip_prefix("Error") {
-        Some(rest) => rest.split_once(": ").map(|(_, message)| message).unwrap_or(rest),
-        None => &error.message,
+    let tags = rule.attr(Symbol::intern("tags")).cloned().unwrap_or(AttrValue::StringList(Vec::new()));
+    let target = PropagationTarget {
+        label,
+        class_ref,
+        attrs: vec![(Symbol::intern("tags"), tags, false)],
     };
-    SkyError::new(configured::errors(&[&reported, message]))
-}
-
-/// The `ctx` a propagation predicate gets: `ctx.attr`, the aspect's
-/// parameters, and `ctx.rule`, with the target's
-/// `label`, its `qualified_kind` and its `attr.tags`.
-fn propagation_context<'v>(aspect: &AspectGen<Value<'v>>, descriptor: &AspectDescriptor, label: Label, rule: &Rule, class_ref: &RuleClassRef, heap: Heap<'v>) -> Value<'v> {
-    let mut params = Vec::with_capacity(descriptor.params.len());
-    for (name, text) in &descriptor.params {
-        let attribute = aspect.attrs.iter().find(|(attr, _)| attr == name).and_then(|(_, value)| Attribute::from_value(*value));
-        let value = match attribute.map(|attribute| attribute.ty) {
-            Some(AttrType::String) => heap.alloc(bazel_config::unquoted(text).unwrap_or_default()),
-            Some(AttrType::Int) => heap.alloc(text.parse::<i32>().unwrap_or_default()),
-            Some(AttrType::Bool) => Value::new_bool(text == "True"),
-            _ => Value::new_none(),
-        };
-        params.push((name.as_str(), value));
+    match propagation::call(ctx, aspect, PropagationFunction::Predicate, descriptor, &target).await? {
+        Some(Propagation::Allowed(allowed)) => Ok(allowed),
+        _ => Ok(true),
     }
-    let tags = match rule.attr(Symbol::intern("tags")) {
-        Some(AttrValue::StringList(tags)) => tags.clone(),
-        _ => Vec::new(),
-    };
-    let tags = heap.alloc(AllocStruct([("value", heap.alloc(AllocList(tags))), ("is_tool", Value::new_bool(false))]));
-    let file_label = match class_ref.definition {
-        Some((file, _)) => heap.alloc(LabelValue(file)),
-        None => Value::new_none(),
-    };
-    let kind = heap.alloc(AllocStruct([("file_label", file_label), ("rule_name", heap.alloc(class_ref.kind.as_str()))]));
-    let rule = heap.alloc(AllocStruct([
-        ("label", heap.alloc(LabelValue(label))),
-        ("qualified_kind", kind),
-        ("attr", heap.alloc(AllocStruct([("tags", tags)]))),
-    ]));
-    heap.alloc(AllocStruct([("attr", heap.alloc(AllocStruct(params))), ("rule", rule)]))
 }
 
 /// An aspect applied to a generated file, which applies to the rule
@@ -493,8 +433,10 @@ async fn apply(
     };
     let before = &config.aspects[..config.aspects.len() - 1];
     let targets = with_applications(ctx, plain, before).await?;
-    let toolchains = on_toolchains(ctx, &setup.toolchains, &config.aspects, aspects).await?;
-    propagate(&mut setup, &config.aspects, aspects);
+    let class_ref = package.rule_class(rule).clone();
+    let edges = propagation_edges(ctx, key.label, &class_ref, &setup, &config.aspects, aspects).await?;
+    let toolchains = on_toolchains(ctx, &setup.toolchains, &config.aspects, aspects, &edges).await?;
+    propagate(&mut setup, &config.aspects, aspects, &edges);
     let mut deps = analyze_deps(ctx, key.label, &setup.class, &setup.attrs, setup.deps_config, setup.exec_config, &setup.attr_configs).await?;
     let own = own_setup(ctx, key.label, aspect, descriptor, setup.deps_config).await?;
     deps.extend(analyze_deps(ctx, key.label, &own.class, &own.attrs, own.deps_config, own.exec_config, &own.attr_configs).await?);
@@ -513,6 +455,44 @@ async fn apply(
     Ok(configured(ctx, key, kind, false, analyzed, fingerprint))
 }
 
+/// Where each aspect propagates from a target, if a function of it
+/// decides: the attributes, and the toolchain types.
+#[derive(Default)]
+struct Edges {
+    attrs: Option<Vec<String>>,
+    toolchain_types: Option<Vec<Label>>,
+}
+
+/// Where each of `aspects` propagates from a rule's target, `label`, set up
+/// as `setup`, as the functions they have in place of `attr_aspects` and
+/// `toolchains_aspects` decide.
+async fn propagation_edges(
+    ctx: &Ctx,
+    label: Label,
+    class_ref: &RuleClassRef,
+    setup: &RuleSetup,
+    descriptors: &[AspectDescriptor],
+    aspects: &[LoadedAspect],
+) -> Result<Vec<Edges>, SkyError> {
+    let target = PropagationTarget {
+        label,
+        class_ref,
+        attrs: PropagationTarget::attrs_of(&setup.class.attrs, &setup.attrs),
+    };
+    let mut edges = Vec::with_capacity(aspects.len());
+    for (descriptor, aspect) in descriptors.iter().zip(aspects) {
+        let mut aspect_edges = Edges::default();
+        if let Some(Propagation::Attrs(attrs)) = propagation::call(ctx, aspect, PropagationFunction::AttrAspects, descriptor, &target).await? {
+            aspect_edges.attrs = Some(attrs);
+        }
+        if let Some(Propagation::ToolchainTypes(types)) = propagation::call(ctx, aspect, PropagationFunction::ToolchainsAspects, descriptor, &target).await? {
+            aspect_edges.toolchain_types = Some(types);
+        }
+        edges.push(aspect_edges);
+    }
+    Ok(edges)
+}
+
 /// The toolchains of a target, `resolved` for it, as aspects applied to
 /// it see them: each with the applications to its target of those that
 /// propagate to toolchains of its type.
@@ -521,6 +501,7 @@ async fn on_toolchains(
     resolved: &crate::toolchains::ResolvedToolchains,
     descriptors: &[AspectDescriptor],
     aspects: &[LoadedAspect],
+    edges: &[Edges],
 ) -> Result<Vec<AspectToolchain>, SkyError> {
     let mut toolchains = Vec::with_capacity(resolved.resolved.len());
     for (toolchain_type, target) in &resolved.resolved {
@@ -533,8 +514,8 @@ async fn on_toolchains(
         };
         let actual = crate::platform::actual(ctx, *toolchain_type).await?;
         let mut propagating = Vec::new();
-        for (descriptor, aspect) in descriptors.iter().zip(aspects) {
-            if propagates_to_toolchains(ctx, aspect, actual).await? {
+        for ((descriptor, aspect), edges) in descriptors.iter().zip(aspects).zip(edges) {
+            if propagates_to_toolchains(ctx, aspect, edges, actual).await? {
                 propagating.push(descriptor.clone());
             }
         }
@@ -549,10 +530,14 @@ async fn on_toolchains(
 }
 
 /// Whether an aspect propagates to the toolchains of a type, by its
-/// actual label: whether its `toolchains_aspects` names it, or an alias of
-/// it.
-async fn propagates_to_toolchains(ctx: &Ctx, aspect: &LoadedAspect, toolchain_type: Label) -> Result<bool, SkyError> {
-    let propagated = aspect.get().propagated_toolchains.get().cloned().unwrap_or_default();
+/// actual label: whether its `toolchains_aspects`, or the function in its
+/// place, names it, or an alias of it, or every type.
+async fn propagates_to_toolchains(ctx: &Ctx, aspect: &LoadedAspect, edges: &Edges, toolchain_type: Label) -> Result<bool, SkyError> {
+    let propagated = match &edges.toolchain_types {
+        Some(types) => types.clone(),
+        None if aspect.get().propagates_to_toolchains(toolchain_type) => return Ok(true),
+        None => aspect.get().propagated_toolchains.get().cloned().unwrap_or_default(),
+    };
     for propagated in propagated {
         if crate::platform::actual(ctx, propagated).await? == toolchain_type {
             return Ok(true);
@@ -585,16 +570,21 @@ async fn own_setup(ctx: &Ctx, label: Label, aspect: &LoadedAspect, descriptor: &
 
 /// Apply the aspects to the dependencies of the attributes they propagate
 /// along, as the rule's `ctx.rule.attr` sees them.
-fn propagate(setup: &mut RuleSetup, descriptors: &[AspectDescriptor], aspects: &[LoadedAspect]) {
+fn propagate(setup: &mut RuleSetup, descriptors: &[AspectDescriptor], aspects: &[LoadedAspect], edges: &[Edges]) {
     for schema in &setup.class.attrs {
         if !schema.is_dependency || !schema.ty.has_labels() || schema.ty.is_output() {
             continue;
         }
+        let name = schema.name.as_str();
         let propagating: Vec<AspectDescriptor> = descriptors
             .iter()
             .zip(aspects)
-            .filter(|(_, aspect)| aspect.get().propagates_along(schema.name.as_str()))
-            .map(|(descriptor, _)| descriptor.clone())
+            .zip(edges)
+            .filter(|((_, aspect), edges)| match &edges.attrs {
+                Some(attrs) => attrs.iter().any(|attr| attr == name),
+                None => aspect.get().propagates_along(name),
+            })
+            .map(|((descriptor, _), _)| descriptor.clone())
             .collect();
         if propagating.is_empty() {
             continue;

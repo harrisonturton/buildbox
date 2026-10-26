@@ -35,35 +35,36 @@ the exec configuration being right.
 
 ## 2. Aspects
 
-Starlark aspects work as Bazel's do for the common cases:
+Starlark aspects work as Bazel's do:
 
 - attached with `attr.label(aspects = [...])`, taking parameters from the
   rule's attributes of the same names and types;
-- propagated along `attr_aspects`, including `*`;
-- applied only to rules whose `provides` satisfy `required_providers`,
-  and, with `apply_to_generating_rules`, to the rules generating the files
-  they propagate to;
+- propagated along `attr_aspects`, including `*`, and to the toolchains of
+  the types `toolchains_aspects` names, or every type for `*`, each list
+  given or computed for each target by a function;
+- applied only to rules whose `provides` satisfy `required_providers`, and
+  that their `propagation_predicate` accepts; and with
+  `apply_to_generating_rules`, to the rules generating the files they
+  propagate to;
 - applied after the aspects they `requires`, and seeing the providers of
   those and of the aspects whose `provides` satisfy their
   `required_aspect_providers`, keyed as Bazel keys them by the aspects
   they see;
 - with private and exec attributes, toolchains and exec groups;
-- propagated to the toolchains of the types their `toolchains_aspects`
-  name, which `ctx.rule.toolchains` gives their providers on;
-- kept from targets their `propagation_predicate` rejects;
-- with `ctx.rule` and `ctx.aspect_ids`, and their providers merged into the
+- with `ctx.rule`, its `toolchains` giving the providers aspects gave
+  them, and `ctx.aspect_ids`; and their providers merged into the
   dependent's view of the target, output groups included;
 - applied at the top level with `--aspects` and `--aspects_parameters`,
   built with `--output_groups` and reported as Bazel reports them;
-- failing as Bazel's do, with Bazel's tracebacks and wording, as rules'
-  implementations now do too.
+- checked where they're defined, attached and used, and failing as Bazel's
+  do, with Bazel's tracebacks and wording, as rules' implementations now
+  do too.
 
-Still missing:
+Bazel 9 has no native aspects that users apply, only its validation
+aspect, which bb doesn't have.
 
-- `attr_aspects` and `toolchains_aspects` given as functions
-  (experimental in Bazel);
-- Bazel's native aspects;
-- aspects in `cquery` and `aquery`.
+Still missing: aspects in `cquery` and `aquery`, which bb doesn't have
+yet.
 
 ## 3. Execution platforms and exec groups
 

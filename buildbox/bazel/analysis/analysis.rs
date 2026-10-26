@@ -27,6 +27,7 @@ mod native;
 mod package_spec;
 pub mod paging;
 mod platform;
+mod propagation;
 mod providers;
 mod rule_ctx;
 mod shared;

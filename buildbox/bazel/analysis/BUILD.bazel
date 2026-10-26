@@ -37,6 +37,7 @@ rust_library(
         "package_spec.rs",
         "paging.rs",
         "platform.rs",
+        "propagation.rs",
         "providers.rs",
         "rule_ctx.rs",
         "runfiles.rs",

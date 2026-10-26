@@ -30,6 +30,9 @@ pub struct AspectGen<V: ValueLifetimeless> {
     #[freeze(identity)]
     #[allocative(skip)]
     pub attr_aspects: Vec<String>,
+    /// In place of `attr_aspects`, a function of each target it's applied
+    /// to that returns them.
+    pub attr_aspects_function: Option<V>,
     /// Its own attributes, as `attr.*()` values: private ones with
     /// defaults, and public ones it takes as parameters.
     pub attrs: Vec<(String, V)>,
@@ -54,8 +57,14 @@ pub struct AspectGen<V: ValueLifetimeless> {
     /// The toolchain types its implementation needs.
     pub toolchains: Vec<V>,
     /// The toolchain types it propagates to the toolchains of, in the
-    /// targets it's applied to.
-    pub toolchains_aspects: Vec<V>,
+    /// targets it's applied to, as labels relative to its `.bzl` file, or
+    /// `*` for every toolchain.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    pub toolchains_aspects: Vec<String>,
+    /// In place of `toolchains_aspects`, a function of each target it's
+    /// applied to that returns them.
+    pub toolchains_aspects_function: Option<V>,
     /// `exec_groups = {name: exec_group()}`: those its actions can run in.
     pub exec_groups: Option<V>,
     /// A function of a target, as `propagation_predicate` gives it, that
@@ -186,7 +195,8 @@ impl<'v, V: ValueLike<'v>> AspectGen<V> {
     /// Whether it propagates to the toolchains of this type, its actual
     /// label, of the targets it's applied to.
     pub fn propagates_to_toolchains(&self, toolchain_type: Label) -> bool {
-        self.propagated_toolchains.get().is_some_and(|types| types.contains(&toolchain_type))
+        let all = self.toolchains_aspects.iter().any(|name| name == "*");
+        all || self.propagated_toolchains.get().is_some_and(|types| types.contains(&toolchain_type))
     }
 
     /// Its attributes, toolchains and exec groups, as the schema of a rule
@@ -213,7 +223,11 @@ impl<'v, V: ValueLike<'v>> AspectGen<V> {
         class.toolchain_types = toolchain_types;
         class.optional_toolchain_types = optional_toolchain_types;
         class.exec_groups = exec_group_names(self.exec_groups.map(|groups| groups.to_value()), "aspect")?;
-        let propagated = self.toolchains_aspects.iter().map(|toolchain_type| parser.label(toolchain_type.to_value())).collect::<anyhow::Result<_>>()?;
+        let mut propagated = Vec::with_capacity(self.toolchains_aspects.len());
+        for text in self.toolchains_aspects.iter().filter(|text| *text != "*") {
+            let label = parser.parse(text).map_err(|error| anyhow::anyhow!("Unable to parse label '{text}' in attribute 'toolchains_aspects': {error}"))?;
+            propagated.push(label);
+        }
         Ok((class, propagated))
     }
 }
@@ -246,6 +260,20 @@ fn items<'v>(value: Option<Value<'v>>, what: &str) -> anyhow::Result<Vec<Value<'
         return Ok(Vec::new());
     };
     crate::convert::items(value).ok_or_else(|| anyhow::anyhow!("aspect(): {what} must be a list, not {}", value.get_type()))
+}
+
+/// A function, as Bazel takes one in place of a list.
+fn function(value: Option<Value<'_>>) -> Option<Value<'_>> {
+    value.filter(|value| value.get_type() == "function")
+}
+
+/// A list naming what an aspect propagates to, in which `*` for all must
+/// be alone, as Bazel requires.
+fn all_or_listed(names: Vec<String>, noun: &str, what: &str) -> anyhow::Result<Vec<String>> {
+    if names.len() > 1 && names.iter().any(|name| name == "*") {
+        anyhow::bail!("'*' must be the only {noun} in '{what}' list");
+    }
+    Ok(names)
 }
 
 /// The strings of a list, `what`, as Bazel requires them.
@@ -446,7 +474,14 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<Aspect<'v>> {
         let _ = kwargs;
         let context = EvalContext::get(eval)?;
-        let attr_aspects = strings(items(attr_aspects, "attr_aspects")?, "attr_aspects")?;
+        let (attr_aspects, attr_aspects_function) = match function(attr_aspects) {
+            Some(function) => (Vec::new(), Some(function)),
+            None => (all_or_listed(strings(items(attr_aspects, "attr_aspects")?, "attr_aspects")?, "string", "attr_aspects")?, None),
+        };
+        let (toolchains_aspects, toolchains_aspects_function) = match function(toolchains_aspects) {
+            Some(function) => (Vec::new(), Some(function)),
+            None => (all_or_listed(strings(items(toolchains_aspects, "toolchains_aspects")?, "toolchains_aspects")?, "item", "toolchains_aspects")?, None),
+        };
         let attrs = declared_attrs(attrs)?;
         check_attrs(&attrs)?;
         let required_providers = self::required_providers(required_providers, "required_providers")?;
@@ -463,6 +498,7 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
         Ok(AspectGen {
             implementation,
             attr_aspects,
+            attr_aspects_function,
             attrs,
             required_providers,
             requires: items(requires, "requires")?,
@@ -470,7 +506,8 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
             required_aspect_providers: self::required_providers(required_aspect_providers, "required_aspect_providers")?,
             apply_to_generating_rules,
             toolchains: items(toolchains, "toolchains")?,
-            toolchains_aspects: items(toolchains_aspects, "toolchains_aspects")?,
+            toolchains_aspects,
+            toolchains_aspects_function,
             exec_groups,
             propagation_predicate,
             definition: context.caller_file(eval),
