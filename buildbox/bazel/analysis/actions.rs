@@ -177,13 +177,13 @@ fn string_dict(value: Option<Value<'_>>, what: &str) -> anyhow::Result<Vec<(Stri
     Ok(entries)
 }
 
-/// The text of a progress message, with `%{label}`, `%{input}` and
-/// `%{output}` substituted.
+/// The text of a progress message, with `%{label}`, and `%{input}` and
+/// `%{output}` substituted by their paths relative to their roots.
 fn progress_message(message: Option<&str>, state: &RuleState, inputs: &InputSet, outputs: &[Artifact]) -> String {
     let Some(message) = message else {
         return String::new();
     };
-    let first_path = |artifacts: &[Artifact]| artifacts.first().map(|artifact| artifact.exec_path.to_string()).unwrap_or_default();
+    let first_path = |artifacts: &[Artifact]| artifacts.first().map(|artifact| artifact.root_relative().to_string()).unwrap_or_default();
     let mut message = message.replace("%{label}", &state.label.to_string()).replace("%{output}", &first_path(outputs));
     if message.contains("%{input}") {
         message = message.replace("%{input}", &first_path(&inputs.to_vec()));
@@ -535,8 +535,13 @@ fn actions_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let _ = (input_manifests, exec_group, shadowed_action, resource_set, toolchain);
         let state = RuleState::get(eval)?;
+        let has_arguments = arguments.and_then(bazel_starlark::convert::items).is_some_and(|items| !items.is_empty());
         let command = match command.unpack_str() {
-            Some(script) => vec!["/bin/bash".to_string(), "-c".to_string(), script.to_string(), String::new()],
+            Some(script) => {
+                let mut command = vec!["/bin/bash".to_string(), "-c".to_string(), script.to_string()];
+                command.extend(has_arguments.then(String::new));
+                command
+            }
             None => bazel_starlark::convert::strings(command).ok_or_else(|| anyhow::anyhow!("run_shell: command must be a string"))?,
         };
         let spawn = SpawnArgs {

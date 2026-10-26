@@ -83,11 +83,12 @@ fn not_created(mnemonic: &str, path: &str) -> String {
     }
 }
 
-/// `bash failed: error executing Genrule command (from target //a:b) ...`.
+/// `bash failed: error executing Genrule command (from genrule rule target
+/// //a:b) ...`.
 fn describe_command_failure(failure: &ActionFailure, command: &Command, format: &FailureFormat) -> String {
     let program = command.arguments.first().map(String::as_str).unwrap_or_default();
     let short_name = Path::new(program).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut text = format!("{short_name} failed: error executing {} command (from target {}) ", failure.mnemonic, failure.label);
+    let mut text = format!("{short_name} failed: error executing {} command (from {}) ", failure.mnemonic, failure.owner);
     match format.verbose {
         true => text.push_str(&complete_command(command, format.exec_root.as_deref())),
         false => text.push_str(&abbreviated_command(&command.arguments)),
@@ -149,7 +150,7 @@ mod tests {
             error: String::new(),
             location: Some("/w/fail/BUILD.bazel:1:8".to_string()),
             description: "Executing genrule //fail:bad".to_string(),
-            label: "//fail:bad".to_string(),
+            owner: "genrule rule target //fail:bad".to_string(),
             mnemonic: "Genrule".to_string(),
             reason,
             output: ActionOutput {
@@ -181,7 +182,7 @@ mod tests {
             [(
                 Kind::Error,
                 format!(
-                    "/w/fail/BUILD.bazel:1:8: Executing genrule //fail:bad failed: (Exit 3): bash failed: error executing Genrule command (from target //fail:bad) /bin/bash -c 'echo oops >&2; exit 3'\n\n{SANDBOX_DEBUG_HINT}"
+                    "/w/fail/BUILD.bazel:1:8: Executing genrule //fail:bad failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //fail:bad) /bin/bash -c 'echo oops >&2; exit 3'\n\n{SANDBOX_DEBUG_HINT}"
                 )
             )]
         );
@@ -195,7 +196,7 @@ mod tests {
             exec_root: Some("/out/execroot/_main".into()),
         };
         let shown = action_failure(&failure(exit()), &format);
-        let expected = "error executing Genrule command (from target //fail:bad) \n  (cd /out/execroot/_main && \\\n  exec env - \\\n    PATH=/bin:/usr/bin \\\n  /bin/bash -c 'echo oops >&2; exit 3')\n# Configuration: e849\n# Execution platform: @@platforms//host:host";
+        let expected = "error executing Genrule command (from genrule rule target //fail:bad) \n  (cd /out/execroot/_main && \\\n  exec env - \\\n    PATH=/bin:/usr/bin \\\n  /bin/bash -c 'echo oops >&2; exit 3')\n# Configuration: e849\n# Execution platform: @@platforms//host:host";
         assert!(shown.messages[0].1.contains(expected), "{}", shown.messages[0].1);
     }
 

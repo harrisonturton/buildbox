@@ -98,6 +98,15 @@ pub struct Built {
     /// How many of the targets didn't build every file they build at the
     /// top level.
     pub unbuilt: usize,
+    /// How many of the aspects didn't.
+    pub unbuilt_aspects: usize,
+    /// How many top-level targets the command line names.
+    pub requested: usize,
+    /// The warnings for the targets that failed to analyze, which
+    /// `--keep_going` builds without, as Bazel words them.
+    pub skipped: Vec<String>,
+    /// How many targets were analyzed, as Bazel says it.
+    pub found: String,
     pub exec_root: PathBuf,
     pub errors: bool,
     /// Whether the build's only errors were top-level targets, or aspects
@@ -312,8 +321,8 @@ async fn analyze_and_build(
     let mut errors = incompatible;
     let execute_actions = options.flag("build", true);
     out.info(&bazel_ui::analyzed(&what, &out.snapshot().await)).await;
-    report_kept_going(&failed, &failed_aspects, analyzed.len(), labels.len(), execute_actions, &main_mapping, out).await;
-    report_found(&analyzed, testing, out).await;
+    let skipped = skipped_warnings(&failed, &failed_aspects, &main_mapping);
+    let found = found(&analyzed, testing);
     let analysis_failed = !failed.is_empty() || !failed_aspects.is_empty();
     out.phase(Phase::Executing).await;
 
@@ -338,6 +347,7 @@ async fn analyze_and_build(
     let built_by_path: HashMap<PathId, OutputFile> = built.iter().map(|file| (file.path, *file)).collect();
     let mut targets = Vec::new();
     let mut unbuilt = 0;
+    let mut unbuilt_aspects = 0;
     for ((label, target), top) in analyzed.into_iter().zip(&target_tops) {
         let files = built_files(top.as_deref(), &built_by_path);
         unbuilt += usize::from(files.is_none());
@@ -345,7 +355,9 @@ async fn analyze_and_build(
     }
     let mut built_aspects = Vec::new();
     for ((aspect, label, target), top) in applied.into_iter().zip(&aspect_tops) {
-        let files = built_files(top.as_deref(), &built_by_path).unwrap_or_default();
+        let files = built_files(top.as_deref(), &built_by_path);
+        unbuilt_aspects += usize::from(files.is_none());
+        let files = files.unwrap_or_default();
         built_aspects.push(BuiltAspect { aspect, label, target, files });
     }
     if let Some(backend) = &backend {
@@ -370,6 +382,10 @@ async fn analyze_and_build(
         aspects: built_aspects,
         groups,
         unbuilt,
+        unbuilt_aspects,
+        requested: labels.len(),
+        skipped,
+        found,
         exec_root,
         errors: errors || analysis_failed,
         analysis_incomplete: analysis_failed && !errors,
@@ -589,41 +605,29 @@ fn analyzing(labels: &[Label], mapping: &RepoMappingTable) -> String {
     }
 }
 
-/// Say how many targets were analyzed, and of them how many are tests,
-/// as Bazel does.
-async fn report_found(analyzed: &[(Label, Arc<ConfiguredTarget>)], testing: bool, out: &Output) {
+/// How many targets were analyzed, and of them how many are tests, as
+/// Bazel says it.
+fn found(analyzed: &[(Label, Arc<ConfiguredTarget>)], testing: bool) -> String {
     let tests = analyzed.iter().filter(|(_, target)| target.is_test).count();
     let others = analyzed.len() - tests;
-    match testing {
-        true => out.info(&format!("Found {others} {} and {tests} test {}...", plural(others, "target"), plural(tests, "target"))).await,
-        false => out.info(&format!("Found {} {}...", analyzed.len(), plural(analyzed.len(), "target"))).await,
+    match (testing, others) {
+        (true, 0) => format!("Found {tests} test {}...", plural(tests, "target")),
+        (true, _) => format!("Found {others} {} and {tests} test {}...", plural(others, "target"), plural(tests, "target")),
+        (false, _) => format!("Found {} {}...", analyzed.len(), plural(analyzed.len(), "target")),
     }
 }
 
-/// Report the top-level targets and aspects that failed to analyze, which
-/// `--keep_going` let the build go on without, as Bazel does: with why,
-/// for an aspect, and how many targets analyzed.
-async fn report_kept_going(
-    failed: &[Failed],
-    failed_aspects: &[FailedAspect],
-    analyzed: usize,
-    requested: usize,
-    execute_actions: bool,
-    mapping: &RepoMappingTable,
-    out: &Output,
-) {
+/// The warnings for the top-level targets and aspects that failed to
+/// analyze, which `--keep_going` lets the build go on without, as Bazel
+/// words them: with why, for an aspect.
+fn skipped_warnings(failed: &[Failed], failed_aspects: &[FailedAspect], mapping: &RepoMappingTable) -> Vec<String> {
     let warning = |target: &str| format!("errors encountered while analyzing target '{target}', it will not be built.");
-    for failure in failed {
-        out.warning(&warning(&failure.target)).await;
-    }
+    let mut warnings: Vec<String> = failed.iter().map(|failure| warning(&failure.target)).collect();
     for failure in failed_aspects {
         let (_, why) = failure.split();
-        out.warning(&format!("{}\n{why}", warning(&bazel_query::display_label(failure.label, mapping)))).await;
+        warnings.push(format!("{}\n{why}", warning(&bazel_query::display_label(failure.label, mapping))));
     }
-    if 0 < analyzed && analyzed < requested {
-        let phase = if execute_actions { "Build" } else { "Analysis" };
-        out.info(&format!("{phase} succeeded for only {analyzed} of {requested} top-level targets")).await;
-    }
+    warnings
 }
 
 /// What each analyzed target builds at the top level, and whether working
@@ -1121,7 +1125,8 @@ async fn generating_actions(session: &Session, artifacts: &[Artifact]) -> Vec<(A
     keys
 }
 
-/// Print what each target built, and make the convenience symlinks.
+/// Print what the build found and what each target built, as Bazel does
+/// once it's built them, and make the convenience symlinks.
 pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built: &Built, out: &Output) {
     let prefix = options.get("symlink_prefix").unwrap_or("bazel-");
     let config = built.config.get();
@@ -1129,13 +1134,22 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
         out.warning(&format!("failed to create convenience symlinks: {error}")).await;
     }
     let executed = options.flag("build", true);
-    let failed = match executed {
-        true => built.unbuilt,
-        false => 0,
+    let (failed, failed_aspects) = match executed {
+        true => (built.unbuilt, built.unbuilt_aspects),
+        false => (0, 0),
     };
-    if failed > 0 && options.flag("keep_going", false) {
-        let succeeded = built.targets.len() - failed;
-        out.info(&format!("Build succeeded for only {succeeded} of {} top-level targets", built.targets.len())).await;
+    let keep_going = options.flag("keep_going", false);
+    for warning in &built.skipped {
+        out.warning(warning).await;
+    }
+    let succeeded = built.targets.len() - failed;
+    if keep_going && 0 < succeeded && succeeded < built.requested {
+        let phase = if executed { "Build" } else { "Analysis" };
+        out.info(&format!("{phase} succeeded for only {succeeded} of {} top-level targets", built.requested)).await;
+    }
+    let any_failed = failed + failed_aspects > 0;
+    if keep_going || !any_failed {
+        out.info(&built.found).await;
     }
     let show_result: usize = options.get("show_result").and_then(|value| value.parse().ok()).unwrap_or(1);
     if executed {
@@ -1148,7 +1162,7 @@ pub async fn report(context: &CommandContext<'_>, options: &ParsedOptions, built
         let aspects: Vec<Reported> = built.aspects.iter().map(|aspect| aspect_result(aspect, built)).collect();
         report_results(&targets, &aspects, show_result, prefix, &config.output_directory, out).await;
     }
-    if failed > 0 && !options.flag("verbose_failures", false) {
+    if any_failed && !options.flag("verbose_failures", false) {
         out.stderr("Use --verbose_failures to see the command lines of failed build steps.\n").await;
     }
 }

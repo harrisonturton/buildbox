@@ -120,12 +120,17 @@ pub fn progress(ctx: &Ctx) -> Option<Arc<Progress>> {
     ctx.global::<Progress>().ok()
 }
 
-/// What progress output calls an action: its progress message, or its
-/// mnemonic and owner.
+/// What progress output calls an action, as Bazel does: its progress
+/// message, or its mnemonic and first output, marked if it builds a tool.
 pub fn description(action: &Action, owner: ConfiguredTargetKey) -> String {
-    match action.progress_message.is_empty() {
-        true => format!("{} {}", action.mnemonic, owner.label),
-        false => action.progress_message.clone(),
+    let message = match (action.progress_message.is_empty(), action.outputs.first()) {
+        (false, _) => action.progress_message.clone(),
+        (true, Some(output)) => format!("{} {}", action.mnemonic, output.root_relative()),
+        (true, None) => format!("{} {}", action.mnemonic, owner.label),
+    };
+    match owner.config.get().is_exec {
+        true => format!("{message} [for tool]"),
+        false => message,
     }
 }
 

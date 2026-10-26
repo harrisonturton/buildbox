@@ -11,7 +11,7 @@ pub use options::{BuildOptions, FlagValue, LabelParser, NATIVE_OPTIONS, NativeOp
 
 use bazel_label::Label;
 use intern::BlobTable;
-use skycodec::{Decode, Encode, Fingerprinter};
+use skycodec::{Decode, Encode};
 use std::fmt;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -55,6 +55,8 @@ pub struct BuildConfiguration {
     pub output_directory: String,
     /// A short hash of the options, as `cquery` prints it.
     pub checksum: String,
+    /// The hash in full, as a failed command's configuration.
+    pub digest: String,
 }
 
 impl ConfigId {
@@ -118,9 +120,7 @@ impl fmt::Debug for ConfigId {
 
 impl BuildConfiguration {
     fn new(id: ConfigId, options: BuildOptions) -> BuildConfiguration {
-        let mut fingerprinter = Fingerprinter::new();
-        fingerprinter.bytes(format!("{options:?}").as_bytes());
-        let digest = fingerprinter.finish().to_string();
+        let digest = options_digest(&options);
         let compilation_mode = options.string("compilation_mode").to_string();
         let cpu = options.string("cpu").to_string();
         let host_platform = options.label("host_platform").unwrap_or(*DEFAULT_HOST_PLATFORM);
@@ -154,6 +154,7 @@ impl BuildConfiguration {
             aspects,
             output_directory,
             checksum: digest[..7].to_string(),
+            digest,
         }
     }
 
@@ -415,6 +416,17 @@ impl fmt::Display for AspectDescriptor {
         let params: Vec<String> = self.params.iter().map(|(name, value)| format!("{name}={value}")).collect();
         write!(f, "[{}]", params.join(","))
     }
+}
+
+/// A SHA-256 hash of the options, as long as Bazel's, but for bb's own,
+/// which Bazel keeps in targets' keys: a target's configuration is its
+/// toolchains' and aspects' too.
+fn options_digest(options: &BuildOptions) -> String {
+    let mut options = options.clone();
+    options.set(APPLIED_ASPECTS, OptionValue::Strings(Vec::new())).expect("a native option");
+    options.set(TOOLCHAIN_EXEC_PLATFORM, OptionValue::Null).expect("a native option");
+    let digest = ring::digest::digest(&ring::digest::SHA256, format!("{options:?}").as_bytes());
+    digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Parameters as `Display` joins them, split at the commas outside quoted

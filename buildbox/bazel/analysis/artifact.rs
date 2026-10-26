@@ -70,6 +70,11 @@ impl Artifact {
         }
     }
 
+    /// The path relative to its root, as progress messages show it.
+    pub fn root_relative(&self) -> PathId {
+        self.exec_path.strip_prefix(self.root()).unwrap_or(self.exec_path)
+    }
+
     /// The path relative to the root of the runfiles tree, as
     /// `File.short_path` gives it: `pkg/file`, or `../repo/pkg/file` for
     /// another repository's files.

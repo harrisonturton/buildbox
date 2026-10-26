@@ -229,8 +229,10 @@ pub struct ActionFailure {
     /// Where the action's target was declared: `BUILD.bazel:line:column`.
     pub location: Option<String>,
     pub description: String,
-    /// The action's target, as messages show it.
-    pub label: String,
+    /// What the action is for, as Bazel describes it:
+    /// `<kind> rule target //pkg:name`, after the aspects whose action it
+    /// is, if any.
+    pub owner: String,
     pub mnemonic: String,
     pub reason: FailureReason,
     pub output: ActionOutput,

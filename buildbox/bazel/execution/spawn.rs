@@ -7,7 +7,7 @@ use crate::backend::Backend;
 use crate::digest::BlobDigest;
 use crate::inputs::InputTree;
 use crate::source::SourceTree;
-use bazel_analysis::{Action, Artifact, Spawn};
+use bazel_analysis::{Action, Artifact, ConfiguredTargetKey, Spawn};
 use buffa::Message;
 use intern::PathId;
 use remote_execution_rust_connect::build::bazel::remote::execution::v2 as reapi;
@@ -151,7 +151,7 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
     let command = Command {
         arguments: request.arguments.clone(),
         env: request.env.clone(),
-        configuration: owner.config.get().checksum.clone(),
+        configuration: owner.config.get().digest.clone(),
         execution_platform: owner.config.get().host_platform.to_string(),
     };
     let spawned = execute(backend, request).await?;
@@ -223,7 +223,7 @@ async fn report_failure(
         location,
         output: action_output(backend, description.clone(), result).await,
         description,
-        label: owner.label.to_string(),
+        owner: owner_description(ctx, owner).await,
         mnemonic: action.mnemonic.to_string(),
         reason,
     };
@@ -231,6 +231,22 @@ async fn report_failure(
         progress.report(Event::ActionFailed(Arc::new(failure)));
     }
     SkyError::transient(error)
+}
+
+/// What an action is for, as Bazel describes it: its target, with its
+/// kind, after the aspects whose action it is, if any.
+async fn owner_description(ctx: &Ctx, owner: ConfiguredTargetKey) -> String {
+    let kind = match ctx.compute(&owner).await {
+        Ok(target) => target.kind.to_string(),
+        Err(_) => String::new(),
+    };
+    let target = format!("{kind} rule target {}", owner.label);
+    let aspects = &owner.config.get().aspects;
+    if aspects.is_empty() {
+        return target;
+    }
+    let aspects: Vec<String> = aspects.iter().map(|aspect| aspect.description()).collect();
+    format!("aspects [{}] on {target}", aspects.join(", "))
 }
 
 /// The error an action fails with: one line saying where and how.
