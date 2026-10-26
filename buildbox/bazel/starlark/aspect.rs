@@ -58,6 +58,9 @@ pub struct AspectGen<V: ValueLifetimeless> {
     pub toolchains_aspects: Vec<V>,
     /// `exec_groups = {name: exec_group()}`: those its actions can run in.
     pub exec_groups: Option<V>,
+    /// A function of a target, as `propagation_predicate` gives it, that
+    /// decides whether the aspect is applied to it.
+    pub propagation_predicate: Option<V>,
     /// The `.bzl` file that called `aspect()`.
     #[freeze(identity)]
     #[allocative(skip)]
@@ -424,7 +427,7 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
     /// required_providers = [], required_aspect_providers = [],
     /// provides = [], requires = [], apply_to_generating_rules = False,
     /// toolchains = [], toolchains_aspects = [], exec_groups = None,
-    /// ...)`.
+    /// propagation_predicate = None, ...)`.
     fn aspect<'v>(
         implementation: Value<'v>,
         #[starlark(require = named)] attr_aspects: Option<Value<'v>>,
@@ -437,6 +440,7 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
         #[starlark(require = named)] toolchains: Option<Value<'v>>,
         #[starlark(require = named)] toolchains_aspects: Option<Value<'v>>,
         #[starlark(require = named)] exec_groups: Option<Value<'v>>,
+        #[starlark(require = named)] propagation_predicate: Option<Value<'v>>,
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Aspect<'v>> {
@@ -448,6 +452,13 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
         let required_providers = self::required_providers(required_providers, "required_providers")?;
         if apply_to_generating_rules && !required_providers.is_empty() {
             anyhow::bail!("An aspect cannot simultaneously have required providers and apply to generating rules.");
+        }
+        let propagation_predicate = propagation_predicate.filter(|predicate| !predicate.is_none());
+        if let Some(predicate) = propagation_predicate.filter(|predicate| predicate.get_type() != "function") {
+            anyhow::bail!("in call to aspect(), parameter 'propagation_predicate' got value of type '{}', want 'function or NoneType'", predicate.get_type());
+        }
+        if apply_to_generating_rules && propagation_predicate.is_some() {
+            anyhow::bail!("An aspect cannot simultaneously have a propagation predicate and apply to generating rules.");
         }
         Ok(AspectGen {
             implementation,
@@ -461,6 +472,7 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
             toolchains: items(toolchains, "toolchains")?,
             toolchains_aspects: items(toolchains_aspects, "toolchains_aspects")?,
             exec_groups,
+            propagation_predicate,
             definition: context.caller_file(eval),
             exported: OnceLock::new(),
             class: OnceLock::new(),

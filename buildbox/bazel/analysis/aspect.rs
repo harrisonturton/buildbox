@@ -16,7 +16,14 @@ use bazel_config::{AspectDescriptor, ConfigId};
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule};
 use bazel_progress::Progress;
-use bazel_packages::{AttrDefault, AttrSchema, AttrType, AttrValue, Package, Rule, RuleClass, Target};
+use bazel_packages::{AttrDefault, AttrSchema, AttrType, AttrValue, Package, PackageError, Rule, RuleClass, RuleClassRef, Target};
+use bazel_starlark::attr_module::Attribute;
+use bazel_starlark::label_value::LabelValue;
+use bazel_starlark::{EvalContext, FileKind};
+use starlark::eval::Evaluator;
+use starlark::values::list::AllocList;
+use starlark::values::structs::AllocStruct;
+use starlark::values::Heap;
 use bazel_starlark::aspect::{Aspect, AspectGen, english_list};
 use intern::Symbol;
 use skycodec::{Fingerprint, Fingerprinter};
@@ -351,7 +358,8 @@ pub(crate) async fn analyze(ctx: &Ctx, key: ConfiguredTargetKey, package: &Packa
         return configured::alias(ctx, key, rule).await;
     }
     let class = bazel_loading::rule_class(ctx, &class_ref).await?;
-    if !aspect.get().applies_to(&class.advertised_providers) {
+    let descriptor = config.aspects.last().expect("a configuration naming aspects");
+    if !aspect.get().applies_to(&class.advertised_providers) || !predicate_allows(ctx, aspect, descriptor, key.label, rule, &class_ref).await? {
         return nothing_provided(ctx, key, plain.kind);
     }
     let setup = match setup(ctx, plain_key, rule, &class_ref, class).await? {
@@ -362,6 +370,81 @@ pub(crate) async fn analyze(ctx: &Ctx, key: ConfiguredTargetKey, package: &Packa
         Err(error) if error.origin().is_none() => Err(failed(plain_key, error)),
         applied => applied,
     }
+}
+
+/// Whether an aspect's `propagation_predicate`, if it has one, lets it
+/// apply to a rule's target, `label`, as Bazel asks it: of the target's
+/// label, kind and tags, and the aspect's parameters. What it prints is
+/// reported; if it fails, so is why, which it fails with.
+async fn predicate_allows(ctx: &Ctx, aspect: &LoadedAspect, descriptor: &AspectDescriptor, label: Label, rule: &Rule, class_ref: &RuleClassRef) -> Result<bool, SkyError> {
+    if aspect.get().propagation_predicate.is_none() {
+        return Ok(true);
+    }
+    let mut printed = Vec::new();
+    let allowed = Module::with_temp_heap(|module| -> Result<bool, PackageError> {
+        let heap = module.heap();
+        let value = heap.access_owned_frozen_value(&aspect.value);
+        let aspect = Aspect::from_value(value).ok_or_else(|| PackageError::new("not an aspect"))?;
+        let predicate = aspect.propagation_predicate.ok_or_else(|| PackageError::new("no propagation predicate"))?;
+        let context = propagation_context(aspect, descriptor, label, rule, class_ref, heap);
+        let eval_context = EvalContext::new(FileKind::Bzl, aspect.definition);
+        let mut eval = Evaluator::new(&module);
+        eval.extra = Some(&eval_context);
+        let returned = eval.eval_function(predicate, &[context], &[]);
+        printed = eval_context.printed.take();
+        let returned = returned.map_err(|error| bazel_starlark::reported::package_error(&error, &[]))?;
+        returned.unpack_bool().ok_or_else(|| PackageError::new("Expected a boolean"))
+    });
+    bazel_loading::report_printed(ctx, &printed).await;
+    match allowed {
+        Ok(allowed) => Ok(allowed),
+        Err(error) => Err(predicate_failed(ctx, &error).await),
+    }
+}
+
+/// A propagation predicate's error, as Bazel reports it: in full, with
+/// its traceback, then its message alone, which the analysis fails with.
+async fn predicate_failed(ctx: &Ctx, error: &PackageError) -> SkyError {
+    let paths = bazel_loading::error_paths(ctx, error).await;
+    let reported = error.describe(&|file| paths.get(file).cloned().unwrap_or_else(|| file.to_string()));
+    let message = match error.message.strip_prefix("Error") {
+        Some(rest) => rest.split_once(": ").map(|(_, message)| message).unwrap_or(rest),
+        None => &error.message,
+    };
+    SkyError::new(configured::errors(&[&reported, message]))
+}
+
+/// The `ctx` a propagation predicate gets: `ctx.attr`, the aspect's
+/// parameters, and `ctx.rule`, with the target's
+/// `label`, its `qualified_kind` and its `attr.tags`.
+fn propagation_context<'v>(aspect: &AspectGen<Value<'v>>, descriptor: &AspectDescriptor, label: Label, rule: &Rule, class_ref: &RuleClassRef, heap: Heap<'v>) -> Value<'v> {
+    let mut params = Vec::with_capacity(descriptor.params.len());
+    for (name, text) in &descriptor.params {
+        let attribute = aspect.attrs.iter().find(|(attr, _)| attr == name).and_then(|(_, value)| Attribute::from_value(*value));
+        let value = match attribute.map(|attribute| attribute.ty) {
+            Some(AttrType::String) => heap.alloc(bazel_config::unquoted(text).unwrap_or_default()),
+            Some(AttrType::Int) => heap.alloc(text.parse::<i32>().unwrap_or_default()),
+            Some(AttrType::Bool) => Value::new_bool(text == "True"),
+            _ => Value::new_none(),
+        };
+        params.push((name.as_str(), value));
+    }
+    let tags = match rule.attr(Symbol::intern("tags")) {
+        Some(AttrValue::StringList(tags)) => tags.clone(),
+        _ => Vec::new(),
+    };
+    let tags = heap.alloc(AllocStruct([("value", heap.alloc(AllocList(tags))), ("is_tool", Value::new_bool(false))]));
+    let file_label = match class_ref.definition {
+        Some((file, _)) => heap.alloc(LabelValue(file)),
+        None => Value::new_none(),
+    };
+    let kind = heap.alloc(AllocStruct([("file_label", file_label), ("rule_name", heap.alloc(class_ref.kind.as_str()))]));
+    let rule = heap.alloc(AllocStruct([
+        ("label", heap.alloc(LabelValue(label))),
+        ("qualified_kind", kind),
+        ("attr", heap.alloc(AllocStruct([("tags", tags)]))),
+    ]));
+    heap.alloc(AllocStruct([("attr", heap.alloc(AllocStruct(params))), ("rule", rule)]))
 }
 
 /// An aspect applied to a generated file, which applies to the rule
