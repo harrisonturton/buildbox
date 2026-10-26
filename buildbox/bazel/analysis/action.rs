@@ -63,17 +63,26 @@ impl Action {
     /// Every artifact the action reads, including those of runfiles trees,
     /// once each.
     pub fn all_inputs(&self) -> Vec<Artifact> {
-        let runfiles = self.runfiles.iter().flat_map(|tree| tree.entries.iter().map(|(_, artifact)| *artifact));
-        let template = match &self.kind {
-            ActionKind::Template { template, .. } => Some(*template),
-            ActionKind::Symlink { target, .. } => Some(*target),
-            _ => None,
-        };
-        let mut all = self.inputs.to_vec();
-        all.extend(runfiles.chain(template));
+        let mut all = Vec::new();
+        self.for_each_input(|artifact| all.push(artifact));
         all.sort();
         all.dedup();
         all
+    }
+
+    /// Call `visit` with every artifact [`Action::all_inputs`] lists,
+    /// without flattening the action's input set. Some may be visited more
+    /// than once.
+    pub fn for_each_input(&self, mut visit: impl FnMut(Artifact)) {
+        self.inputs.for_each(&mut visit);
+        for tree in &self.runfiles {
+            tree.entries.iter().for_each(|(_, artifact)| visit(*artifact));
+        }
+        match &self.kind {
+            ActionKind::Template { template, .. } => visit(*template),
+            ActionKind::Symlink { target, .. } => visit(*target),
+            _ => {}
+        }
     }
 }
 

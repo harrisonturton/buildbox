@@ -1,6 +1,6 @@
 //! Running commands through the backend, with the action cache.
 
-use crate::action_key::{ActionKey, ActionOutputs, Input, MISSING_INPUT, OutputFile, cas_error, description, generated_input, input, progress, upload};
+use crate::action_key::{ActionKey, ActionOutputs, Input, MISSING_INPUT, OutputFile, cas_error, description, input, progress, upload};
 use crate::backend::Runners;
 use bazel_progress::{ActionFailure, ActionOutput, ActionProgress, Command, Event, FailureReason};
 use crate::backend::Backend;
@@ -15,7 +15,7 @@ use skyframe::{Ctx, SkyError};
 use futures::StreamExt;
 use persist::PersistedMap;
 use skycodec::{Fingerprint, Fingerprinter};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -112,25 +112,25 @@ pub async fn execute(backend: &Backend, request: SpawnRequest) -> Result<SpawnRe
 /// Run a spawn action, or reuse its cached result.
 pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, action: &Action, spawn: &Spawn) -> Result<ActionOutputs, SkyError> {
     let owner = action_key.owner;
-    let unique = action.all_inputs();
-    let span = tracing::info_span!("action_inputs", inputs = unique.len(), runfiles = action.runfiles.len());
-    let generated_by = match ready(ctx, &unique).instrument(span).await {
-        Ok(generated_by) => generated_by,
-        Err(NotReady::MissingInputs(labels)) => {
-            let result = reapi::ActionResult::default();
-            return Err(report_failure(ctx, backend, action_key, action, FailureReason::MissingInputs(labels), &result).await);
-        }
-        Err(NotReady::Failed(error)) => return Err(error),
-    };
+    let span = tracing::info_span!("action_inputs", runfiles = action.runfiles.len());
+    let generated_by = ready(ctx, action).instrument(span).await?;
     let shown = progress(ctx).map(|progress| progress.action_started(action_key.progress_id(), generated_by, description(action, owner)));
     let _turn = crate::jobs::job_turn(ctx).await?;
     let _staged = backend.stage().await?;
     if let Some(shown) = &shown {
         shown.running(backend.runners.run);
     }
+    let inputs = match inputs(ctx, action).await {
+        Ok(inputs) => inputs,
+        Err(NotReady::MissingInputs(labels)) => {
+            let result = reapi::ActionResult::default();
+            return Err(report_failure(ctx, backend, action_key, action, FailureReason::MissingInputs(labels), &result).await);
+        }
+        Err(NotReady::Failed(error)) => return Err(error),
+    };
     let (output_files, output_directories) = output_paths(action);
     let request = SpawnRequest {
-        inputs: inputs(ctx, action, unique).await?,
+        inputs,
         arguments: spawn.arguments.clone(),
         env: spawn.env.clone(),
         output_files,
@@ -334,20 +334,65 @@ enum NotReady {
     Failed(SkyError),
 }
 
-/// Wait until every input has been generated, keeping none of their
-/// digests, so that an action waiting on others holds no input tree.
-/// Returns the progress ids of the actions that generated them.
-async fn ready(ctx: &Ctx, unique: &[Artifact]) -> Result<Vec<u64>, NotReady> {
-    let waits = unique.iter().map(|artifact| async {
-        let (_, generated_by) = generated_input(ctx, *artifact).await?;
-        Ok::<_, SkyError>(generated_by.map(|key| key.progress_id()))
-    });
-    let results = futures::future::join_all(waits).await;
-    let mut ids = Vec::with_capacity(results.len());
-    let mut missing = Vec::new();
+/// Wait until the actions that generate the action's inputs have run,
+/// holding only their keys, so that an action waiting on others holds no
+/// list of its inputs. Returns their progress ids.
+async fn ready(ctx: &Ctx, action: &Action) -> Result<Vec<u64>, SkyError> {
+    let generating = generating_actions(ctx, action).await?;
+    let results = futures::future::join_all(generating.iter().map(|key| ctx.compute(key))).await;
     for result in results {
+        result?;
+    }
+    let mut ids: Vec<u64> = generating.iter().map(ActionKey::progress_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// The actions that generate an action's inputs.
+async fn generating_actions(ctx: &Ctx, action: &Action) -> Result<BTreeSet<ActionKey>, SkyError> {
+    let mut by_owner: BTreeMap<ConfiguredTargetKey, Vec<PathId>> = BTreeMap::new();
+    action.for_each_input(|artifact| {
+        if let Some(config) = artifact.config {
+            let owner = ConfiguredTargetKey { label: artifact.owner, config };
+            by_owner.entry(owner).or_default().push(artifact.exec_path);
+        }
+    });
+    let owners = by_owner.into_iter().map(|(owner, paths)| owner_actions(ctx, owner, paths));
+    let mut keys = BTreeSet::new();
+    for result in futures::future::join_all(owners).await {
+        keys.extend(result?);
+    }
+    Ok(keys)
+}
+
+/// The actions of `owner` that generate `paths`.
+async fn owner_actions(ctx: &Ctx, owner: ConfiguredTargetKey, mut paths: Vec<PathId>) -> Result<BTreeSet<ActionKey>, SkyError> {
+    paths.sort_unstable();
+    paths.dedup();
+    let target = ctx.compute(&owner).await?;
+    let mut keys = BTreeSet::new();
+    for path in paths {
+        let Some((index, _)) = target.generating_action(path) else {
+            return Err(SkyError::new(format!("{}: no action generates '{path}'", owner.label)));
+        };
+        keys.insert(ActionKey { owner, index });
+    }
+    Ok(keys)
+}
+
+/// Every input, by its path in the input tree: the action's inputs, and
+/// the entries of its tools' runfiles trees.
+async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<String, Input>, NotReady> {
+    let unique = action.all_inputs();
+    let results = futures::future::join_all(unique.iter().map(|artifact| input(ctx, *artifact))).await;
+    let mut by_artifact: BTreeMap<Artifact, Input> = BTreeMap::new();
+    let mut missing = Vec::new();
+    for (artifact, result) in unique.into_iter().zip(results) {
         match result {
-            Ok(generated_by) => ids.extend(generated_by),
+            Ok(input) => {
+                by_artifact.insert(artifact, input);
+            }
             Err(error) => match error.message().strip_prefix(MISSING_INPUT) {
                 Some(label) => missing.push(label.trim_matches('\'').to_string()),
                 None => return Err(NotReady::Failed(error)),
@@ -357,23 +402,16 @@ async fn ready(ctx: &Ctx, unique: &[Artifact]) -> Result<Vec<u64>, NotReady> {
     if !missing.is_empty() {
         return Err(NotReady::MissingInputs(missing));
     }
-    ids.sort_unstable();
-    ids.dedup();
-    Ok(ids)
-}
-
-/// Every input, by its path in the input tree: the action's inputs, and
-/// the entries of its tools' runfiles trees.
-async fn inputs(ctx: &Ctx, action: &Action, unique: Vec<Artifact>) -> Result<BTreeMap<String, Input>, SkyError> {
-    let mut paths: Vec<(String, Artifact)> = action.inputs.to_vec().into_iter().map(|artifact| (artifact.exec_path.to_string(), artifact)).collect();
+    let mut paths: BTreeMap<String, Input> = BTreeMap::new();
+    action.inputs.for_each(|artifact| {
+        paths.insert(artifact.exec_path.to_string(), by_artifact[&artifact].clone());
+    });
     for tree in &action.runfiles {
         for (path, artifact) in &tree.entries {
-            paths.push((format!("{}/{path}", tree.dir), *artifact));
+            paths.insert(format!("{}/{path}", tree.dir), by_artifact[artifact].clone());
         }
     }
-    let digests = futures::future::try_join_all(unique.iter().map(|artifact| input(ctx, *artifact))).await?;
-    let by_artifact: BTreeMap<Artifact, Input> = unique.into_iter().zip(digests).collect();
-    Ok(paths.into_iter().map(|(path, artifact)| (path, by_artifact[&artifact].clone())).collect())
+    Ok(paths)
 }
 
 /// The input tree's `Directory` messages. Directories that are outputs of

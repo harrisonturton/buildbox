@@ -58,22 +58,29 @@ impl InputSet {
 
     /// Every member, once each, sorted.
     pub fn to_vec(&self) -> Vec<Artifact> {
+        let mut members = Vec::new();
+        self.for_each(|artifact| members.push(artifact));
+        members.sort();
+        members.dedup();
+        members
+    }
+
+    /// Call `visit` with every member, in no particular order, without
+    /// flattening the set. A member of several of its parts is visited
+    /// once for each.
+    pub fn for_each(&self, mut visit: impl FnMut(Artifact)) {
         let Some(root) = &self.0 else {
-            return Vec::new();
+            return;
         };
         let mut visited: FxHashSet<*const Node> = FxHashSet::default();
         let mut pending: Vec<&Arc<Node>> = vec![root];
-        let mut members = Vec::new();
         while let Some(node) = pending.pop() {
             if !visited.insert(Arc::as_ptr(node)) {
                 continue;
             }
-            members.extend_from_slice(&node.direct);
+            node.direct.iter().copied().for_each(&mut visit);
             pending.extend(node.children.iter());
         }
-        members.sort();
-        members.dedup();
-        members
     }
 }
 
