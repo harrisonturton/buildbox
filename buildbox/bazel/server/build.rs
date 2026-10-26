@@ -1032,12 +1032,17 @@ fn add_flag(given: &mut Vec<(BuildSetting, FlagValue)>, setting: BuildSetting, v
     }
 }
 
-/// The environment of actions that use the default shell environment:
-/// `PATH` from the client, as Bazel passes it, and `--action_env`s.
+/// The environment of actions that use the default shell environment, as
+/// Bazel gives it: a fixed `PATH`, or with
+/// `--noincompatible_strict_action_env` the client's, and `--action_env`s.
 fn action_env(context: &CommandContext<'_>, options: &ParsedOptions) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
-    if let Some(path) = context.env.get("PATH") {
-        env.push(("PATH".to_string(), path.clone()));
+    let path = match options.flag("incompatible_strict_action_env", true) {
+        true => Some(STRICT_PATH.to_string()),
+        false => context.env.get("PATH").cloned(),
+    };
+    if let Some(path) = path {
+        env.push(("PATH".to_string(), path));
     }
     for entry in options.all("action_env") {
         let (name, value) = match entry.split_once('=') {
@@ -1050,6 +1055,10 @@ fn action_env(context: &CommandContext<'_>, options: &ParsedOptions) -> Vec<(Str
     env.sort();
     env
 }
+
+/// The `PATH` actions get with `--incompatible_strict_action_env`, as
+/// Bazel gives them, rather than the client's.
+const STRICT_PATH: &str = "/bin:/usr/bin:/usr/local/bin";
 
 /// Analyze the targets, sending each compatible one to `analyzed` as soon
 /// as it's done, and reporting each error once, however many targets it
