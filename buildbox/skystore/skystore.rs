@@ -279,7 +279,8 @@ impl ValueStore {
     /// Remove a reference, freeing the value if it was the last. Returns
     /// whether it was freed.
     pub fn release(&self, value: ValueRef) -> bool {
-        self.lock(value.shard()).release(value, &self.segments).is_some()
+        let freed = self.lock(value.shard()).release(value, &self.segments);
+        freed.is_some()
     }
 
     /// Remove a reference and, if it was the last, return the value that was

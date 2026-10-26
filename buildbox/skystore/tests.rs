@@ -138,6 +138,40 @@ fn insert_new_says_whether_the_value_was_stored() {
     assert_eq!(first.value, second.value);
 }
 
+/// A live value that releases another value when it's dropped, as a
+/// value holding stored parts does.
+struct ReleasesOnDrop {
+    store: Arc<ValueStore>,
+    held: ValueRef,
+}
+
+impl Drop for ReleasesOnDrop {
+    fn drop(&mut self) {
+        self.store.release(self.held);
+    }
+}
+
+#[test]
+fn a_freed_value_can_release_values_in_its_own_shard() {
+    let store = Arc::new(ValueStore::new());
+    let held = insert(&store, b"held");
+    let fingerprint = (0u32..)
+        .map(|i| Fingerprint::of(&i.to_le_bytes()))
+        .find(|fingerprint| shard_of(fingerprint) == held.shard())
+        .unwrap();
+    let holder = ReleasesOnDrop { store: store.clone(), held };
+    let live = store.insert_live(KIND, fingerprint, Arc::new(holder), 8);
+    let (done, finished) = std::sync::mpsc::channel();
+    let releasing = store.clone();
+    std::thread::spawn(move || {
+        releasing.release(live);
+        let _ = done.send(());
+    });
+    let released = finished.recv_timeout(std::time::Duration::from_secs(10));
+    assert!(released.is_ok(), "releasing the value deadlocked");
+    assert!(store.read(held).is_err());
+}
+
 #[test]
 fn release_and_take_returns_the_freed_value() {
     let store = ValueStore::new();
