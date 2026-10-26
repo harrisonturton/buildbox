@@ -40,7 +40,9 @@ Starlark aspects work as Bazel's do for the common cases:
 - attached with `attr.label(aspects = [...])`, taking parameters from the
   rule's attributes of the same names and types;
 - propagated along `attr_aspects`, including `*`;
-- applied only to rules whose `provides` satisfy `required_providers`;
+- applied only to rules whose `provides` satisfy `required_providers`,
+  and, with `apply_to_generating_rules`, to the rules generating the files
+  they propagate to;
 - applied after the aspects they `requires`, and seeing the providers of
   those and of the aspects whose `provides` satisfy their
   `required_aspect_providers`, keyed as Bazel keys them by the aspects
@@ -55,8 +57,7 @@ Starlark aspects work as Bazel's do for the common cases:
 
 Still missing:
 
-- `apply_to_generating_rules`, `propagation_predicate`, `exec_groups` and
-  `toolchains_aspects`;
+- `propagation_predicate`, `exec_groups` and `toolchains_aspects`;
 - `attr_aspects` and `toolchains_aspects` given as functions (experimental
   in Bazel);
 - Bazel's native aspects;

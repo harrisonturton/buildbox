@@ -11,7 +11,7 @@ use crate::configured::{
     self, ConfiguredTarget, ConfiguredTargetKey, Implementation, RuleSetup, Setup, analyze_deps, configured, evaluate_reporting, exec_config, heap_name,
     rule_input, setup,
 };
-use crate::transition::{AttrConfigs, dep_configs};
+use crate::transition::{AttrConfigs, configured_key, dep_configs};
 use bazel_config::{AspectDescriptor, ConfigId};
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule};
@@ -344,22 +344,24 @@ pub(crate) async fn analyze(ctx: &Ctx, key: ConfiguredTargetKey, package: &Packa
         config: config.without_aspects(),
     };
     let plain = ctx.compute(&plain_key).await?;
-    let Target::Rule(rule) = target else {
-        return nothing_provided(ctx, key, plain.kind);
-    };
     if plain.incompatible.is_some() {
         return nothing_provided(ctx, key, plain.kind);
-    }
-    let class_ref = package.rule_class(rule).clone();
-    if class_ref.definition.is_none() && class_ref.kind.as_str() == "alias" {
-        return configured::alias(ctx, key, rule).await;
     }
     let mut aspects = Vec::with_capacity(config.aspects.len());
     for descriptor in &config.aspects {
         aspects.push(LoadedAspect::load(ctx, descriptor.file, &descriptor.name).await?);
     }
-    let class = bazel_loading::rule_class(ctx, &class_ref).await?;
     let aspect = aspects.last().expect("a configuration naming aspects");
+    let rule = match target {
+        Target::Rule(rule) => rule,
+        Target::OutputFile { rule, .. } if aspect.get().apply_to_generating_rules => return on_generating_rule(ctx, key, *rule).await,
+        _ => return nothing_provided(ctx, key, plain.kind),
+    };
+    let class_ref = package.rule_class(rule).clone();
+    if class_ref.definition.is_none() && class_ref.kind.as_str() == "alias" {
+        return configured::alias(ctx, key, rule).await;
+    }
+    let class = bazel_loading::rule_class(ctx, &class_ref).await?;
     if !aspect.get().applies_to(&class.advertised_providers) {
         return nothing_provided(ctx, key, plain.kind);
     }
@@ -371,6 +373,23 @@ pub(crate) async fn analyze(ctx: &Ctx, key: ConfiguredTargetKey, package: &Packa
         Err(error) if error.origin().is_none() => Err(failed(plain_key, error)),
         applied => applied,
     }
+}
+
+/// An aspect applied to a generated file, which applies to the rule
+/// that generates it: what its application to that rule, `rule`,
+/// provides.
+async fn on_generating_rule(ctx: &Ctx, key: ConfiguredTargetKey, rule: Symbol) -> Result<ConfiguredTarget, SkyError> {
+    let config = key.config.get();
+    let owner = configured_key(ctx, key.label.sibling(rule), config.without_aspects()).await?;
+    let applied_key = ConfiguredTargetKey {
+        label: owner.label,
+        config: owner.config.get().with_aspects(&config.aspects),
+    };
+    let applied = ctx.compute(&applied_key).await?;
+    if let Ok(progress) = ctx.global::<Progress>() {
+        progress.aspect_applied();
+    }
+    configured::forwarded(key, &applied)
 }
 
 /// An aspect's error as Bazel reports it: then that the analysis of its

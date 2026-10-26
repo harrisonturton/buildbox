@@ -151,10 +151,7 @@ async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarg
         },
         Target::SourceFile(_) => file(ctx, key, "source file", Artifact::source(key.label)),
         Target::OutputFile { rule, .. } => {
-            let owner = ConfiguredTargetKey {
-                label: key.label.sibling(*rule),
-                config: key.config,
-            };
+            let owner = configured_key(ctx, key.label.sibling(*rule), key.config).await?;
             ctx.compute(&owner).await?;
             let artifact = Artifact::derived(owner.label, &key.config.get(), artifact::name_path(key.label), false);
             file(ctx, key, "generated file", artifact)
@@ -537,9 +534,14 @@ async fn dep(ctx: &Ctx, label: Label, config: ConfigId) -> Result<Dep, DepError>
     if aspects.is_empty() {
         return plain_dep(ctx, label, config).await;
     }
-    let plain = plain_dep(ctx, label, config.get().without_aspects()).await?;
-    let Dep::Target(target) = plain else {
-        return Ok(plain);
+    let plain_config = config.get().without_aspects();
+    let target = match plain_dep(ctx, label, plain_config).await? {
+        Dep::Target(target) => target,
+        Dep::File(label, artifact) if !artifact.is_source() => {
+            let file = ConfiguredTargetKey { label, config: plain_config };
+            ctx.compute(&file).await.map_err(DepError::Failed)?
+        }
+        plain => return Ok(plain),
     };
     crate::aspect::applied(ctx, target, &aspects).await.map_err(DepError::AspectFailed)
 }
@@ -652,6 +654,13 @@ pub(crate) async fn alias(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule) -> R
             config: key.config,
         })
         .await?;
+    forwarded(key, &target)
+}
+
+/// The target `key` names, providing what `target` provides: an alias's,
+/// or an aspect's on a generated file, which its generating rule's
+/// application provides.
+pub(crate) fn forwarded(key: ConfiguredTargetKey, target: &ConfiguredTarget) -> Result<ConfiguredTarget, SkyError> {
     Ok(ConfiguredTarget {
         label: key.label,
         config: key.config,
