@@ -9,7 +9,7 @@ mod error;
 mod rule_class;
 
 pub use attr::{AttrType, AttrValue, Select, SelectorPart, DEFAULT_CONDITION};
-pub use error::{PackageError, SourcePosition, TraceFrame};
+pub use error::{CallFrame, PackageError, SourcePosition, TraceFrame};
 pub use rule_class::{AspectRef, AttrDefault, AttrSchema, BuildSettingSpec, Cfg, RuleClass, RuleClassRef};
 
 use bazel_label::{Label, PackageId};
@@ -80,6 +80,10 @@ pub struct Rule {
     /// The values of attributes with computed defaults that weren't given,
     /// as computed when the rule was created.
     pub computed: Vec<(Symbol, AttrValue)>,
+    /// The calls that created the rule, outermost first, when a macro
+    /// created it; a rule the BUILD file creates was created at its
+    /// location.
+    pub call_stack: Vec<CallFrame>,
 }
 
 /// Where in the BUILD file a rule was created.

@@ -29,6 +29,7 @@ rust_library(
         "help.rs",
         "memory.rs",
         "output.rs",
+        "queries.rs",
         "repos.rs",
         "run.rs",
         "runfiles.rs",

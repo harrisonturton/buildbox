@@ -175,7 +175,7 @@ fn command_page(name: &str) -> Option<String> {
 fn command_options(command: &str) -> Option<OptionSpec> {
     match command {
         "build" | "test" | "run" => Some(crate::build::build_spec()),
-        "query" => Some(crate::commands::query_spec()),
+        "query" => Some(crate::queries::query_spec()),
         _ => None,
     }
 }

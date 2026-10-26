@@ -44,6 +44,9 @@ pub struct RuleClass {
     /// The providers `rule(provides = [...])` says its targets give, by
     /// key, which decide the aspects that apply to them.
     pub advertised_providers: Vec<String>,
+    /// The calls that defined a Starlark rule class: where `rule()` was
+    /// called, outermost first.
+    pub defined_at: Vec<crate::CallFrame>,
 }
 
 /// How a build setting is set: whether it's a flag, which the command line

@@ -1,14 +1,8 @@
 //! The commands bb implements.
 
-use crate::command::{CommandContext, PRODUCT, VERSION, exit, working_package};
+use crate::command::{CommandContext, PRODUCT, VERSION, exit};
 use crate::output::Output;
-use bazel_label::RepoName;
-use bazel_loading::RepoMappingKey;
-use bazel_options::{OptionKind, OptionSpec};
-use bazel_query::{OutputFormat, QueryOptions, QueryRequest};
-use bazel_ui::Phase;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 pub async fn version(args: &[String], out: &Output) -> i32 {
     if args.iter().any(|arg| arg == "--gnu_format") {
@@ -20,137 +14,6 @@ pub async fn version(args: &[String], out: &Output) -> i32 {
     ))
     .await;
     exit::SUCCESS
-}
-
-pub(crate) fn query_spec() -> OptionSpec {
-    use OptionKind::*;
-    OptionSpec::new(&[
-        ("output", Value),
-        ("keep_going", Bool),
-        ("implicit_deps", Bool),
-        ("tool_deps", Bool),
-        ("host_deps", Bool),
-        ("order_output", Value),
-        ("order_results", Bool),
-        ("universe_scope", Value),
-        ("infer_universe_scope", Bool),
-        ("query_file", Value),
-        ("null", Bool),
-        ("line_terminator_null", Bool),
-        ("relative_locations", Bool),
-        ("output_file", Value),
-        ("noproto:default_values", Bool),
-        ("xml:default_values", Bool),
-        ("graph:factored", Bool),
-        ("strict_test_suite", Bool),
-        ("loading_phase_threads", Value),
-        ("experimental_graphless_query", Value),
-        ("repo_env", Multi),
-        ("color", Value),
-        ("curses", Value),
-        ("ui_actions_shown", Int),
-        ("show_progress", Bool),
-    ])
-}
-
-pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {
-    let all_args = bazel_options::command_args(&context.rc, "query", args);
-    let options = match bazel_options::parse(&all_args, &query_spec(), &context.rc, "query") {
-        Ok(options) => options,
-        Err(error) => {
-            out.error(&error.to_string()).await;
-            return exit::COMMAND_LINE_ERROR;
-        }
-    };
-    out.configure(&options).await;
-    let expression = match query_expression(&options) {
-        Ok(expression) => expression,
-        Err(message) => {
-            out.error(&message).await;
-            return exit::COMMAND_LINE_ERROR;
-        }
-    };
-    let output_name = options.get("output").unwrap_or("label");
-    let Some(output) = OutputFormat::parse(output_name) else {
-        out.error(&format!("Invalid output format '{output_name}'. Valid values are: label, label_kind, build, minrank, maxrank, package, location, graph")).await;
-        return exit::COMMAND_LINE_ERROR;
-    };
-    if let Err(error) = bazel_query::parse(&expression) {
-        out.error(&format!("Error while parsing '{expression}': {}", error.0)).await;
-        return exit::COMMAND_LINE_ERROR;
-    }
-
-    let query_options = QueryOptions {
-        implicit_deps: options.flag("implicit_deps", true),
-        tool_deps: options.flag("tool_deps", true) && options.flag("host_deps", true),
-        keep_going: options.flag("keep_going", false),
-    };
-    let workspace = context.server.workspaces().get(&context.workspace_root);
-    out.track(workspace.progress.track()).await;
-    workspace.refresh(crate::command::repo_environment(context, &options)).await;
-    let session = workspace.graph.session().await;
-    out.phase(Phase::RepoMapping).await;
-    let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
-        Ok(mapping) => Arc::new(mapping.0.clone()),
-        Err(error) => {
-            out.error(error.message()).await;
-            return exit::ANALYSIS_FAILURE;
-        }
-    };
-    let request = QueryRequest {
-        expression,
-        output,
-        options: query_options,
-        working_package: working_package(&context.workspace_root, &context.working_directory),
-        main_mapping,
-        workspace_root: context.workspace_root.clone(),
-    };
-    out.phase(Phase::Loading).await;
-    let result = bazel_query::run(session, request).await;
-    out.phase(Phase::Idle).await;
-    let result = match result {
-        Ok(result) => result,
-        Err(error) => {
-            out.error(&error.0).await;
-            return exit::ANALYSIS_FAILURE;
-        }
-    };
-    for error in result.errors.iter().chain(&result.failure) {
-        out.error(error).await;
-    }
-    let Some(output) = result.output else {
-        return exit::ANALYSIS_FAILURE;
-    };
-    let output = if options.flag("null", false) || options.flag("line_terminator_null", false) {
-        output.replace('\n', "\0")
-    } else {
-        output
-    };
-    out.stdout(&output).await;
-    let partial = result.kept_going || result.failure.is_some();
-    if partial {
-        out.warning("--keep_going specified, ignoring errors. Results may be inaccurate").await;
-    }
-    if result.targets == 0 {
-        out.info("Empty results").await;
-    }
-    match partial {
-        true => exit::PARTIAL_ANALYSIS_FAILURE,
-        false => exit::SUCCESS,
-    }
-}
-
-fn query_expression(options: &bazel_options::ParsedOptions) -> Result<String, String> {
-    if let Some(file) = options.get("query_file") {
-        if !options.residue.is_empty() {
-            return Err("Command-line query and --query_file cannot both be specified".into());
-        }
-        return std::fs::read_to_string(file).map_err(|error| format!("failed to read --query_file {file}: {error}"));
-    }
-    if options.residue.is_empty() {
-        return Err("missing query expression. Type 'bb help query' for syntax and help.".into());
-    }
-    Ok(options.residue.join(" "))
 }
 
 /// The directory a workspace's outputs go in: like Bazel's output base, one

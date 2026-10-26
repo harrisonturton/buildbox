@@ -13,6 +13,7 @@ mod commands;
 mod help;
 mod memory;
 mod output;
+mod queries;
 mod repos;
 mod run;
 mod runfiles;

@@ -32,6 +32,15 @@ pub struct SourcePosition {
     pub column: u32,
 }
 
+/// One call of a call stack: where it was made, and in which function,
+/// as Bazel lists the calls that defined a rule class or created a rule.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct CallFrame {
+    pub position: SourcePosition,
+    /// The function making the call, or `<toplevel>`.
+    pub function: String,
+}
+
 /// One call of a traceback: where it was made, in which function, and the
 /// line of source making it.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]

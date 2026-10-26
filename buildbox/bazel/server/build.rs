@@ -815,7 +815,7 @@ async fn targets(
             Some(text) => (true, text),
             None => (false, pattern.as_str()),
         };
-        let resolved = universe.resolve(text).await.map_err(|error| error.0);
+        let resolved = universe.resolve(text).await.map_err(|error| error.message);
         let mut labels = match (resolved, universe.pattern_failure()) {
             (Ok(labels), None) => labels,
             (Err(message), _) | (Ok(_), Some(message)) if keep_going => {
@@ -919,7 +919,7 @@ async fn expand_test_suites(universe: &Universe<&Session>, labels: TargetSet) ->
         if !seen.insert(label) {
             continue;
         }
-        let target = universe.target(label).await.map_err(|error| error.0)?;
+        let target = universe.target(label).await.map_err(|error| error.message)?;
         let Target::Rule(rule) = target.target() else {
             expanded.insert(label);
             continue;
@@ -1016,7 +1016,7 @@ async fn unrecognized_flag(context: &CommandContext<'_>, session: &Session, main
     };
     let universe = Universe::new(session, query_options, package, Arc::new(main_mapping.clone()), context.workspace_root.clone());
     match universe.target(label).await {
-        Err(error) => format!("Skipping '{name}': {}", error.0),
+        Err(error) => format!("Skipping '{name}': {}", error.message),
         Ok(_) => format!("Unrecognized option: {name}"),
     }
 }

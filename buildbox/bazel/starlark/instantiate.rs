@@ -25,6 +25,10 @@ pub fn instantiate<'v>(
 ) -> anyhow::Result<()> {
     let context = EvalContext::get(eval)?;
     let (location, generator) = call_site(eval);
+    let call_stack = match generator {
+        Some(_) => crate::reported::call_frames(eval),
+        None => Vec::new(),
+    };
     let position = eval.call_stack().frames.first().and_then(|frame| frame.location.as_ref()).map(call_position);
     let mut builder = context.package_builder(&format!("{}()", schema.kind))?;
     let package = builder.id;
@@ -35,7 +39,8 @@ pub fn instantiate<'v>(
     };
 
     let name = rule_name(schema, kwargs)?;
-    let (rule, mut errors) = rule(schema, kwargs, computed, &parser, name, location, generator);
+    let (mut rule, mut errors) = rule(schema, kwargs, computed, &parser, name, location, generator);
+    rule.call_stack = call_stack;
     if let Err(error) = builder.add_rule(class, schema, rule) {
         errors.push(error);
     }
@@ -99,6 +104,7 @@ fn rule<'v>(
         generator,
         outputs,
         computed: computed_attrs,
+        call_stack: Vec::new(),
     };
     (rule, errors)
 }

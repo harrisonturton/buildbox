@@ -7,7 +7,7 @@ use crate::instantiate::instantiate;
 use crate::native_rules;
 use allocative::Allocative;
 use bazel_label::Label;
-use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, Cfg, RuleClass, RuleClassRef};
+use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, CallFrame, Cfg, RuleClass, RuleClassRef};
 use intern::Symbol;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
@@ -53,6 +53,11 @@ pub struct StarlarkRuleGen<V: ValueLifetimeless> {
     #[allocative(skip)]
     #[starlark_pagable(serialize_with = "crate::paging::serialize_once_lock", deserialize_with = "crate::paging::deserialize_once_lock")]
     pub exported_from: OnceLock<Label>,
+    /// The calls that defined the rule: where `rule()` was called.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
+    pub defined_at: Vec<CallFrame>,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<StarlarkRuleGen<To>> for StarlarkRuleGen<From> {}
@@ -238,17 +243,28 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     if let Some(setting) = build_setting(rule) {
         own.push(AttrSchema::new("build_setting_default", build_setting_type(setting)).mandatory().nonconfigurable());
     }
-    own.sort_by(|a, b| a.name.cmp(&b.name));
-    let mut class = native_rules::rule_class(kind, own, rule.test, rule.executable);
+    let incoming_transition = rule.option("cfg").is_some_and(|cfg| crate::transition::Transition::from_value(cfg).is_some());
+    if incoming_transition || own.iter().any(|attr| attr.cfg == Cfg::Transition) {
+        own.push(transition_allowlist());
+    }
+    let mut class = native_rules::starlark_rule_class(kind, own, rule.test, rule.executable);
     class.outputs = predeclared_outputs(rule)?;
     let (toolchain_types, optional) = toolchain_types(rule, &parser)?;
     class.toolchain_types = toolchain_types;
     class.optional_toolchain_types = optional;
     class.exec_groups = exec_groups(rule)?;
-    class.incoming_transition = rule.option("cfg").is_some_and(|cfg| crate::transition::Transition::from_value(cfg).is_some());
+    class.incoming_transition = incoming_transition;
     class.build_setting = build_setting(rule).map(crate::config_module::BuildSettingType::spec);
     class.advertised_providers = advertised_providers(rule);
+    class.defined_at = rule.defined_at.clone();
     Ok(class)
+}
+
+/// The allowlist of packages whose rules may use Starlark transitions,
+/// which Bazel makes every such rule depend on.
+fn transition_allowlist() -> AttrSchema {
+    let allowlist = Label::parse_canonical("@@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist").expect("a valid label");
+    AttrSchema::new("$allowlist_function_transition", AttrType::Label).default(AttrValue::Label(allowlist))
 }
 
 /// The exec groups `rule(exec_groups = {...})` declares, and the `test`
@@ -506,6 +522,7 @@ pub(crate) fn rule_function(builder: &mut GlobalsBuilder) {
             definition: context.caller_file(eval),
             exported: OnceLock::new(),
             exported_from: OnceLock::new(),
+            defined_at: crate::reported::call_frames(eval),
         })
     }
 }

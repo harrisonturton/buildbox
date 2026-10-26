@@ -6,7 +6,9 @@ use bazel_fs::RootedPath;
 use bazel_loading::{BzlLoadKey, LoadedPackage, PackageKey, RepoRootKey, packages_beneath, rule_class};
 use bazel_packages::{AttrDefault, AttrSchema, AttrValue, Cfg, Package, PackageError, Rule, RuleClass, RuleClassRef, Target};
 use futures::future::BoxFuture;
-use skyframe::{Compute, SkyError};
+use crate::engine::QueryError;
+use crate::nodes::NodeSet;
+use skyframe::Compute;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,16 +38,6 @@ impl Default for QueryOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct QueryError(pub String);
-
-impl From<SkyError> for QueryError {
-    fn from(error: SkyError) -> QueryError {
-        QueryError(error.message().to_string())
-    }
-}
-
 /// A target found in a loaded package.
 #[derive(Clone)]
 pub struct TargetRef {
@@ -64,6 +56,15 @@ impl TargetRef {
 
     pub fn package(&self) -> &Package {
         &self.package.0
+    }
+
+    /// Another target of the same package.
+    pub fn sibling(&self, name: intern::Symbol) -> Option<TargetRef> {
+        let index = self.package.0.targets.binary_search_by(|target| target.name().cmp(&name)).ok()?;
+        Some(TargetRef {
+            package: self.package.clone(),
+            index,
+        })
     }
 }
 
@@ -95,6 +96,8 @@ pub struct Universe<C> {
     /// Why evaluating the query failed, if it failed as Bazel puts it:
     /// "Evaluation of query failed", with the detail after a colon.
     evaluation_failure: Mutex<Option<Option<String>>>,
+    /// The patterns `--universe_scope` gives, if any.
+    scope: Option<Vec<String>>,
 }
 
 impl<C: Compute> Universe<C> {
@@ -120,7 +123,19 @@ impl<C: Compute> Universe<C> {
             reported: Mutex::new(HashSet::new()),
             closure_failed: AtomicBool::new(false),
             evaluation_failure: Mutex::new(None),
+            scope: None,
         }
+    }
+
+    /// The universe, with `--universe_scope`'s patterns.
+    pub fn with_scope(mut self, scope: Option<Vec<String>>) -> Universe<C> {
+        self.scope = scope;
+        self
+    }
+
+    /// The patterns `--universe_scope` gives, if any.
+    pub fn scope(&self) -> Option<&[String]> {
+        self.scope.as_deref()
     }
 
     pub fn compute(&self) -> &C {
@@ -175,7 +190,7 @@ impl<C: Compute> Universe<C> {
     /// [`Universe::errors`] gives.
     pub fn error(&self, pattern: &str, message: String) -> Result<(), QueryError> {
         if !self.options.keep_going {
-            return Err(QueryError(message));
+            return Err(QueryError::new(message));
         }
         let (_, message) = bazel_loading::split_reported(&message);
         self.report(format!("Skipping '{pattern}': {message}"));
@@ -220,8 +235,8 @@ impl<C: Compute> Universe<C> {
         let packages = self.packages.lock().unwrap_or_else(|p| p.into_inner());
         match packages.get(&id) {
             Some(Ok(package)) => Ok(package.clone()),
-            Some(Err(error)) => Err(QueryError(error.clone())),
-            None => Err(QueryError(format!("package {id} wasn't loaded"))),
+            Some(Err(error)) => Err(QueryError::new(error.clone())),
+            None => Err(QueryError::new(format!("package {id} wasn't loaded"))),
         }
     }
 
@@ -231,7 +246,7 @@ impl<C: Compute> Universe<C> {
         self.report_package(&package.0).await;
         let Ok(index) = package.0.targets.binary_search_by(|target| target.name().cmp(&label.name)) else {
             let build_file = self.build_file(&package.0).await?;
-            return Err(QueryError(bazel_loading::no_such_target(label, &build_file)));
+            return Err(QueryError::new(bazel_loading::no_such_target(label, &build_file)));
         };
         Ok(TargetRef { package, index })
     }
@@ -336,7 +351,7 @@ impl<C: Compute> Universe<C> {
     /// The error of a pattern naming targets of a package with errors.
     fn pattern_in_error(pattern: &str, package: PackageId) -> QueryError {
         let package = bazel_loading::display_package(package);
-        QueryError(format!("Error evaluating '{pattern}': error loading package '{package}': Package '{package}' contains errors"))
+        QueryError::new(format!("Error evaluating '{pattern}': error loading package '{package}': Package '{package}' contains errors"))
     }
 
     /// Note a pattern naming targets of `package`, which has errors: a
@@ -344,7 +359,7 @@ impl<C: Compute> Universe<C> {
     fn package_in_error(&self, pattern: &str, package: PackageId) {
         let mut failure = self.pattern_failure.lock().unwrap_or_else(|p| p.into_inner());
         if failure.is_none() {
-            *failure = Some(Self::pattern_in_error(pattern, package).0);
+            *failure = Some(Self::pattern_in_error(pattern, package).message);
         }
         drop(failure);
         if self.kept_going_past().is_err() {
@@ -359,7 +374,7 @@ impl<C: Compute> Universe<C> {
         for label in labels {
             match self.target(*label).await {
                 Ok(target) => found.push(target),
-                Err(error) => self.error(&label.to_string(), error.0)?,
+                Err(error) => self.error(&label.to_string(), error.message)?,
             }
         }
         Ok(found)
@@ -400,16 +415,46 @@ impl<C: Compute> Universe<C> {
 
     async fn closure_target_missing(&self, label: Label, referrer: Option<&TargetRef>, error: QueryError) -> Result<(), QueryError> {
         let Some(referrer) = referrer else {
-            return self.error(&label.to_string(), error.0);
+            return self.error(&label.to_string(), error.message);
         };
         let at = self.referrer_position(referrer).await;
-        self.report(format!("{at}{} and referenced by '{}'", error.0, referrer.label()));
+        self.report(format!("{at}{} and referenced by '{}'", error.message, referrer.label()));
         if self.kept_going_past().is_ok() {
             self.closure_failed.store(true, Ordering::Relaxed);
             return Ok(());
         }
-        self.fail_evaluation(Some(format!("preloading transitive closure failed: {}", error.0)));
+        self.fail_evaluation(Some(format!("preloading transitive closure failed: {}", error.message)));
         Err(error)
+    }
+
+    /// The targets `roots` depend on, transitively, to `depth` steps if
+    /// given, and the roots, reporting what's missing as Bazel does.
+    pub async fn closure(&self, roots: NodeSet<Label>, depth: Option<u32>) -> Result<NodeSet<Label>, QueryError> {
+        let mut result = NodeSet::new();
+        let mut frontier: TargetSet = roots.into_iter().collect();
+        let mut referrers: HashMap<Label, TargetRef> = HashMap::new();
+        let mut visited = frontier.clone();
+        let mut level = 0;
+        while !frontier.is_empty() {
+            let targets = self.closure_targets(&frontier, &referrers).await?;
+            result.extend(targets.iter().map(TargetRef::label));
+            if depth.is_some_and(|depth| level >= depth) {
+                break;
+            }
+            let mut next = TargetSet::new();
+            for target in &targets {
+                for dep in self.deps_of(target).await? {
+                    if visited.insert(dep) {
+                        next.insert(dep);
+                        referrers.insert(dep, target.clone());
+                    }
+                }
+            }
+            frontier = next;
+            level += 1;
+        }
+        self.finish_closure()?;
+        Ok(result)
     }
 
     /// Fail a transitive closure in which there were errors: when keeping
@@ -422,7 +467,7 @@ impl<C: Compute> Universe<C> {
         self.fail_evaluation(Some(detail.to_string()));
         match self.kept_going_past() {
             Ok(()) => Ok(()),
-            Err(()) => Err(QueryError(detail.to_string())),
+            Err(()) => Err(QueryError::new(detail)),
         }
     }
 
@@ -455,6 +500,9 @@ impl<C: Compute> Universe<C> {
                 let class = self.rule_class(target.package().rule_class(rule)).await?;
                 let mut deps = rule_deps(rule, &class, &self.options);
                 package_default_deps(target.package(), rule, class.kind, &mut deps);
+                if class.kind.as_str() == "test_suite" {
+                    deps.extend(self.implicit_tests(target.package(), rule).await?);
+                }
                 deps.sort();
                 deps.dedup();
                 Ok(deps)
@@ -472,13 +520,13 @@ impl<C: Compute> Universe<C> {
             mapping: &*self.main_mapping,
             lenient: false,
         };
-        let pattern = TargetPattern::parse(text, &context).map_err(|error| QueryError(error.to_string()))?;
+        let pattern = TargetPattern::parse(text, &context).map_err(|error| QueryError::new(error.to_string()))?;
         match pattern {
             TargetPattern::Target(label) => {
                 let target = match self.target(label).await {
                     Ok(target) => target,
                     Err(error) => {
-                        self.error(text, error.0)?;
+                        self.error(text, error.message)?;
                         return Ok(TargetSet::new());
                     }
                 };
@@ -499,7 +547,7 @@ impl<C: Compute> Universe<C> {
             TargetPattern::Recursive { repo, prefix, rules_only } => {
                 let ids = packages_beneath(&self.compute, repo, prefix).await?;
                 if ids.is_empty() {
-                    return Err(QueryError(format!("no targets found beneath '{}'", prefix)));
+                    return Err(QueryError::new(format!("no targets found beneath '{}'", prefix)));
                 }
                 self.load(ids.iter().copied()).await;
                 let mut targets = TargetSet::new();
@@ -514,7 +562,7 @@ impl<C: Compute> Universe<C> {
                                 in_error.push(loaded);
                             }
                         }
-                        Err(error) => self.error(text, error.0)?,
+                        Err(error) => self.error(text, error.message)?,
                     }
                 }
                 for loaded in &in_error {

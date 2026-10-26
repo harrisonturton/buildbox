@@ -12,46 +12,61 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
-/// The attributes every rule has.
+/// The attributes every rule has, in the order Bazel lists them for its
+/// native rules.
 pub fn common_attrs() -> Vec<AttrSchema> {
     vec![
         AttrSchema::new("name", AttrType::String).mandatory().nonconfigurable(),
         AttrSchema::new("visibility", AttrType::LabelList).nonconfigurable().not_dependency(),
+        AttrSchema::new("deprecation", AttrType::String),
         AttrSchema::new("tags", AttrType::StringList).nonconfigurable(),
         AttrSchema::new("testonly", AttrType::Bool).nonconfigurable(),
-        AttrSchema::new("deprecation", AttrType::String),
         AttrSchema::new("features", AttrType::StringList),
-        AttrSchema::new("licenses", AttrType::License).nonconfigurable(),
-        AttrSchema::new("distribs", AttrType::StringList).nonconfigurable(),
         AttrSchema::new("compatible_with", AttrType::LabelList).nonconfigurable().not_dependency(),
         AttrSchema::new("restricted_to", AttrType::LabelList).nonconfigurable().not_dependency(),
-        AttrSchema::new("target_compatible_with", AttrType::LabelList),
-        AttrSchema::new("exec_compatible_with", AttrType::LabelList).nonconfigurable(),
-        AttrSchema::new("exec_group_compatible_with", AttrType::StringListDict).nonconfigurable(),
-        AttrSchema::new("toolchains", AttrType::LabelList),
-        AttrSchema::new("exec_properties", AttrType::StringDict),
         AttrSchema::new("applicable_licenses", AttrType::LabelList).nonconfigurable(),
         AttrSchema::new("package_metadata", AttrType::LabelList).nonconfigurable(),
         AttrSchema::new("aspect_hints", AttrType::LabelList),
+        AttrSchema::new("licenses", AttrType::License).nonconfigurable(),
+        AttrSchema::new("distribs", AttrType::StringList).nonconfigurable(),
+        AttrSchema::new("target_compatible_with", AttrType::LabelList),
+        AttrSchema::new("exec_properties", AttrType::StringDict),
+        AttrSchema::new("exec_compatible_with", AttrType::LabelList).nonconfigurable(),
+        AttrSchema::new("exec_group_compatible_with", AttrType::StringListDict).nonconfigurable(),
+        AttrSchema::new("toolchains", AttrType::LabelList),
         AttrSchema::new("expect_failure", AttrType::String),
     ]
 }
+
+/// The order Bazel lists the common attributes of rules defined in
+/// Starlark in.
+const STARLARK_COMMON_ORDER: &[&str] = &[
+    "name",
+    "expect_failure",
+    "visibility",
+    "deprecation",
+    "tags",
+    "testonly",
+    "features",
+    "licenses",
+    "distribs",
+    "compatible_with",
+    "restricted_to",
+    "applicable_licenses",
+    "package_metadata",
+    "aspect_hints",
+    "toolchains",
+    "exec_properties",
+    "exec_compatible_with",
+    "exec_group_compatible_with",
+    "target_compatible_with",
+];
 
 /// The attributes test rules have, including the implicit dependencies
 /// Bazel gives every test on its test runner.
 pub fn test_attrs() -> Vec<AttrSchema> {
     let tool = |name: &str, target: &str| AttrSchema::new(name, AttrType::Label).default(label(target)).exec();
     vec![
-        tool("$test_wrapper", "@@bazel_tools//tools/test:test_wrapper"),
-        AttrSchema::new("$test_runtime", AttrType::LabelList)
-            .default(AttrValue::LabelList(vec![label_value("@@bazel_tools//tools/test:runtime")]))
-            .exec(),
-        tool("$test_setup_script", "@@bazel_tools//tools/test:test_setup"),
-        tool("$xml_generator_script", "@@bazel_tools//tools/test:test_xml_generator"),
-        tool("$collect_coverage_script", "@@bazel_tools//tools/test:collect_coverage"),
-        tool("$coverage_support", "@@bazel_tools//tools/test:coverage_support"),
-        tool("$xml_writer", "@@bazel_tools//tools/test:xml_writer"),
-        tool(":coverage_report_generator", "@@bazel_tools//tools/test:coverage_report_generator"),
         AttrSchema::new("size", AttrType::String).default(AttrValue::String("medium".into())).nonconfigurable(),
         AttrSchema::new("timeout", AttrType::String).nonconfigurable(),
         AttrSchema::new("flaky", AttrType::Bool).nonconfigurable(),
@@ -60,6 +75,16 @@ pub fn test_attrs() -> Vec<AttrSchema> {
         AttrSchema::new("args", AttrType::StringList),
         AttrSchema::new("env", AttrType::StringDict),
         AttrSchema::new("env_inherit", AttrType::StringList),
+        tool("$test_wrapper", "@@bazel_tools//tools/test:test_wrapper"),
+        tool("$xml_writer", "@@bazel_tools//tools/test:xml_writer"),
+        AttrSchema::new("$test_runtime", AttrType::LabelList)
+            .default(AttrValue::LabelList(vec![label_value("@@bazel_tools//tools/test:runtime")]))
+            .exec(),
+        tool("$test_setup_script", "@@bazel_tools//tools/test:test_setup"),
+        tool("$xml_generator_script", "@@bazel_tools//tools/test:test_xml_generator"),
+        tool("$collect_coverage_script", "@@bazel_tools//tools/test:collect_coverage"),
+        tool("$coverage_support", "@@bazel_tools//tools/test:coverage_support"),
+        tool(":coverage_report_generator", "@@bazel_tools//tools/test:coverage_report_generator"),
     ]
 }
 
@@ -83,7 +108,19 @@ fn label_setting(kind: &str, flag: bool) -> RuleClass {
 }
 
 pub fn rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool) -> RuleClass {
-    let mut attrs = common_attrs();
+    class_of(kind, common_attrs(), own, test, executable)
+}
+
+/// [`rule_class`], for a rule defined in Starlark, whose common
+/// attributes Bazel lists in another order.
+pub fn starlark_rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool) -> RuleClass {
+    let mut common = common_attrs();
+    common.sort_by_key(|attr| STARLARK_COMMON_ORDER.iter().position(|name| *name == attr.name.as_str()));
+    class_of(kind, common, own, test, executable)
+}
+
+fn class_of(kind: &str, common: Vec<AttrSchema>, own: Vec<AttrSchema>, test: bool, executable: bool) -> RuleClass {
+    let mut attrs = common;
     if test {
         attrs.extend(test_attrs());
     } else if executable {
@@ -107,6 +144,7 @@ pub fn rule_class(kind: &str, own: Vec<AttrSchema>, test: bool, executable: bool
         incoming_transition: false,
         build_setting: None,
         advertised_providers: Vec::new(),
+        defined_at: Vec::new(),
     }
 }
 
@@ -132,19 +170,19 @@ fn native_classes() -> Vec<RuleClass> {
             "genrule",
             vec![
                 a("srcs", LabelList),
+                a("tools", LabelList).exec(),
                 a("outs", OutputList).mandatory(),
                 a("cmd", String),
                 a("cmd_bash", String),
-                a("cmd_ps", String),
                 a("cmd_bat", String),
-                a("tools", LabelList).exec(),
-                a("exec_tools", LabelList).exec(),
-                a("executable", Bool).nonconfigurable(),
+                a("cmd_ps", String),
+                a("output_to_bindir", Bool).nonconfigurable(),
                 a("local", Bool),
                 a("message", String),
                 a("output_licenses", StringList),
-                a("output_to_bindir", Bool).nonconfigurable(),
+                a("executable", Bool).nonconfigurable(),
                 a("stamp", Tristate).default(AttrValue::Int(0)),
+                a("exec_tools", LabelList).exec(),
                 a("$genrule_setup", Label).default(label("@@bazel_tools//tools/genrule:genrule-setup.sh")),
             ],
             false,
@@ -154,6 +192,11 @@ fn native_classes() -> Vec<RuleClass> {
         rule_class(
             "config_setting",
             vec![
+                a("visibility", LabelList)
+                    .nonconfigurable()
+                    .not_dependency()
+                    .default(AttrValue::LabelList(vec![label_value("@@//visibility:public")])),
+                a("tags", StringList).nonconfigurable().default(AttrValue::StringList(vec!["manual".into()])),
                 a("values", StringDict).nonconfigurable(),
                 a("define_values", StringDict).nonconfigurable(),
                 a("flag_values", LabelKeyedStringDict).nonconfigurable(),

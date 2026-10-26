@@ -2,7 +2,7 @@
 //! position, and an evaluation that failed with a traceback of the calls
 //! it was in, worded as Bazel's Starlark words them.
 
-use bazel_packages::{PackageError, SourcePosition, TraceFrame};
+use bazel_packages::{CallFrame, PackageError, SourcePosition, TraceFrame};
 use starlark::codemap::FileSpan;
 use starlark::ErrorKind;
 
@@ -43,6 +43,23 @@ fn missing_symbol(error: &starlark::Error, raw: &str) -> Option<PackageError> {
         traceback: vec![frame(position, "<toplevel>", span)],
         message: format!("Error: {message}"),
     })
+}
+
+/// The calls the evaluator is in, outermost first, as Bazel lists a call
+/// stack: where each call was made, and the function that made it.
+pub fn call_frames(eval: &starlark::eval::Evaluator<'_, '_, '_>) -> Vec<CallFrame> {
+    let mut frames = Vec::new();
+    let mut caller = "<toplevel>".to_string();
+    for call in eval.call_stack().frames {
+        if let Some(span) = &call.location {
+            frames.push(CallFrame {
+                position: call_position(span),
+                function: caller.clone(),
+            });
+        }
+        caller = call.name;
+    }
+    frames
 }
 
 /// A failed evaluation's traceback. Each call starlark-rust records names

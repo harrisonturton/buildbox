@@ -5,14 +5,22 @@ package(default_visibility = ["//visibility:private"])
 rust_library(
     name = "query",
     srcs = [
-        "eval.rs",
+        "build_output.rs",
+        "engine.rs",
+        "functions.rs",
+        "graph.rs",
+        "lexer.rs",
+        "nodes.rs",
         "output.rs",
         "parse.rs",
         "query.rs",
+        "target_graph.rs",
         "universe.rs",
+        "xml_output.rs",
     ],
     crate_name = "bazel_query",
     crate_root = "query.rs",
+    proc_macro_deps = ["@crates//:async-trait"],
     visibility = ["//buildbox:__subpackages__"],
     deps = [
         "//buildbox/bazel/fs",
