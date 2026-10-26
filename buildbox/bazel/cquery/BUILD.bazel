@@ -29,6 +29,7 @@ rust_library(
         "//buildbox/skyframe",
         "@crates//:allocative",
         "@crates//:anyhow",
+        "@crates//:data-encoding",
         "@crates//:regex",
         "@crates//:ring",
         "@crates//:starlark",

@@ -157,7 +157,10 @@ fn kind_fields(message: &mut Message, action: &Action, arguments: &[String], out
             }
             message.bool3(19, "is_executable", *executable);
         }
-        ActionKind::Write { executable, .. } => {
+        ActionKind::Write { content, executable } => {
+            if output.include_file_write_contents {
+                message.string3(17, "file_contents", content.clone());
+            }
             message.bool3(19, "is_executable", *executable);
         }
         ActionKind::Symlink { .. } => {}

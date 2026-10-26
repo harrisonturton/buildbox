@@ -388,6 +388,7 @@ fn aquery_output(options: &ParsedOptions) -> Result<AqueryOutput, String> {
         format,
         include_commandline: options.flag("include_commandline", true),
         include_artifacts: options.flag("include_artifacts", true),
+        include_file_write_contents: options.flag("include_file_write_contents", false),
     })
 }
 

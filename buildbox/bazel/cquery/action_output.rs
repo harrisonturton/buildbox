@@ -52,6 +52,9 @@ pub struct AqueryOutput {
     pub include_commandline: bool,
     /// Whether to show actions' inputs and outputs, `--include_artifacts`.
     pub include_artifacts: bool,
+    /// Whether to show what actions that write files write,
+    /// `--include_file_write_contents`.
+    pub include_file_write_contents: bool,
 }
 
 /// The patterns `inputs()`, `outputs()` and `mnemonic()` filter actions
@@ -314,7 +317,13 @@ fn text(owned: &Owned, output: &AqueryOutput, mapping: &RepoMappingTable) -> Str
         }
     }
     match &action.kind {
-        ActionKind::Write { executable, .. } | ActionKind::Template { executable, .. } => {
+        ActionKind::Write { content, executable } => {
+            writeln!(out, "  IsExecutable: {executable}").ok();
+            if output.include_file_write_contents {
+                writeln!(out, "  FileWriteContents: [{}]", data_encoding::BASE64.encode(content.as_bytes())).ok();
+            }
+        }
+        ActionKind::Template { executable, .. } => {
             writeln!(out, "  IsExecutable: {executable}").ok();
         }
         _ => {}
