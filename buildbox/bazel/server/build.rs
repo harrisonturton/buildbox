@@ -100,6 +100,9 @@ pub struct Built {
     pub unbuilt: usize,
     pub exec_root: PathBuf,
     pub errors: bool,
+    /// Whether the build's only errors were top-level targets, or aspects
+    /// applied to them, that failed to analyze, as `--keep_going` allows.
+    pub analysis_incomplete: bool,
 }
 
 /// An aspect applied to a top-level target, and the files it built.
@@ -126,6 +129,9 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
     };
     report(context, &options, &built, out).await;
     report_stats(started, out).await;
+    if built.analysis_incomplete {
+        out.error("command succeeded, but not all targets were analyzed").await;
+    }
     if built.errors {
         out.error("Build did NOT complete successfully").await;
         return exit::BUILD_FAILURE;
@@ -290,7 +296,7 @@ async fn analyze_and_build(
         Ok(aspects) => aspects,
         Err(error) => return Err(aspects_failed(options, &requested, &labels, &main_mapping, error.message(), out).await),
     };
-    let (analyzed, mut failed) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
+    let (analyzed, failed) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
     let (applied, failed_aspects) = apply_aspects(session, &analyzed, &aspects, &main_mapping, out).await;
     let incompatible = report_explicitly_incompatible(&analyzed, &explicit, &main_mapping, out).await;
     if let Some(first) = failed.first().filter(|_| !keep_going) {
@@ -300,25 +306,19 @@ async fn analyze_and_build(
     if let Some(first) = failed_aspects.first().filter(|_| !keep_going) {
         return Err(aspect_analysis_aborted(options, &requested, &analyzed, first, config, &main_mapping, out).await);
     }
-    failed.extend(failed_aspects.iter().map(|failure| Failed {
-        target: bazel_query::display_label(failure.label, &main_mapping),
-        in_dependency: true,
-    }));
-    if !failed.is_empty() {
-        out.info(&format!("Analysis succeeded for only {} of {} top-level targets", analyzed.len(), labels.len())).await;
-    }
-    let mut errors = !failed.is_empty();
     if incompatible && !keep_going {
         return Err(exit::BUILD_FAILURE);
     }
-    errors |= incompatible;
-    report_analysis(&what, &analyzed, testing, out).await;
+    let mut errors = incompatible;
+    let execute_actions = options.flag("build", true);
+    out.info(&bazel_ui::analyzed(&what, &out.snapshot().await)).await;
+    report_kept_going(&failed, &failed_aspects, analyzed.len(), labels.len(), execute_actions, &main_mapping, out).await;
+    report_found(&analyzed, testing, out).await;
+    let analysis_failed = !failed.is_empty() || !failed_aspects.is_empty();
     out.phase(Phase::Executing).await;
 
     let exec_root = crate::commands::output_base_for(context.server, &context.workspace_root).join("execroot/_main");
     let backend = context.server.backend();
-    // --nobuild stops after analysis.
-    let execute_actions = options.flag("build", true);
     let groups = output_groups(options);
     let applied_targets: Vec<Arc<ConfiguredTarget>> = applied.iter().map(|(_, _, target)| target.clone()).collect();
     let (target_tops, failed) = top_levels(session, analyzed.iter().map(|(_, target)| target), &groups, execute_actions, out).await;
@@ -371,7 +371,8 @@ async fn analyze_and_build(
         groups,
         unbuilt,
         exec_root,
-        errors,
+        errors: errors || analysis_failed,
+        analysis_incomplete: analysis_failed && !errors,
     })
 }
 
@@ -588,14 +589,40 @@ fn analyzing(labels: &[Label], mapping: &RepoMappingTable) -> String {
     }
 }
 
-/// Say what was analyzed, as Bazel does.
-async fn report_analysis(what: &str, analyzed: &[(Label, Arc<ConfiguredTarget>)], testing: bool, out: &Output) {
-    out.info(&bazel_ui::analyzed(what, &out.snapshot().await)).await;
+/// Say how many targets were analyzed, and of them how many are tests,
+/// as Bazel does.
+async fn report_found(analyzed: &[(Label, Arc<ConfiguredTarget>)], testing: bool, out: &Output) {
     let tests = analyzed.iter().filter(|(_, target)| target.is_test).count();
     let others = analyzed.len() - tests;
     match testing {
         true => out.info(&format!("Found {others} {} and {tests} test {}...", plural(others, "target"), plural(tests, "target"))).await,
         false => out.info(&format!("Found {} {}...", analyzed.len(), plural(analyzed.len(), "target"))).await,
+    }
+}
+
+/// Report the top-level targets and aspects that failed to analyze, which
+/// `--keep_going` let the build go on without, as Bazel does: with why,
+/// for an aspect, and how many targets analyzed.
+async fn report_kept_going(
+    failed: &[Failed],
+    failed_aspects: &[FailedAspect],
+    analyzed: usize,
+    requested: usize,
+    execute_actions: bool,
+    mapping: &RepoMappingTable,
+    out: &Output,
+) {
+    let warning = |target: &str| format!("errors encountered while analyzing target '{target}', it will not be built.");
+    for failure in failed {
+        out.warning(&warning(&failure.target)).await;
+    }
+    for failure in failed_aspects {
+        let (_, why) = failure.split();
+        out.warning(&format!("{}\n{why}", warning(&bazel_query::display_label(failure.label, mapping)))).await;
+    }
+    if 0 < analyzed && analyzed < requested {
+        let phase = if execute_actions { "Build" } else { "Analysis" };
+        out.info(&format!("{phase} succeeded for only {analyzed} of {requested} top-level targets")).await;
     }
 }
 
