@@ -23,6 +23,7 @@ crate.annotation(
         "//third_party/starlark:patches/starlark/0013-Test-that-a-frozen-module-s-functions-run-after-a-ro.patch",
         "//third_party/starlark:patches/starlark/0014-shrink-retained-bytecode-side-tables.patch",
         "//third_party/starlark:patches/starlark/0015-Record-statement-locations-only-when-something-reads.patch",
+        "//third_party/starlark:patches/starlark/0016-Free-the-serializer-s-map-of-heaps-addresses-when-fo.patch",
     ],
 )
 

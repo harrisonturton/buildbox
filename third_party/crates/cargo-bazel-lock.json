@@ -1,5 +1,5 @@
 {
-  "checksum": "082b2b9c77522dd7c13425a0b8e1d5b8af929fe963805d96075afdb5015da41f",
+  "checksum": "4428e7e7d8fb36c7e430e55c2f14aaea3392601dbdc1a05496b3ff5489fd8d8d",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -11877,7 +11877,8 @@
             "@@//third_party/starlark:patches/starlark/0012-Cross-process-pagable-ser-de-for-BcInstrs.patch",
             "@@//third_party/starlark:patches/starlark/0013-Test-that-a-frozen-module-s-functions-run-after-a-ro.patch",
             "@@//third_party/starlark:patches/starlark/0014-shrink-retained-bytecode-side-tables.patch",
-            "@@//third_party/starlark:patches/starlark/0015-Record-statement-locations-only-when-something-reads.patch"
+            "@@//third_party/starlark:patches/starlark/0015-Record-statement-locations-only-when-something-reads.patch",
+            "@@//third_party/starlark:patches/starlark/0016-Free-the-serializer-s-map-of-heaps-addresses-when-fo.patch"
           ],
           "sha256": "9062e866918dc4c9701c98ac99f7f4fa9e4b3b4edce306e147393bc75458c4fc",
           "url": "https://static.crates.io/crates/starlark/0.14.2/download"

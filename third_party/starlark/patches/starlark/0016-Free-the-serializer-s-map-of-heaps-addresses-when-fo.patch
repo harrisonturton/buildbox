@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harry Turton <harrisonturton@gmail.com>
+Date: Sun, 25 Oct 2026 20:12:32 -0400
+Subject: [PATCH] Free the serializer's map of heaps' addresses when forgetting
+ them
+
+forget_serialized_heaps cleared the map from each value's address to where
+it's serialized, but kept its capacity: an entry for every value of every
+heap serialized or referred to, 52 MB in bb after paging out neptune's
+analysis. It now frees it too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pagable/starlark_serialize_context.rs | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/src/pagable/starlark_serialize_context.rs b/src/pagable/starlark_serialize_context.rs
+index 0db7883b..6fa8fa15 100644
+--- a/src/pagable/starlark_serialize_context.rs
++++ b/src/pagable/starlark_serialize_context.rs
+@@ -67,10 +67,13 @@ impl StarlarkSerState {
+         self.registered_heaps.insert(heap_id);
+     }
+ 
+-    /// Forget every heap registered so far.
++    /// Forget every heap registered so far, and free the memory that took:
++    /// an entry for every value of every heap serialized or referred to.
+     fn clear(&self) {
+         self.registered_heaps.clear();
++        self.registered_heaps.shrink_to_fit();
+         self.ptr_to_location.clear();
++        self.ptr_to_location.shrink_to_fit();
+     }
+ 
+     /// Check if a heap's offset map has already been registered.
+@@ -115,10 +118,11 @@ impl StarlarkSerState {
+     }
+ }
+ 
+-/// Forget the addresses of the heaps serialized in `session` so far, before
+-/// serializing again once some of them may have been freed: a heap read back
+-/// has the same name, and so the same id, at new addresses, and a freed
+-/// heap's addresses can be reused by another.
++/// Forget the addresses of the heaps serialized in `session` so far, freeing
++/// the memory they take: before serializing again once some of them may have
++/// been freed, since a heap read back has the same name, and so the same id,
++/// at new addresses, and a freed heap's addresses can be reused by another;
++/// and once serializing is done, since they're kept until then.
+ pub fn forget_serialized_heaps(session: &pagable::SessionContext) {
+     if let Some(state) = session.get::<Arc<StarlarkSerState>>() {
+         state.clear();

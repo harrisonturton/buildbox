@@ -298,9 +298,10 @@ impl HeapStore {
     }
 
     /// Page out every live value of `values` that can be, together,
-    /// returning how many were. What earlier page-outs learnt of heaps'
-    /// addresses is forgotten first, since those heaps may since have been
-    /// freed or read back.
+    /// returning how many were. What the serializer learns of heaps'
+    /// addresses is forgotten afterwards: it takes an entry for every value
+    /// of every heap referred to, and those heaps may be freed or read back
+    /// before the next page-out.
     ///
     /// A value read back is still stored as it was, so it's released rather
     /// than stored again: stored again, its heap could get another key, and
@@ -308,10 +309,10 @@ impl HeapStore {
     fn page_out<'a>(self: &Arc<HeapStore>, values: impl IntoIterator<Item = &'a PagedValue>) -> anyhow::Result<usize> {
         let live: Vec<(&PagedValue, OwnedFrozenValue)> = values.into_iter().filter_map(|value| Some((value, value.live()?))).collect();
         let (read_back, new): (Vec<_>, Vec<_>) = live.into_iter().partition(|(value, _)| value.key().is_some());
-        starlark::pagable::forget_serialized_heaps(&self.session);
         self.mark_paging(&new);
         self.register_pinned_heaps(new.iter().map(|(_, value)| value.owner()));
         let stored = self.store_values(&new);
+        starlark::pagable::forget_serialized_heaps(&self.session);
         self.forget_freed();
         for ((value, _), key) in new.iter().zip(stored?) {
             value.stored(key);
