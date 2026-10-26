@@ -118,14 +118,31 @@ impl ActionFilters {
     }
 }
 
-/// An action of a configured target the query evaluated to.
-struct Owned {
-    target: Arc<ConfiguredTarget>,
-    action: Action,
+/// An action of a configured target the query evaluated to, and for a
+/// command, its arguments, with those of its params files in place of the
+/// arguments naming them.
+pub(crate) struct Owned {
+    pub target: Arc<ConfiguredTarget>,
+    pub action: Action,
+    pub arguments: Vec<String>,
+}
+
+impl Owned {
+    /// The files the action reads, as Bazel lists them: without the
+    /// params files a command writes as it runs.
+    pub fn inputs(&self) -> Vec<Artifact> {
+        let mut inputs = self.action.all_inputs();
+        if let ActionKind::Spawn(spawn) = &self.action.kind {
+            inputs.retain(|input| !spawn.param_files.iter().any(|param_file| param_file.path == input.exec_path));
+        }
+        inputs
+    }
 }
 
 /// The actions of the targets of `result` that `filters` match, target
-/// by target, each target's in the order its rule made them.
+/// by target, each target's in the order its rule made them. The actions
+/// writing a command's params files aren't listed: Bazel writes them as
+/// part of the command.
 async fn actions<C: Compute>(graph: &ConfiguredGraph<C>, result: &NodeSet<ConfiguredNode>, filters: &ActionFilters) -> Result<Vec<Owned>, QueryError> {
     let mut nodes: Vec<ConfiguredNode> = result.iter().copied().collect();
     nodes.sort();
@@ -134,14 +151,55 @@ async fn actions<C: Compute>(graph: &ConfiguredGraph<C>, result: &NodeSet<Config
         let Some(target) = graph.configured(&node).await else {
             continue;
         };
-        for stored in &target.actions {
-            let action = stored.load()?;
-            if filters.matches(&action) {
-                owned.push(Owned { target: target.clone(), action });
+        let actions: Vec<Action> = target.actions.iter().map(|stored| stored.load()).collect::<Result<_, _>>()?;
+        let params = params_files(&actions);
+        for action in actions {
+            let writes_params = action.outputs.iter().any(|output| params.contains_key(&output.exec_path));
+            if writes_params || !filters.matches(&action) {
+                continue;
             }
+            let arguments = expanded_arguments(&action, &params);
+            owned.push(Owned { target: target.clone(), action, arguments });
         }
     }
     Ok(owned)
+}
+
+/// The contents of the params files a target's commands read, by path.
+fn params_files(actions: &[Action]) -> HashMap<intern::PathId, String> {
+    let mut wanted = Vec::new();
+    for action in actions {
+        if let ActionKind::Spawn(spawn) = &action.kind {
+            wanted.extend(spawn.param_files.iter().map(|param_file| param_file.path));
+        }
+    }
+    let mut contents = HashMap::new();
+    for action in actions {
+        let (ActionKind::Write { content, .. }, Some(output)) = (&action.kind, action.outputs.first()) else {
+            continue;
+        };
+        if wanted.contains(&output.exec_path) {
+            contents.insert(output.exec_path, content.clone());
+        }
+    }
+    contents
+}
+
+/// A command's arguments, those of its params files in place of the
+/// arguments naming them, as Bazel's aquery shows them.
+fn expanded_arguments(action: &Action, params: &HashMap<intern::PathId, String>) -> Vec<String> {
+    let ActionKind::Spawn(spawn) = &action.kind else {
+        return Vec::new();
+    };
+    let mut arguments = Vec::with_capacity(spawn.arguments.len());
+    for (index, argument) in spawn.arguments.iter().enumerate() {
+        let param_file = spawn.param_files.iter().find(|param_file| param_file.argument as usize == index);
+        match param_file.and_then(|param_file| Some((param_file, params.get(&param_file.path)?))) {
+            Some((param_file, contents)) => arguments.extend(bazel_analysis::param_file_arguments(contents, &param_file.format)),
+            None => arguments.push(argument.clone()),
+        }
+    }
+    arguments
 }
 
 /// Print the actions of the result's targets as `output` says.
@@ -150,21 +208,17 @@ pub async fn format<C: Compute>(graph: &ConfiguredGraph<C>, result: &NodeSet<Con
     let mapping = &graph.packages.main_mapping;
     Ok(match output.format {
         AqueryFormat::Text => owned.iter().map(|owned| text(owned, output, mapping)).collect::<String>().into_bytes(),
-        AqueryFormat::Commands => owned.iter().filter_map(|owned| command(&owned.action)).collect::<String>().into_bytes(),
+        AqueryFormat::Commands => owned.iter().filter_map(command).collect::<String>().into_bytes(),
         AqueryFormat::Summary => summary(&owned, mapping).into_bytes(),
         AqueryFormat::Proto => container(&owned, output, mapping).to_bytes(),
-        AqueryFormat::StreamedProto => crate::action_proto::streamed(&owned_parts(&owned), output, mapping),
-        AqueryFormat::TextProto => crate::action_proto::text(&owned_parts(&owned), output, mapping).into_bytes(),
+        AqueryFormat::StreamedProto => crate::action_proto::streamed(&owned, output, mapping),
+        AqueryFormat::TextProto => crate::action_proto::text(&owned, output, mapping).into_bytes(),
         AqueryFormat::JsonProto => format!("{}\n", container(&owned, output, mapping).to_json(false)).into_bytes(),
     })
 }
 
-fn owned_parts(owned: &[Owned]) -> Vec<(&ConfiguredTarget, &Action)> {
-    owned.iter().map(|owned| (owned.target.as_ref(), &owned.action)).collect()
-}
-
 fn container(owned: &[Owned], output: &AqueryOutput, mapping: &RepoMappingTable) -> Message {
-    crate::action_proto::container(&owned_parts(owned), output, mapping)
+    crate::action_proto::container(owned, output, mapping)
 }
 
 /// An action's key: a hash of what it does, which identifies it.
@@ -181,7 +235,7 @@ pub fn exec_platform(target: &ConfiguredTarget) -> Label {
 
 /// An action as `--output=text` shows it.
 fn text(owned: &Owned, output: &AqueryOutput, mapping: &RepoMappingTable) -> String {
-    let Owned { target, action } = owned;
+    let Owned { target, action, arguments } = owned;
     let config = target.config.get();
     let platform = exec_platform(target);
     let mut out = String::new();
@@ -193,7 +247,7 @@ fn text(owned: &Owned, output: &AqueryOutput, mapping: &RepoMappingTable) -> Str
     writeln!(out, "  Execution platform: {}", display_label(platform, mapping)).ok();
     writeln!(out, "  ActionKey: {}", action_key(action)).ok();
     if output.include_artifacts {
-        writeln!(out, "  Inputs: [{}]", sorted_paths(&action.all_inputs()).join(", ")).ok();
+        writeln!(out, "  Inputs: [{}]", sorted_paths(&owned.inputs()).join(", ")).ok();
         writeln!(out, "  Outputs: [{}]", sorted_paths(&action.outputs).join(", ")).ok();
     }
     if let ActionKind::Spawn(spawn) = &action.kind {
@@ -202,7 +256,7 @@ fn text(owned: &Owned, output: &AqueryOutput, mapping: &RepoMappingTable) -> Str
             writeln!(out, "  Environment: [{}]", env.join(", ")).ok();
         }
         if output.include_commandline {
-            writeln!(out, "  Command Line: {}", command_line(&spawn.arguments, target.config, platform)).ok();
+            writeln!(out, "  Command Line: {}", command_line(arguments, target.config, platform)).ok();
         }
         if !spawn.execution_info.is_empty() {
             let info: Vec<String> = spawn.execution_info.iter().map(|(key, value)| format!("{}: {}", shell_escape(key), shell_escape(value))).collect();
@@ -235,11 +289,11 @@ fn command_line(arguments: &[String], config: ConfigId, platform: Label) -> Stri
 
 /// An action's command line on one line, as `--output=commands` shows it;
 /// nothing for actions that don't run a command.
-fn command(action: &Action) -> Option<String> {
-    let ActionKind::Spawn(spawn) = &action.kind else {
+fn command(owned: &Owned) -> Option<String> {
+    let ActionKind::Spawn(_) = &owned.action.kind else {
         return None;
     };
-    let escaped: Vec<String> = spawn.arguments.iter().map(|argument| shell_escape(argument)).collect();
+    let escaped: Vec<String> = owned.arguments.iter().map(|argument| shell_escape(argument)).collect();
     Some(format!("{}\n", escaped.join(" ")))
 }
 
@@ -249,7 +303,7 @@ fn summary(owned: &[Owned], mapping: &RepoMappingTable) -> String {
     let mut mnemonics: HashMap<String, usize> = HashMap::new();
     let mut configurations: HashMap<String, usize> = HashMap::new();
     let mut platforms: HashMap<String, usize> = HashMap::new();
-    for Owned { target, action } in owned {
+    for Owned { target, action, .. } in owned {
         *mnemonics.entry(action.mnemonic.to_string()).or_default() += 1;
         *configurations.entry(target.config.get().output_directory.clone()).or_default() += 1;
         *platforms.entry(display_label(exec_platform(target), mapping)).or_default() += 1;

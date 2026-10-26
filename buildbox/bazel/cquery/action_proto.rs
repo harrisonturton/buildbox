@@ -2,7 +2,7 @@
 //! configuration, file and path written once, by id, the first time an
 //! action refers to it, as Bazel writes them.
 
-use crate::action_output::{AqueryOutput, Ids, action_key, exec_platform};
+use crate::action_output::{AqueryOutput, Ids, Owned, action_key, exec_platform};
 use bazel_analysis::{Action, ActionKind, Artifact, ConfiguredTarget};
 use bazel_config::ConfigId;
 use bazel_label::{Label, RepoMappingTable};
@@ -97,14 +97,15 @@ impl Entries {
         self.dep_sets
     }
 
-    fn action(&mut self, target: &ConfiguredTarget, action: &Action, output: &AqueryOutput, mapping: &RepoMappingTable) {
+    fn action(&mut self, owned: &Owned, output: &AqueryOutput, mapping: &RepoMappingTable) {
+        let Owned { target, action, arguments } = owned;
         let target_id = self.target(target, mapping);
         let config = self.configuration(target.config);
         let mut message = Message::new();
         message.int3(1, "target_id", target_id.into()).string3(3, "action_key", action_key(action)).string3(4, "mnemonic", action.mnemonic.to_string());
         message.int3(5, "configuration_id", config.into());
         if output.include_artifacts {
-            let inputs = action.all_inputs();
+            let inputs = owned.inputs();
             if !inputs.is_empty() {
                 let dep_set = self.dep_set(&inputs);
                 message.packed(8, "input_dep_set_ids", vec![dep_set.into()]);
@@ -113,18 +114,18 @@ impl Entries {
             let primary = outputs.first().copied().unwrap_or(0);
             message.packed(9, "output_ids", outputs).int3(13, "primary_output_id", primary);
         }
-        kind_fields(&mut message, action, output);
+        kind_fields(&mut message, action, arguments, output);
         message.string3(14, "execution_platform", exec_platform(target).to_string());
         self.push(2, "actions", message);
     }
 }
 
 /// The fields of an action that depend on what it does.
-fn kind_fields(message: &mut Message, action: &Action, output: &AqueryOutput) {
+fn kind_fields(message: &mut Message, action: &Action, arguments: &[String], output: &AqueryOutput) {
     match &action.kind {
         ActionKind::Spawn(spawn) => {
             if output.include_commandline {
-                message.strings(6, "arguments", spawn.arguments.iter().cloned());
+                message.strings(6, "arguments", arguments.iter().cloned());
             }
             for (key, value) in &spawn.env {
                 message.repeated(7, "environment_variables", pair(key, value));
@@ -152,16 +153,16 @@ fn pair(key: &str, value: &str) -> Message {
     message
 }
 
-fn entries(actions: &[(&ConfiguredTarget, &Action)], output: &AqueryOutput, mapping: &RepoMappingTable) -> Entries {
+fn entries(actions: &[Owned], output: &AqueryOutput, mapping: &RepoMappingTable) -> Entries {
     let mut entries = Entries::new();
-    for (target, action) in actions {
-        entries.action(target, action, output, mapping);
+    for owned in actions {
+        entries.action(owned, output, mapping);
     }
     entries
 }
 
 /// The actions as one `ActionGraphContainer`.
-pub fn container(actions: &[(&ConfiguredTarget, &Action)], output: &AqueryOutput, mapping: &RepoMappingTable) -> Message {
+pub(crate) fn container(actions: &[Owned], output: &AqueryOutput, mapping: &RepoMappingTable) -> Message {
     let mut container = Message::new();
     for (number, name, message) in entries(actions, output, mapping).entries {
         container.repeated(number, name, message);
@@ -171,7 +172,7 @@ pub fn container(actions: &[(&ConfiguredTarget, &Action)], output: &AqueryOutput
 
 /// The actions as `ActionGraphContainer`s of one entry each, in the order
 /// they were made, each prefixed by its length.
-pub fn streamed(actions: &[(&ConfiguredTarget, &Action)], output: &AqueryOutput, mapping: &RepoMappingTable) -> Vec<u8> {
+pub(crate) fn streamed(actions: &[Owned], output: &AqueryOutput, mapping: &RepoMappingTable) -> Vec<u8> {
     let mut out = Vec::new();
     for (number, name, message) in entries(actions, output, mapping).entries {
         let mut container = Message::new();
@@ -183,7 +184,7 @@ pub fn streamed(actions: &[(&ConfiguredTarget, &Action)], output: &AqueryOutput,
 
 /// The actions as text format, each entry as it was made, as Bazel
 /// streams them.
-pub fn text(actions: &[(&ConfiguredTarget, &Action)], output: &AqueryOutput, mapping: &RepoMappingTable) -> String {
+pub(crate) fn text(actions: &[Owned], output: &AqueryOutput, mapping: &RepoMappingTable) -> String {
     let mut out = String::new();
     for (number, name, message) in entries(actions, output, mapping).entries {
         let mut container = Message::new();

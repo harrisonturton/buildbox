@@ -465,6 +465,7 @@ fn compile(
                 arguments,
                 env: action_env(state, configuration, action, &variables)?,
                 execution_info: Vec::new(),
+                param_files: Vec::new(),
             }),
         })?;
         objects.push(object);
@@ -517,6 +518,7 @@ pub fn archive(
             arguments,
             env: action_env(state, configuration, action, &variables)?,
             execution_info: Vec::new(),
+            param_files: Vec::new(),
         }),
     })?;
     Ok(output)
@@ -623,6 +625,7 @@ fn link_executable(
             arguments,
             env: action_env(state, configuration, action, &variables)?,
             execution_info: Vec::new(),
+            param_files: Vec::new(),
         }),
     })?;
     Ok(output)
@@ -744,6 +747,7 @@ fn strip(state: &RuleState, toolchain: &CcToolchain<'_>, configuration: &Feature
             arguments,
             env: action_env(state, configuration, action, &variables)?,
             execution_info: Vec::new(),
+            param_files: Vec::new(),
         }),
     })
 }

@@ -351,6 +351,39 @@ pub fn param_file_contents(state: &ArgsState) -> String {
 
 /// An argument as GCC reads it from a params file: special characters
 /// escaped with backslashes.
+/// The arguments a params file of `format` holds: what
+/// [`param_file_contents`] wrote.
+pub fn param_file_arguments(contents: &str, format: &str) -> Vec<String> {
+    let lines = contents.strip_suffix('\n').unwrap_or(contents).split('\n');
+    match format {
+        "shell" => lines.map(shell_unquote).collect(),
+        "gcc_quoted" => lines.map(gcc_unquote).collect(),
+        _ => lines.map(str::to_string).collect(),
+    }
+}
+
+fn shell_unquote(line: &str) -> String {
+    match line.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')) {
+        Some(quoted) => quoted.replace("'\\''", "'"),
+        None => line.to_string(),
+    }
+}
+
+fn gcc_unquote(line: &str) -> String {
+    if line == "''" {
+        return String::new();
+    }
+    let mut unquoted = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '\\' => unquoted.extend(chars.next()),
+            character => unquoted.push(character),
+        }
+    }
+    unquoted
+}
+
 fn gcc_quote(argument: &str) -> String {
     if argument.is_empty() {
         return "''".to_string();
@@ -483,5 +516,23 @@ mod tests {
         assert!(!wants_expander(&module, "rest"));
         assert!(wants_expander(&module, "short"));
         assert!(!wants_directory_expander(Value::new_none()));
+    }
+}
+
+#[cfg(test)]
+mod param_file_tests {
+    use super::*;
+
+    #[test]
+    fn reads_back_what_params_files_hold() {
+        let arguments: Vec<String> = ["plain", "with space", "it's", ""].iter().map(|argument| argument.to_string()).collect();
+        for format in ["multiline", "shell", "gcc_quoted"] {
+            let state = ArgsState {
+                arguments: arguments.clone(),
+                param_file: Some("@%s".to_string()),
+                param_file_format: format.to_string(),
+            };
+            assert_eq!(param_file_arguments(&param_file_contents(&state), format), arguments, "{format}");
+        }
     }
 }

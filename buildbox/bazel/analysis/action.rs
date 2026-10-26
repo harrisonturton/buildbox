@@ -46,6 +46,19 @@ pub struct Spawn {
     /// Hints for how to run it, such as `no-sandbox` or `requires-network`,
     /// sorted by name.
     pub execution_info: Vec<(String, String)>,
+    /// The arguments that name params files holding more arguments, which
+    /// another action writes.
+    pub param_files: Vec<ParamFile>,
+}
+
+/// An argument of a command that names a params file: which argument, the
+/// file, and how its arguments are written in it.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct ParamFile {
+    pub argument: u32,
+    pub path: PathId,
+    /// `multiline`, `shell` or `gcc_quoted`.
+    pub format: String,
 }
 
 /// A runfiles tree: the files an executable needs at run time, laid out in

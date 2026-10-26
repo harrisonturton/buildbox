@@ -132,9 +132,10 @@ fn complete_command(command: &Command, exec_root: Option<&Path>) -> String {
     text
 }
 
-/// `text` quoted for a POSIX shell, unless it needs no quoting.
+/// `text` quoted for a POSIX shell, unless it needs no quoting, as
+/// Bazel's `ShellEscaper` quotes it.
 pub fn shell_escape(text: &str) -> String {
-    let safe = |c: char| c.is_ascii_alphanumeric() || "@%_+=:,./-".contains(c);
+    let safe = |c: char| c.is_ascii_alphanumeric() || "@%_+:,./-".contains(c);
     if !text.is_empty() && text.chars().all(safe) {
         return text.to_string();
     }

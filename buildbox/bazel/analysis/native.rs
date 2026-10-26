@@ -237,6 +237,7 @@ fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, he
             arguments: vec!["/bin/bash".to_string(), "-c".to_string(), script],
             env: input.config.options.action_env.clone(),
             execution_info: execution_info(input),
+            param_files: Vec::new(),
         }),
     })?;
 

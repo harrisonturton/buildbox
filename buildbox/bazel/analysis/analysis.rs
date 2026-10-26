@@ -39,7 +39,8 @@ mod toolchains;
 pub mod transition;
 mod workspace_status;
 
-pub use action::{Action, ActionKind, RunfilesTree, Spawn, StoredAction};
+pub use action::{Action, ActionKind, ParamFile, RunfilesTree, Spawn, StoredAction};
+pub use args::param_file_arguments;
 pub use inputs::InputSet;
 pub use artifact::{Artifact, name_path, package_dir, repo_dir, runfiles_repo_name};
 pub use attrs::{ConfiguredAttrs, ConfiguredAttrsKey};

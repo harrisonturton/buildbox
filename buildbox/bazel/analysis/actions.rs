@@ -2,7 +2,7 @@
 //! actions that generate them.
 
 use crate::inputs::InputSet;
-use crate::action::{Action, ActionKind, RunfilesTree, Spawn};
+use crate::action::{Action, ActionKind, ParamFile, RunfilesTree, Spawn};
 use crate::args::{self, Args};
 use crate::artifact::{self, Artifact};
 use crate::file_value::FileValue;
@@ -117,8 +117,16 @@ impl Tools {
 }
 
 /// The arguments of an action: strings and `Args`, the latter maybe in a
-/// params file, which another action writes.
-fn arguments(value: Option<Value<'_>>, state: &RuleState, outputs: &[Artifact], inputs: &mut Vec<Artifact>) -> anyhow::Result<Vec<String>> {
+/// params file, which another action writes; those that name params files
+/// are recorded in `param_files`, numbered from `first`.
+fn arguments(
+    value: Option<Value<'_>>,
+    state: &RuleState,
+    outputs: &[Artifact],
+    inputs: &mut Vec<Artifact>,
+    first: usize,
+    param_files: &mut Vec<ParamFile>,
+) -> anyhow::Result<Vec<String>> {
     let Some(value) = value.filter(|value| !value.is_none()) else {
         return Ok(Vec::new());
     };
@@ -136,6 +144,11 @@ fn arguments(value: Option<Value<'_>>, state: &RuleState, outputs: &[Artifact], 
         };
         let params = write_param_file(state, outputs, &args)?;
         inputs.push(params);
+        param_files.push(ParamFile {
+            argument: (first + out.len()) as u32,
+            path: params.exec_path,
+            format: args.param_file_format.clone(),
+        });
         out.push(param_file_arg.replacen("%s", &params.exec_path.to_string(), 1));
     }
     Ok(out)
@@ -218,7 +231,9 @@ impl<'v> SpawnArgs<'v> {
         tools.add_list(self.tools, state)?;
         let mut arguments = command;
         let mut direct = Vec::new();
-        arguments.extend(self::arguments(self.arguments, state, &outputs, &mut direct)?);
+        let mut param_files = Vec::new();
+        let first = arguments.len();
+        arguments.extend(self::arguments(self.arguments, state, &outputs, &mut direct, first, &mut param_files)?);
         direct.extend(tools.inputs);
         let inputs = InputSet::new(direct, vec![declared]);
 
@@ -238,6 +253,7 @@ impl<'v> SpawnArgs<'v> {
                 arguments,
                 env,
                 execution_info: string_dict(self.execution_requirements, "execution_requirements")?,
+                param_files,
             }),
         };
         state.register(action)?;
