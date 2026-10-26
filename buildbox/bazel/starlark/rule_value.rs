@@ -123,6 +123,14 @@ where
         Ok(())
     }
 
+    /// Tracebacks name a rule as Bazel's do: by the name it's exported as.
+    fn name_for_call_stack(&self, me: Value<'v>) -> String {
+        match self.exported.get() {
+            Some(class) => class.kind.to_string(),
+            None => me.to_repr(),
+        }
+    }
+
     fn invoke(&self, _me: Value<'v>, args: &Arguments<'v, '_>, eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<Value<'v>> {
         let (Some(class_ref), Some(class)) = (self.class_ref(), self.exported.get()) else {
             return Err(starlark::Error::new_other(anyhow::anyhow!(
@@ -130,6 +138,8 @@ where
             )));
         };
         args.no_positional_args(eval.heap())?;
+        let attrs: Vec<(String, Value<'v>)> = self.attrs.iter().map(|(name, value)| (name.clone(), value.to_value())).collect();
+        crate::aspect::check_parameters_given(&attrs, class).map_err(starlark::Error::new_other)?;
         let names = args.names_map()?;
         let given: Vec<(String, Value<'v>)> = names.iter().map(|(name, value)| (name.as_str().to_string(), *value)).collect();
         let given = self.initialize(given, eval)?;

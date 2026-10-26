@@ -7,7 +7,7 @@ use crate::convert::LabelParser;
 use crate::rule_value::{attr_schema, exec_group_names, provider_key, toolchain_labels};
 use allocative::Allocative;
 use bazel_label::Label;
-use bazel_packages::{AspectRef, RuleClass};
+use bazel_packages::{AspectRef, AttrType, RuleClass};
 use intern::Symbol;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
@@ -245,6 +245,148 @@ fn items<'v>(value: Option<Value<'v>>, what: &str) -> anyhow::Result<Vec<Value<'
     crate::convert::items(value).ok_or_else(|| anyhow::anyhow!("aspect(): {what} must be a list, not {}", value.get_type()))
 }
 
+/// The strings of a list, `what`, as Bazel requires them.
+fn strings(values: Vec<Value<'_>>, what: &str) -> anyhow::Result<Vec<String>> {
+    let mut strings = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        let Some(text) = value.unpack_str() else {
+            anyhow::bail!("at index {index} of {what}, got element of type {}, want string", value.get_type());
+        };
+        strings.push(text.to_string());
+    }
+    Ok(strings)
+}
+
+/// Check an aspect's attributes as Bazel does: its public ones, its
+/// parameters, must be strings, ints or bools, with defaults among their
+/// `values`; its private ones must have defaults.
+fn check_attrs(attrs: &[(String, Value<'_>)]) -> anyhow::Result<()> {
+    for (name, value) in attrs {
+        let Some(attribute) = Attribute::from_value(*value) else {
+            continue;
+        };
+        if name.starts_with('_') {
+            if attribute.default.is_none() {
+                anyhow::bail!("Aspect attribute '{name}' has no default value.");
+            }
+            continue;
+        }
+        if !matches!(attribute.ty, AttrType::String | AttrType::Int | AttrType::Bool) {
+            anyhow::bail!("Aspect parameter attribute '{name}' must have type 'bool', 'int' or 'string'.");
+        }
+        let (Some(default), Some(values)) = (attribute.default, allowed_values(&attribute)) else {
+            continue;
+        };
+        if !values.iter().any(|value| value.equals(default).unwrap_or(false)) {
+            anyhow::bail!("Aspect parameter attribute '{name}' has a bad default value: {}", not_allowed(&values, default));
+        }
+    }
+    Ok(())
+}
+
+/// The values an attribute's `values` allows, if it restricts them.
+fn allowed_values<'v>(attribute: &Attribute<'v>) -> Option<Vec<Value<'v>>> {
+    crate::convert::items(attribute.values?)
+}
+
+/// Why a value isn't allowed, as Bazel words it.
+pub fn not_allowed(values: &[Value<'_>], value: Value<'_>) -> String {
+    let values: Vec<String> = values.iter().map(|value| value.to_str()).collect();
+    format!("has to be one of {} instead of '{}'", english_list(&values), value.to_str())
+}
+
+/// Values as Bazel lists them in errors: `'a', 'b', or 'c'`.
+pub fn english_list(values: &[String]) -> String {
+    let quoted: Vec<String> = values.iter().map(|value| format!("'{value}'")).collect();
+    match quoted.as_slice() {
+        [] => "nothing".to_string(),
+        [one] => one.clone(),
+        [first, second] => format!("{first} or {second}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+    }
+}
+
+/// Check the aspects `attr.label(aspects = [...])` attaches, as Bazel does
+/// when it attaches them: each must be exported, and given once, counting
+/// those they require.
+pub fn check_attached(aspects: Value<'_>) -> anyhow::Result<()> {
+    let Some(items) = crate::convert::items(aspects) else {
+        return Ok(());
+    };
+    let mut added = Vec::new();
+    for item in items {
+        if item.downcast_ref::<crate::opaque::Opaque>().is_some() {
+            continue;
+        }
+        let Some(aspect) = Aspect::from_value(item) else {
+            anyhow::bail!("expected an aspect, got {} of type '{}'", item.to_repr(), item.get_type());
+        };
+        add_attached(aspect, None, &mut added)?;
+    }
+    Ok(())
+}
+
+/// Add an aspect to those attached, after those it requires, as Bazel's
+/// `AspectsList` does: by name, and whether another aspect required it.
+fn add_attached(aspect: &AspectGen<Value<'_>>, required_by: Option<&str>, added: &mut Vec<(String, Option<String>)>) -> anyhow::Result<()> {
+    let Some(exported) = aspect.exported.get() else {
+        anyhow::bail!("Aspects should be top-level values in extension files that define them.");
+    };
+    let name = format!("{}%{}", exported.file, exported.name);
+    for required in aspect.directly_required() {
+        add_attached(required, Some(&name), added)?;
+    }
+    match added.iter().find(|(added, _)| *added == name) {
+        None => added.push((name, required_by.map(str::to_string))),
+        Some(_) if required_by.is_some() => {}
+        Some((_, Some(by))) => anyhow::bail!("aspect {name} was added before as a required aspect of aspect {by}"),
+        Some((_, None)) => anyhow::bail!("aspect {name} added more than once"),
+    }
+    Ok(())
+}
+
+/// Check, as Bazel does where a rule is used, that the aspects its
+/// attributes attach can take their parameters from it: they must be
+/// bools or restricted to `values`, and those without defaults must be
+/// attributes of the rule, `class`, too.
+pub fn check_parameters_given(attrs: &[(String, Value<'_>)], class: &RuleClass) -> anyhow::Result<()> {
+    for (_, value) in attrs {
+        let aspects = Attribute::from_value(*value).and_then(|attribute| attribute.aspects).and_then(crate::convert::items).unwrap_or_default();
+        for aspect in aspects.into_iter().filter_map(Aspect::from_value) {
+            for required in aspect.directly_required() {
+                check_parameters_of(required, class)?;
+            }
+            check_parameters_of(aspect, class)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_parameters_of(aspect: &AspectGen<Value<'_>>, class: &RuleClass) -> anyhow::Result<()> {
+    let Some(exported) = aspect.exported.get() else {
+        return Ok(());
+    };
+    let name = format!("{}%{}", exported.file, exported.name);
+    for (attr, value) in aspect.attrs.iter().filter(|(attr, _)| !attr.starts_with('_')) {
+        let Some(attribute) = Attribute::from_value(*value) else {
+            continue;
+        };
+        if attribute.ty != AttrType::Bool && attribute.values.is_none() {
+            anyhow::bail!("Aspect {name}: Aspect parameter attribute '{attr}' must use the 'values' restriction.");
+        }
+        let has_default = attribute.default.is_some_and(|default| default.to_bool());
+        let given = class.attrs.iter().any(|schema| schema.name.as_str() == attr && schema.ty == attribute.ty);
+        if (!has_default || attribute.mandatory) && !given {
+            let ty = match attribute.ty {
+                AttrType::Bool => "boolean",
+                other => other.name(),
+            };
+            anyhow::bail!("Aspect {name} requires rule {} to specify attribute '{attr}' with type {ty}.", class.kind);
+        }
+    }
+    Ok(())
+}
+
 /// `required_providers` or `required_aspect_providers`: a list of
 /// providers, or a list of lists of them.
 fn required_providers<'v>(value: Option<Value<'v>>, what: &str) -> anyhow::Result<Vec<Vec<Value<'v>>>> {
@@ -300,16 +442,18 @@ pub(crate) fn aspect_function(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<Aspect<'v>> {
         let _ = kwargs;
         let context = EvalContext::get(eval)?;
-        let attr_aspects = items(attr_aspects, "attr_aspects")?;
-        let attr_aspects = attr_aspects
-            .iter()
-            .map(|name| name.unpack_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("aspect(): attr_aspects must be strings")))
-            .collect::<anyhow::Result<_>>()?;
+        let attr_aspects = strings(items(attr_aspects, "attr_aspects")?, "attr_aspects")?;
+        let attrs = declared_attrs(attrs)?;
+        check_attrs(&attrs)?;
+        let required_providers = self::required_providers(required_providers, "required_providers")?;
+        if apply_to_generating_rules && !required_providers.is_empty() {
+            anyhow::bail!("An aspect cannot simultaneously have required providers and apply to generating rules.");
+        }
         Ok(AspectGen {
             implementation,
             attr_aspects,
-            attrs: declared_attrs(attrs)?,
-            required_providers: self::required_providers(required_providers, "required_providers")?,
+            attrs,
+            required_providers,
             requires: items(requires, "requires")?,
             provides: items(provides, "provides")?,
             required_aspect_providers: self::required_providers(required_aspect_providers, "required_aspect_providers")?,

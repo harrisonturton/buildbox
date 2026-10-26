@@ -146,7 +146,10 @@ fn attribute<'v>(ty: AttrType, kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> 
             "allow_files" => attribute.allow_files = option(value),
             "allow_single_file" => attribute.allow_single_file = option(value),
             "providers" => attribute.providers = option(value),
-            "aspects" => attribute.aspects = option(value),
+            "aspects" => {
+                crate::aspect::check_attached(value)?;
+                attribute.aspects = option(value);
+            }
             "values" => attribute.values = option(value),
             _ => {}
         }

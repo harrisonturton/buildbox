@@ -17,7 +17,7 @@ use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule};
 use bazel_progress::Progress;
 use bazel_packages::{AttrDefault, AttrSchema, AttrType, AttrValue, Package, Rule, RuleClass, Target};
-use bazel_starlark::aspect::{Aspect, AspectGen};
+use bazel_starlark::aspect::{Aspect, AspectGen, english_list};
 use intern::Symbol;
 use skycodec::{Fingerprint, Fingerprinter};
 use skyframe::{Compute, Ctx, SkyError};
@@ -188,17 +188,6 @@ fn parse_int(value: &str) -> Option<i64> {
     };
     let magnitude = i64::from_str_radix(digits, radix).ok()?;
     Some(if negative { -magnitude } else { magnitude })
-}
-
-/// Values as Bazel lists them in errors: `'a', 'b', or 'c'`.
-fn english_list(values: &[String]) -> String {
-    let quoted: Vec<String> = values.iter().map(|value| format!("'{value}'")).collect();
-    match quoted.as_slice() {
-        [] => "nothing".to_string(),
-        [one] => one.clone(),
-        [first, second] => format!("{first} or {second}"),
-        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
-    }
 }
 
 /// A parameter's default, as a descriptor writes it.
