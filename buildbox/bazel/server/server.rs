@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::Notify;
 use bazel_loading::{BuiltinsDir, Repositories};
-use skyframe::{Engine, EngineConfig, Globals, Persistence};
+use skyframe::{Engine, EngineConfig, Globals, Persistence, SavedTable};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -118,8 +118,28 @@ fn open_engine(dir: &Path) -> Engine {
         dir: dir.to_path_buf(),
         version: build_identity(),
         max_disk_bytes: MAX_SAVED_ENGINE_BYTES,
+        tables: vec![Arc::new(SavedConfigs)],
     };
     Engine::open(engine_config(), persistence)
+}
+
+/// The configurations' intern table, whose ids configured targets' keys
+/// hold.
+#[derive(Debug)]
+struct SavedConfigs;
+
+impl SavedTable for SavedConfigs {
+    fn name(&self) -> &'static str {
+        "configurations"
+    }
+
+    fn entries(&self) -> Vec<Vec<u8>> {
+        bazel_config::interned_configs()
+    }
+
+    fn restore(&self, entries: &[Vec<u8>]) -> Result<(), String> {
+        bazel_config::restore_configs(entries)
+    }
 }
 
 /// Identifies the running build of bb: a fingerprint of its executable's

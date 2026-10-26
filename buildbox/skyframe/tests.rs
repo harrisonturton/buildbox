@@ -560,6 +560,7 @@ fn persistence(dir: &std::path::Path) -> Persistence {
         dir: dir.to_path_buf(),
         version: skycodec::Fingerprint::of(b"test build"),
         max_disk_bytes: 1 << 30,
+        tables: Vec::new(),
     }
 }
 
@@ -582,6 +583,51 @@ async fn a_restored_engine_reuses_saved_results() {
     graph.invalidate(&[File("b".into())]).await;
     assert_eq!(total(&graph).await, 7);
     assert_eq!(counts.get(), (7, 3, 2));
+}
+
+/// A table of entries, which records what it's restored with.
+#[derive(Debug, Default)]
+struct TestTable {
+    entries: Vec<Vec<u8>>,
+    restored: Mutex<Option<Vec<Vec<u8>>>>,
+}
+
+impl skyframe::SavedTable for TestTable {
+    fn name(&self) -> &'static str {
+        "test"
+    }
+
+    fn entries(&self) -> Vec<Vec<u8>> {
+        self.entries.clone()
+    }
+
+    fn restore(&self, entries: &[Vec<u8>]) -> Result<(), String> {
+        *self.restored.lock().unwrap() = Some(entries.to_vec());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn saved_tables_are_restored_with_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let counts = Arc::new(Counts::default());
+    let saved = Arc::new(TestTable {
+        entries: vec![b"first".to_vec(), b"second".to_vec()],
+        ..TestTable::default()
+    });
+    {
+        let mut saving = persistence(dir.path());
+        saving.tables.push(saved.clone());
+        let engine = Engine::open(EngineConfig::default(), saving);
+        let (graph, _) = workspace(&engine, &counts);
+        total(&graph).await;
+        engine.checkpoint().unwrap();
+    }
+    let restoring = Arc::new(TestTable::default());
+    let mut opening = persistence(dir.path());
+    opening.tables.push(restoring.clone());
+    let _engine = Engine::open(EngineConfig::default(), opening);
+    assert_eq!(*restoring.restored.lock().unwrap(), Some(saved.entries.clone()));
 }
 
 #[tokio::test]

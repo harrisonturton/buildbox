@@ -34,6 +34,6 @@ pub use graph::{Globals, Graph, GraphStats, Session};
 pub use key::{Key, Storage, Value};
 pub use keys::KeyId;
 pub use part::{Part, Stored};
-pub use persist::{CheckpointStats, Persistence};
+pub use persist::{CheckpointStats, Persistence, SavedTable};
 
 pub use skycodec;

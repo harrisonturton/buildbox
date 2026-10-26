@@ -8,6 +8,8 @@
 //! atomically by each checkpoint: the intern tables, kinds' names, keys,
 //! memo and the store's image. A manifest written by a different build of
 //! the program is ignored, since what it saved may mean something else now.
+//! Layers above the engine with intern tables of their own, whose ids keys
+//! and values hold, save them with it as [`SavedTable`]s.
 
 use crate::Engine;
 use crate::engine::EngineInner;
@@ -16,8 +18,10 @@ use crate::kinds;
 use skycodec::{Decode, DecodeError, Decoder, Encode, Encoder, Fingerprint};
 use skystore::{StoreImage, ValueRef, ValueStore};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Where and how an engine is saved.
 #[derive(Clone, Debug)]
@@ -27,6 +31,22 @@ pub struct Persistence {
     pub version: Fingerprint,
     /// Above this, a checkpoint saves only each key's newest trace.
     pub max_disk_bytes: u64,
+    /// The intern tables of the layers above, saved with the engine.
+    pub tables: Vec<Arc<dyn SavedTable>>,
+}
+
+/// An intern table whose ids keys or values hold, saved with the engine so
+/// that its ids mean the same after a restart. Like the engine's own
+/// tables, it's restored by interning its entries in id order, before
+/// anything else is interned.
+pub trait SavedTable: fmt::Debug + Send + Sync {
+    /// Names the table in the manifest.
+    fn name(&self) -> &'static str;
+    /// Every entry, in id order.
+    fn entries(&self) -> Vec<Vec<u8>>;
+    /// Intern `entries` as the entries with ids from 0, failing if any gets
+    /// another id.
+    fn restore(&self, entries: &[Vec<u8>]) -> Result<(), String>;
 }
 
 /// What a checkpoint saved.
@@ -40,13 +60,15 @@ pub struct CheckpointStats {
 }
 
 const MAGIC: &[u8; 8] = b"bbengine";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 /// Everything but the values.
 #[derive(Default)]
 struct Manifest {
     symbols: Vec<String>,
     paths: Vec<(u32, u32)>,
+    /// The [`SavedTable`]s, by name.
+    tables: Vec<(String, Vec<Vec<u8>>)>,
     kinds: Vec<String>,
     parts: Vec<String>,
     keys: Vec<Vec<u8>>,
@@ -86,12 +108,24 @@ pub(crate) fn restore(persistence: &Persistence) -> io::Result<Option<Restored>>
     let invalid = |what: String| io::Error::other(format!("saved engine: {what}"));
     intern::snapshot::restore_symbols(0, manifest.symbols.iter().map(String::as_str)).map_err(|error| invalid(error.to_string()))?;
     intern::snapshot::restore_paths(0, manifest.paths.iter().copied()).map_err(|error| invalid(error.to_string()))?;
+    restore_tables(&persistence.tables, &manifest.tables).map_err(invalid)?;
     kinds::assign(&manifest.kinds).map_err(|conflict| invalid(format!("kind {} has another id", conflict.0)))?;
     kinds::assign_parts(&manifest.parts).map_err(|conflict| invalid(format!("part {} has another id", conflict.0)))?;
     let keys = KeyTable::restore(manifest.keys.iter().map(Vec::as_slice)).ok_or_else(|| invalid("keys don't restore to their ids".to_string()))?;
     let store = ValueStore::restore(&persistence.segments_dir(), &manifest.store)?;
     let memo = manifest.memo.into_iter().map(|(key, traces)| (key, traces.into_iter().map(ValueRef::from_id).collect())).collect();
     Ok(Some(Restored { keys, store, memo }))
+}
+
+/// Restore each table from the entries the manifest saved for it, if any.
+fn restore_tables(tables: &[Arc<dyn SavedTable>], saved: &[(String, Vec<Vec<u8>>)]) -> Result<(), String> {
+    for table in tables {
+        let Some((_, entries)) = saved.iter().find(|(name, _)| name == table.name()) else {
+            continue;
+        };
+        table.restore(entries).map_err(|error| format!("table {}: {error}", table.name()))?;
+    }
+    Ok(())
 }
 
 /// Forget any saved engine's values.
@@ -126,6 +160,7 @@ impl Engine {
         let manifest = Manifest {
             symbols: intern::snapshot::symbols_from(0).into_iter().map(str::to_string).collect(),
             paths: intern::snapshot::paths_from(0),
+            tables: persistence.tables.iter().map(|table| (table.name().to_string(), table.entries())).collect(),
             kinds: kinds::assigned_names(),
             parts: kinds::part_names(),
             keys: self.0.keys.blobs().into_iter().map(<[u8]>::to_vec).collect(),
@@ -230,6 +265,14 @@ impl Encode for Manifest {
             e.u32(*parent);
             e.u32(*name);
         }
+        e.usize(self.tables.len());
+        for (name, entries) in &self.tables {
+            e.str(name);
+            e.usize(entries.len());
+            for entry in entries {
+                e.bytes(entry);
+            }
+        }
         self.kinds.encode(e);
         self.parts.encode(e);
         e.usize(self.keys.len());
@@ -256,6 +299,14 @@ impl Decode for Manifest {
         }
         for _ in 0..d.usize()? {
             manifest.paths.push((d.u32()?, d.u32()?));
+        }
+        for _ in 0..d.usize()? {
+            let name = d.str()?.to_string();
+            let mut entries = Vec::new();
+            for _ in 0..d.usize()? {
+                entries.push(d.bytes()?.to_vec());
+            }
+            manifest.tables.push((name, entries));
         }
         manifest.kinds = Vec::decode(d)?;
         manifest.parts = Vec::decode(d)?;

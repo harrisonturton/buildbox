@@ -88,6 +88,25 @@ impl ConfigId {
     }
 }
 
+/// Every configuration interned, in id order, as its encoded options: what
+/// ids written down in this process refer to.
+pub fn interned_configs() -> Vec<Vec<u8>> {
+    (0..CONFIGS.table.len()).map(|id| CONFIGS.table.bytes(id).to_vec()).collect()
+}
+
+/// Intern configurations [`interned_configs`] gave, as those with ids from
+/// 0, before any other is interned, so that ids saved by another process
+/// mean the same here.
+pub fn restore_configs(saved: &[Vec<u8>]) -> Result<(), String> {
+    for (expected, options) in (0..).zip(saved) {
+        let got = CONFIGS.table.intern(options);
+        if got != expected {
+            return Err(format!("configuration {expected} was interned as {got}"));
+        }
+    }
+    Ok(())
+}
+
 impl fmt::Debug for ConfigId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.get().checksum)
