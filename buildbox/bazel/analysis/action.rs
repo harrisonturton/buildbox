@@ -44,6 +44,9 @@ pub enum ActionKind {
     /// executable read, as Bazel's `RunfilesTree` actions do. Only
     /// `aquery` shows these.
     RunfilesTree,
+    /// Write the repository mapping manifest of a runfiles tree of
+    /// `files`, which needs the repositories' mappings.
+    RepoMappingManifest { files: Vec<Artifact> },
 }
 
 /// A command to run.
@@ -93,6 +96,8 @@ pub struct RunfilesTree {
     pub dir: PathId,
     /// Each file's path within the tree, sorted.
     pub entries: Vec<(PathId, Artifact)>,
+    /// The paths of the empty files in the tree, sorted.
+    pub empty: Vec<PathId>,
 }
 
 /// The mnemonics of actions Bazel gives no progress message, which it
@@ -114,7 +119,9 @@ impl Action {
                 ActionKind::Write { executable: true, .. } => format!("Writing script {output}"),
                 ActionKind::Write { executable: false, .. } => format!("Writing file {output}"),
                 ActionKind::Template { .. } => format!("Expanding template {output}"),
-                ActionKind::Symlink { .. } | ActionKind::Spawn(_) | ActionKind::SymlinkTree { .. } | ActionKind::RunfilesTree => format!("{} {output}", self.mnemonic),
+                ActionKind::Symlink { .. } | ActionKind::Spawn(_) | ActionKind::SymlinkTree { .. } | ActionKind::RunfilesTree | ActionKind::RepoMappingManifest { .. } => {
+                    format!("{} {output}", self.mnemonic)
+                }
             },
             (true, None) => format!("{} {}", self.mnemonic, owner.label),
         };

@@ -160,20 +160,54 @@ pub fn eval_build(
     debug_assert_eq!(context.kind, FileKind::Build);
     context.package = Some(std::cell::RefCell::new(builder));
     let candidates = names_in_scope(&ast, globals);
-    let result = Module::with_temp_heap(|module| {
-        let mut eval = Evaluator::new(&module);
-        eval.extra = Some(&context);
-        eval.set_loader(loads);
-        eval.eval_module_all_errors(ast, globals).map(|_| ())
+    let result = Module::with_temp_heap(|module| run_build(ast, globals, loads, &context, &module));
+    let package = finish_package(context.package.take().expect("set above").into_inner(), result, &candidates);
+    (package, context.printed.take())
+}
+
+/// Evaluate a BUILD file as [`eval_build`] does, keeping its module, frozen
+/// into a heap named `name`, for the rule classes it defines, which only
+/// a package without errors has.
+pub fn eval_build_module(
+    ast: AstModule,
+    globals: &Globals,
+    loads: &Loads<'_>,
+    mut context: EvalContext,
+    builder: PackageBuilder,
+    name: FrozenHeapName,
+) -> (Package, Result<FrozenModule, String>) {
+    debug_assert_eq!(context.kind, FileKind::Build);
+    context.package = Some(std::cell::RefCell::new(builder));
+    let candidates = names_in_scope(&ast, globals);
+    let (result, frozen) = Module::with_temp_heap(|module| {
+        module.frozen_heap().add_reference(crate::provider::builtin_providers_heap());
+        let result = run_build(ast, globals, loads, &context, &module);
+        let frozen = match result.is_ok() {
+            true => module.freeze_named(name).map_err(|error| format!("{error:?}")),
+            false => Err("its BUILD file failed".to_string()),
+        };
+        (result, frozen)
     });
-    let printed = context.printed.take();
-    let mut builder = context.package.take().expect("set above").into_inner();
+    let package = finish_package(context.package.take().expect("set above").into_inner(), result, &candidates);
+    (package, frozen)
+}
+
+fn run_build(ast: AstModule, globals: &Globals, loads: &Loads<'_>, context: &EvalContext, module: &Module) -> Result<(), Vec<starlark::Error>> {
+    let mut eval = Evaluator::new(module);
+    eval.extra = Some(context);
+    eval.set_loader(loads);
+    eval.eval_module_all_errors(ast, globals).map(|_| ())
+}
+
+/// The package a BUILD file defined, with the errors its evaluation failed
+/// with.
+fn finish_package(mut builder: PackageBuilder, result: Result<(), Vec<starlark::Error>>, candidates: &[String]) -> Package {
     if let Err(errors) = result {
         for error in errors {
-            builder.errors.push(EvalError::with_candidates(error, &candidates).reported);
+            builder.errors.push(EvalError::with_candidates(error, candidates).reported);
         }
     }
-    (builder.finish(), printed)
+    builder.finish()
 }
 
 /// The file name a file is parsed under: its canonical label.

@@ -106,12 +106,13 @@ where
             "label" => Some(heap.alloc(LabelValue(self.label))),
             "files" | "files_to_run" | "data_runfiles" | "default_runfiles" => self.default_info(attribute),
             "output_groups" => self.provider("OutputGroupInfo"),
+            "actions" => crate::action_value::target_actions(self as *const Self as usize, heap),
             _ => None,
         }
     }
 
     fn dir_attr(&self) -> Vec<String> {
-        ["label", "files", "files_to_run", "data_runfiles", "default_runfiles"].iter().map(|name| name.to_string()).collect()
+        ["label", "files", "files_to_run", "data_runfiles", "default_runfiles", "actions"].iter().map(|name| name.to_string()).collect()
     }
 
     fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {

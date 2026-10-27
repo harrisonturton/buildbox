@@ -11,7 +11,7 @@ mod tests_of;
 
 pub use attr::{AttrType, AttrValue, Select, SelectorPart, DEFAULT_CONDITION};
 pub use error::{CallFrame, PackageError, SourcePosition, TraceFrame};
-pub use rule_class::{AspectRef, AttrDefault, AttrSchema, BuildSettingSpec, Cfg, RuleClass, RuleClassRef};
+pub use rule_class::{AspectRef, AttrDefault, AttrSchema, BuildSettingSpec, Cfg, LateBound, RuleClass, RuleClassRef};
 pub use tests_of::{TagFilter, is_manual, is_test_kind};
 
 use bazel_label::{Label, PackageId};
@@ -27,6 +27,9 @@ pub struct Package {
     /// The rule classes the package's rules are instances of. Rules refer
     /// to them by index.
     pub rule_classes: Vec<RuleClassRef>,
+    /// The schemas of rule classes the BUILD file itself defines, with
+    /// `testing.analysis_test`, which its rules' classes name by its label.
+    pub defined_classes: Vec<RuleClass>,
     pub targets: Vec<Target>,
     /// The `.bzl` files the BUILD file loads directly.
     pub loads: Vec<Label>,

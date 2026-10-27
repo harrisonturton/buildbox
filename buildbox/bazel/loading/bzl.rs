@@ -224,7 +224,7 @@ pub async fn mappings(ctx: &Ctx, repos: &[RepoName]) -> Result<HashMap<RepoName,
     Ok(mappings)
 }
 
-fn fingerprint(label: Label, source: &str, mapping: &RepoMappingTable, loaded: &[(String, Arc<BzlModule>)]) -> Fingerprint {
+pub(crate) fn fingerprint(label: Label, source: &str, mapping: &RepoMappingTable, loaded: &[(String, Arc<BzlModule>)]) -> Fingerprint {
     let mut fingerprinter = Fingerprinter::new();
     fingerprinter.bytes(label.canonical_form().as_bytes());
     fingerprinter.bytes(source.as_bytes());

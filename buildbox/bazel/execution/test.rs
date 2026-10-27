@@ -1,6 +1,6 @@
 //! Running tests.
 
-use crate::action_key::{Input, cas_error, input, progress};
+use crate::action_key::{blob_input, cas_error, input, progress};
 use crate::backend::Backend;
 use crate::digest::BlobDigest;
 use crate::spawn::{SpawnRequest, TreePath, execute, finish};
@@ -175,6 +175,8 @@ struct TestSpec {
     label: Label,
     executable: Artifact,
     runfiles: Vec<(String, Artifact)>,
+    /// The empty files of its runfiles tree.
+    empty_runfiles: Vec<String>,
     testlogs: String,
     size: String,
     timeout: Duration,
@@ -192,11 +194,10 @@ impl TestSpec {
             .default_info("executable")
             .and_then(FileValue::artifact)
             .ok_or_else(|| SkyError::new(format!("{} is a test without an executable", key.label)))?;
-        let runfiles = value
-            .default_info("default_runfiles")
-            .and_then(Runfiles::from_value)
-            .map(|runfiles| runfiles.entries(runfiles_repo_name(RepoName::MAIN)))
-            .unwrap_or_default();
+        let workspace_dir = runfiles_repo_name(RepoName::MAIN);
+        let default_runfiles = value.default_info("default_runfiles").and_then(Runfiles::from_value);
+        let runfiles = default_runfiles.map(|runfiles| runfiles.entries(workspace_dir)).unwrap_or_default();
+        let empty_runfiles = default_runfiles.map(|runfiles| runfiles.empty_files(workspace_dir)).unwrap_or_default();
         let mut env = run_environment(value.provider("RunEnvironmentInfo"));
         let package = ctx.compute(&PackageKey(key.label.package)).await?;
         let Some(Target::Rule(rule)) = package.0.target(key.label.name) else {
@@ -221,6 +222,7 @@ impl TestSpec {
             label: key.label,
             executable,
             runfiles,
+            empty_runfiles,
             testlogs,
             timeout: Duration::from_secs(timeout_seconds(timeout.as_deref(), &size)),
             size,
@@ -247,6 +249,12 @@ impl TestSpec {
         let srcdir = self.srcdir();
         for (path, artifact) in &self.runfiles {
             inputs.insert(TreePath::Text(format!("{srcdir}/{path}")), input(ctx, *artifact).await?);
+        }
+        if !self.empty_runfiles.is_empty() {
+            let empty = blob_input(ctx, &[]).await?;
+            for path in &self.empty_runfiles {
+                inputs.insert(TreePath::Text(format!("{srcdir}/{path}")), empty.clone());
+            }
         }
         let mapping = repo_mapping(ctx, &self.runfiles).await?;
         inputs.insert(TreePath::Text(format!("{srcdir}/_repo_mapping")), blob_input(ctx, mapping.as_bytes()).await?);
@@ -290,19 +298,6 @@ impl TestSpec {
         env.extend(self.env.iter().cloned());
         env.into_iter().collect()
     }
-}
-
-/// An input with fixed contents, stored in the CAS.
-async fn blob_input(ctx: &Ctx, contents: &[u8]) -> Result<Input, SkyError> {
-    let backend = ctx.global::<Backend>()?;
-    let digest = backend.cas.put_bytes(contents).await.map_err(cas_error)?;
-    Ok(Input {
-        digest: BlobDigest::from_cas(&digest),
-        executable: false,
-        is_directory: false,
-        source: None,
-        tree: None,
-    })
 }
 
 /// The repository mapping manifest of a runfiles tree: how each repository

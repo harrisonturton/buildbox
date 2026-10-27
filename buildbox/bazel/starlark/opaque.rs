@@ -256,7 +256,6 @@ fn builtins_toolchain_type<'v>(args: &Arguments<'v, '_>, eval: &mut Evaluator<'v
 /// rule sets check for them to decide whether to define their own.
 pub const BUILTIN_NAMESPACES: &[&str] = &[
     "coverage_common",
-    "testing",
     "apple_common",
     "cc_common",
     "proto_common_do_not_use",
@@ -267,7 +266,6 @@ pub const BUILTIN_NAMESPACES: &[&str] = &[
     "CcSharedLibraryHintInfo",
     "DebugPackageInfo",
     "PackageSpecificationInfo",
-    "AnalysisTestResultInfo",
     "AnalysisFailureInfo",
     "Actions",
 ];

@@ -333,22 +333,23 @@ pub async fn format<C: Compute>(graph: &ConfiguredGraph<C>, result: &NodeSet<Con
         AqueryFormat::Text => texts(&owned, &mut printer, mapping).into_bytes(),
         AqueryFormat::Commands => owned.iter().filter_map(command).collect::<String>().into_bytes(),
         AqueryFormat::Summary => summary(&owned, mapping).into_bytes(),
-        AqueryFormat::Proto => crate::action_proto::container(&owned, &mut printer, mapping).to_bytes(),
-        AqueryFormat::StreamedProto => crate::action_proto::streamed(&owned, &mut printer, mapping),
-        AqueryFormat::TextProto => crate::action_proto::text(&owned, &mut printer, mapping).into_bytes(),
-        AqueryFormat::JsonProto => format!("{}\n", crate::action_proto::container(&owned, &mut printer, mapping).to_json(false)).into_bytes(),
+        AqueryFormat::Proto => crate::action_proto::container(&owned, &mut printer).to_bytes(),
+        AqueryFormat::StreamedProto => crate::action_proto::streamed(&owned, &mut printer),
+        AqueryFormat::TextProto => crate::action_proto::text(&owned, &mut printer).into_bytes(),
+        AqueryFormat::JsonProto => format!("{}\n", crate::action_proto::container(&owned, &mut printer).to_json(false)).into_bytes(),
     })
 }
 
 /// An aspect as `aquery` describes it: its class, then its parameters.
-pub fn aspect_description(aspect: &AspectDescriptor, mapping: &RepoMappingTable) -> String {
+pub fn aspect_description(aspect: &AspectDescriptor) -> String {
     let parameters: Vec<String> = aspect_parameters(aspect).iter().map(|(name, value)| format!("{name}='{value}'")).collect();
-    format!("{}({})", aspect_name(aspect, mapping), parameters.join(", "))
+    format!("{}({})", aspect_name(aspect), parameters.join(", "))
 }
 
-/// An aspect's class, as Bazel names it: `//pkg:defs.bzl%name`.
-pub fn aspect_name(aspect: &AspectDescriptor, mapping: &RepoMappingTable) -> String {
-    format!("{}%{}", display_label(aspect.file, mapping), aspect.name)
+/// An aspect's class, as Bazel names it, with its file's canonical label:
+/// `//pkg:defs.bzl%name`, or `@@repo//pkg:defs.bzl%name`.
+pub fn aspect_name(aspect: &AspectDescriptor) -> String {
+    format!("{}%{}", aspect.file, aspect.name)
 }
 
 /// An aspect's parameters, with their values as Bazel's Java writes them.
@@ -387,7 +388,7 @@ fn text(owned: &Owned, printer: &mut Printer, mapping: &RepoMappingTable, out: &
     writeln!(out, "  Configuration: {}", config.output_directory).ok();
     writeln!(out, "  Execution platform: {}", display_label(platform, mapping)).ok();
     if !aspects.is_empty() {
-        let described: Vec<String> = aspects.iter().rev().map(|aspect| aspect_description(aspect, mapping)).collect();
+        let described: Vec<String> = aspects.iter().rev().map(aspect_description).collect();
         writeln!(out, "  AspectDescriptors: [{}]", described.join("\n    -> ")).ok();
     }
     writeln!(out, "  ActionKey: {}", printer.action_key(action, &inputs)).ok();
@@ -471,6 +472,9 @@ fn kind_text(owned: &Owned, printer: &Printer, out: &mut String) {
                 writeln!(out, "  FileWriteContents: [{}]", data_encoding::BASE64.encode(content.as_bytes())).ok();
             }
         }
+        ActionKind::RepoMappingManifest { .. } => {
+            writeln!(out, "  IsExecutable: false").ok();
+        }
         _ => {}
     }
 }
@@ -521,7 +525,7 @@ fn summary(owned: &[Owned], mapping: &RepoMappingTable) -> String {
     for Owned { target, action, aspects: applied, .. } in owned {
         *mnemonics.entry(action.mnemonic.to_string()).or_default() += 1;
         for aspect in applied {
-            *aspects.entry(aspect_name(aspect, mapping)).or_default() += 1;
+            *aspects.entry(aspect_name(aspect)).or_default() += 1;
         }
         *configurations.entry(target.config.get().output_directory.clone()).or_default() += 1;
         *platforms.entry(display_label(exec_platform(target), mapping)).or_default() += 1;

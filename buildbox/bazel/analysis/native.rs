@@ -6,7 +6,7 @@ use crate::artifact::{self, Artifact};
 use crate::build_ctx::{Prepared, RuleInput, target_executable, target_files};
 use crate::expand::LocationStyle;
 use crate::providers;
-use crate::runfiles::Runfiles;
+use crate::runfiles::{FilesToRun, Runfiles};
 use crate::state::{RuleState, runfiles_tree};
 use crate::target_value::TargetValue;
 use bazel_packages::AttrValue;
@@ -30,7 +30,6 @@ const MARKER_RULES: &[&str] = &[
     "test_suite",
     "environment",
     "environment_group",
-    "java_plugins_flag_alias",
     "cc_libc_top_alias",
     "cc_toolchain_suite",
 ];
@@ -55,9 +54,23 @@ pub fn analyze<'v>(kind: Symbol, input: &RuleInput, prepared: &Prepared<'v>, eva
         "cc_toolchain_alias" => crate::cc::rules::cc_toolchain_alias(input, heap),
         "cc_library" => crate::cc::rules::cc_library(input, prepared, RuleState::get(eval)?, heap),
         "cc_binary" | "cc_test" => crate::cc::rules::cc_binary(input, prepared, RuleState::get(eval)?, heap),
+        "java_plugins_flag_alias" => java_plugins_flag_alias(input, eval),
         kind if MARKER_RULES.contains(&kind) || STUBBED_BUILTINS.contains(&kind) => Ok(Value::new_none()),
         kind => anyhow::bail!("the native rule '{kind}' isn't supported by bb yet"),
     }
+}
+
+/// `java_plugins_flag_alias`: the plugins `--plugin` names, as rules_java's
+/// `JavaPluginInfo`.
+fn java_plugins_flag_alias<'v>(input: &RuleInput, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+    if !input.config.options.labels("plugin").is_empty() {
+        anyhow::bail!("--plugin isn't supported by bb yet");
+    }
+    let merge = input.helper.as_ref().ok_or_else(|| anyhow::anyhow!("rules_java's merge of plugins wasn't loaded"))?;
+    let merge = eval.heap().access_owned_frozen_value(merge);
+    let none = eval.heap().alloc(AllocList::EMPTY);
+    let info = eval.eval_function(merge, &[none], &[]).map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(eval.heap().alloc(AllocList([info])))
 }
 
 /// A depset including others.
@@ -94,8 +107,22 @@ fn filegroup<'v>(input: &RuleInput, prepared: &Prepared<'v>, heap: Heap<'v>) -> 
         all.extend(Runfiles::from_value(runfiles));
     }
     let runfiles = heap.alloc(Runfiles::merge_all(&all, heap));
-    let info = providers::instance("DefaultInfo", vec![("files", files), ("runfiles", runfiles)], heap)?;
+    let mut fields = vec![("files", files), ("runfiles", runfiles)];
+    if let Some(single) = single_file(files) {
+        fields.push(("files_to_run", heap.alloc(FilesToRun { executable: single, runfiles })));
+    }
+    let info = providers::instance("DefaultInfo", fields, heap)?;
     Ok(heap.alloc(AllocList([info])))
+}
+
+/// A depset's only file, which Bazel takes as a `filegroup`'s executable,
+/// though it gives it no runfiles tree.
+fn single_file(files: Value<'_>) -> Option<Value<'_>> {
+    let files = bazel_starlark::depset::Depset::from_value(files)?.to_list();
+    match files.as_slice() {
+        [single] => Some(*single),
+        _ => None,
+    }
 }
 
 fn output_groups<'v>(targets: &[Value<'v>], group: &str) -> Vec<Value<'v>> {

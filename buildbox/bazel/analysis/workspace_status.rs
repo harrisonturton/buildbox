@@ -23,9 +23,9 @@ const VOLATILE: &str = "bazel-out/volatile-status.txt";
 /// they change.
 pub const STABLE_STATUS: [(&str, &str); 3] = [("BUILD_EMBED_LABEL", ""), ("BUILD_HOST", "bb"), ("BUILD_USER", "bb")];
 
-/// The values of the volatile status, such as the time, which don't rerun
-/// actions.
-pub const VOLATILE_STATUS: [(&str, &str); 3] = [("BUILD_TIMESTAMP", "0"), ("BUILD_SCM_REVISION", "0"), ("BUILD_SCM_STATUS", "")];
+/// The values of the volatile status, the time, which don't rerun actions:
+/// fixed at the epoch, as Bazel formats it.
+pub const VOLATILE_STATUS: [(&str, &str); 2] = [("BUILD_TIMESTAMP", "0"), ("FORMATTED_DATE", "1970 Jan 01 00 00 00 Thu")];
 
 /// The stable status file.
 pub fn info_file() -> Artifact {
@@ -39,7 +39,7 @@ pub fn version_file() -> Artifact {
 
 /// The actions that write the status files.
 pub fn actions() -> Vec<Action> {
-    vec![write(info_file(), &STABLE_STATUS), write(version_file(), &VOLATILE_STATUS[..1])]
+    vec![write(info_file(), &STABLE_STATUS), write(version_file(), &VOLATILE_STATUS)]
 }
 
 fn artifact(path: &str) -> Artifact {

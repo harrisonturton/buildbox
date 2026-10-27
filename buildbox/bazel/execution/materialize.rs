@@ -80,6 +80,8 @@ pub struct RunfilesLayout {
     /// The executable, as an absolute path.
     pub executable: PathBuf,
     pub entries: Vec<(String, PathBuf)>,
+    /// The paths of the tree's empty files.
+    pub empty: Vec<String>,
     /// The contents of the repository mapping manifest.
     pub repo_mapping: String,
 }
@@ -110,12 +112,19 @@ fn write_runfiles_blocking(layout: &RunfilesLayout) -> Result<(), SkyError> {
     entries.push(("_repo_mapping".to_string(), repo_mapping.clone()));
     entries.sort();
     entries.dedup_by(|a, b| a.0 == b.0);
-    let mut lines = String::new();
+    let mut lines: Vec<String> = Vec::with_capacity(entries.len() + layout.empty.len());
     for (path, target) in &entries {
-        lines.push_str(&format!("{path} {}\n", target.display()));
+        lines.push(format!("{path} {}\n", target.display()));
         link(target, &dir.join(path))?;
     }
-    if !entries.iter().any(|(path, _)| path.starts_with(&format!("{MAIN_DIR}/"))) {
+    for path in &layout.empty {
+        lines.push(format!("{path} \n"));
+        write_empty(&dir.join(path))?;
+    }
+    lines.sort();
+    let mut lines = lines.concat();
+    let has_main = entries.iter().map(|(path, _)| path).chain(&layout.empty).any(|path| path.starts_with(&format!("{MAIN_DIR}/")));
+    if !has_main {
         let marker = dir.join(MAIN_DIR).join(".runfile");
         lines.push_str(&format!("{MAIN_DIR}/.runfile \n"));
         std::fs::create_dir_all(dir.join(MAIN_DIR)).map_err(|error| io_error("create", &dir, error))?;
@@ -128,6 +137,14 @@ fn write_runfiles_blocking(layout: &RunfilesLayout) -> Result<(), SkyError> {
 /// The main repository's directory in runfiles trees, which Bazel makes
 /// exist even when it has no files.
 const MAIN_DIR: &str = "_main";
+
+/// Write an empty file of the tree, making its directory.
+fn write_empty(path: &Path) -> Result<(), SkyError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| io_error("create", parent, error))?;
+    }
+    write_replacing(path, "")
+}
 
 fn write_replacing(path: &Path, contents: &str) -> Result<(), SkyError> {
     let _ = std::fs::remove_file(path);

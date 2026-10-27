@@ -107,6 +107,10 @@ async fn run_internal(ctx: &Ctx, backend: &Arc<Backend>, key: ActionKey, action:
             Some((template, _)),
         ) => expand_template(backend, action, template, substitutions, *executable).await,
         (ActionKind::Symlink { executable, .. }, Some((target, _))) => copy(backend, action, target, *executable).await,
+        (ActionKind::RepoMappingManifest { files }, _) => {
+            let content = bazel_analysis::repo_mapping_manifest(ctx, files.iter().copied(), None).await?;
+            write(backend, action, content.as_bytes(), false).await
+        }
         (ActionKind::SymlinkTree { .. } | ActionKind::RunfilesTree, _) => Err(SkyError::new("bb lays out runfiles trees as it runs their executables")),
         _ => Err(SkyError::new("an internal action's input wasn't read")),
     }?;
@@ -331,6 +335,19 @@ async fn find_missing(backend: &Backend, digests: impl Iterator<Item = &BlobDige
 
 /// How many blobs an action uploads at once.
 pub const UPLOADS: usize = 16;
+
+/// An input of fixed `contents`, which this puts in the CAS.
+pub async fn blob_input(ctx: &Ctx, contents: &[u8]) -> Result<Input, SkyError> {
+    let backend = ctx.global::<Backend>()?;
+    let digest = backend.cas.put_bytes(contents).await.map_err(cas_error)?;
+    Ok(Input {
+        digest: BlobDigest::from_cas(&digest),
+        executable: false,
+        is_directory: false,
+        source: None,
+        tree: None,
+    })
+}
 
 pub fn cas_error(error: cas::CasError) -> SkyError {
     SkyError::transient(format!("CAS: {error}"))

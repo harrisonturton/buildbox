@@ -459,6 +459,15 @@ async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<TreePath, Input>,
             paths.insert(TreePath::Runfile(tree.dir, *path), input_of(artifact));
         }
     }
+    let has_empty = action.runfiles.iter().any(|tree| !tree.empty.is_empty());
+    if has_empty {
+        let empty = crate::action_key::blob_input(ctx, &[]).await.map_err(NotReady::Failed)?;
+        for tree in &action.runfiles {
+            for path in &tree.empty {
+                paths.insert(TreePath::Runfile(tree.dir, *path), empty.clone());
+            }
+        }
+    }
     Ok(paths)
 }
 

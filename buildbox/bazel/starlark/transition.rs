@@ -11,6 +11,8 @@ use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_complex_value;
 use starlark::starlark_module;
+use starlark::values::dict::DictRef;
+use starlark::values::list::AllocList;
 use starlark::values::{Freeze, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value, ValueLifetimeless, ValueLike, starlark_value};
 use std::fmt;
 
@@ -56,6 +58,9 @@ pub struct TransitionGen<V: ValueLifetimeless> {
     #[freeze(identity)]
     #[allocative(skip)]
     pub location: Option<SourcePosition>,
+    /// For `analysis_test_transition()`: the settings it writes, which it
+    /// writes instead of calling an implementation.
+    pub analysis_test_settings: Option<V>,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<TransitionGen<To>> for TransitionGen<From> {}
@@ -118,6 +123,32 @@ fn new_transition<'v>(implementation: Value<'v>, inputs: Value<'v>, outputs: Val
         definition,
         exec,
         location: eval.call_stack_top_location().map(|span| crate::reported::call_position(&span)),
+        analysis_test_settings: None,
+    })
+}
+
+/// The transition `analysis_test_transition(settings)` makes: one that
+/// writes `settings`.
+fn new_analysis_test_transition<'v>(settings: Value<'v>, eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<Transition<'v>> {
+    let Some(dict) = DictRef::from_value(settings) else {
+        anyhow::bail!("analysis_test_transition(): settings must be a dict, not {}", settings.get_type());
+    };
+    let keys = eval.heap().alloc(AllocList(dict.keys()));
+    let context = EvalContext::get(eval)?;
+    let definition = context.caller_file(eval);
+    let mapping = context.mapping_for(definition.repo());
+    let parser = LabelParser {
+        package: definition.package,
+        mapping: &*mapping,
+    };
+    Ok(TransitionGen {
+        implementation: Value::new_none(),
+        inputs: Vec::new(),
+        outputs: crate::transition::settings(keys, "outputs", &parser)?,
+        definition,
+        exec: false,
+        location: eval.call_stack_top_location().map(|span| crate::reported::call_position(&span)),
+        analysis_test_settings: Some(settings),
     })
 }
 
@@ -131,6 +162,15 @@ pub(crate) fn transition_function(builder: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Transition<'v>> {
         new_transition(implementation, inputs, outputs, false, eval)
+    }
+}
+
+#[starlark_module]
+pub(crate) fn analysis_test_transition_function(builder: &mut GlobalsBuilder) {
+    /// `analysis_test_transition(settings)`: the transition of the targets
+    /// an analysis test checks, with `settings` changed.
+    fn analysis_test_transition<'v>(#[starlark(require = named)] settings: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Transition<'v>> {
+        new_analysis_test_transition(settings, eval)
     }
 }
 

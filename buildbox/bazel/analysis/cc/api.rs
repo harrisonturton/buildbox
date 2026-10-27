@@ -407,6 +407,19 @@ fn cc_common_methods(builder: &mut MethodsBuilder) {
         Ok(heap.alloc(AllocList(requirements)))
     }
 
+    /// The same as `get_execution_requirements`, as in Bazel.
+    fn get_tool_requirement_for_action<'v>(
+        this: Value<'v>,
+        #[starlark(require = named)] feature_configuration: Value<'v>,
+        #[starlark(require = named)] action_name: &str,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        let _ = this;
+        let configuration = unpack_features(feature_configuration)?;
+        let requirements = configuration.tool(action_name).map(|tool| tool.execution_requirements.clone()).unwrap_or_default();
+        Ok(heap.alloc(AllocList(requirements)))
+    }
+
     fn get_memory_inefficient_command_line<'v>(
         this: Value<'v>,
         #[starlark(require = named)] feature_configuration: Value<'v>,

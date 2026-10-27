@@ -1,6 +1,6 @@
 //! Loading packages from BUILD files.
 
-use crate::bzl::{load_all, mappings, transitive_repos};
+use crate::bzl::{BzlModule, load_all, mappings, transitive_repos};
 use crate::{RepoMappingKey, RepoRootKey, blocking};
 use bazel_fs::{FileState, FileStateKey, Glob, GlobPattern, Root, RootedPath};
 use bazel_label::{Label, PackageId};
@@ -10,7 +10,9 @@ use bazel_starlark::{EvalContext, FileKind, Globber, Loads, PackageBuilder};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
 use skyframe::{encoded_value, Ctx, Key, SkyError};
+use bazel_label::RepoMappingTable;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The names a BUILD file may have, in order of preference.
 pub const BUILD_FILE_NAMES: [&str; 2] = ["BUILD.bazel", "BUILD"];
@@ -86,6 +88,100 @@ impl Key for PackageKey {
 
 /// Load the package `id`: evaluate its BUILD file.
 async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyError> {
+    let (ast, prepared) = match prepare(ctx, id).await? {
+        Prepared::Ready(ast, prepared) => (ast, prepared),
+        Prepared::Failed(package) => return Ok(LoadedPackage(package)),
+    };
+    let load_labels = prepared.load_labels();
+    let (mut package, printed) = blocking(move || {
+        let (loads, context, builder) = prepared.evaluation();
+        bazel_starlark::eval_build(ast, &prepared.builtins.build, &loads, context, builder)
+    })
+    .await?;
+    crate::report_printed(ctx, &printed).await;
+    package.loads = load_labels;
+    Ok(LoadedPackage(package))
+}
+
+/// A BUILD file's module, evaluated again and kept, for the rule classes
+/// it defines with `testing.analysis_test`, whose implementations its
+/// targets' analysis calls.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct BuildModuleKey(pub PackageId);
+
+impl Key for BuildModuleKey {
+    type Value = BzlModule;
+    const KIND: &'static str = "BUILD_MODULE";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<BzlModule, SkyError> {
+        let id = self.0;
+        let (ast, prepared) = match prepare(ctx, id).await? {
+            Prepared::Ready(ast, prepared) => (ast, prepared),
+            Prepared::Failed(_) => return Err(SkyError::new(format!("no module for package '{}': its BUILD file failed", display(id)))),
+        };
+        let load_labels = prepared.load_labels();
+        let label = prepared.build_label;
+        let fingerprint = crate::bzl::fingerprint(label, &prepared.source, &prepared.mapping, &prepared.loaded);
+        let repos = prepared.repos.clone();
+        let name = bazel_starlark::heap_name("build", label, fingerprint);
+        let (_, module) = blocking(move || {
+            let (loads, context, builder) = prepared.evaluation();
+            bazel_starlark::eval_build_module(ast, &prepared.builtins.build, &loads, context, builder, name)
+        })
+        .await?;
+        let module = module.map_err(|error| SkyError::new(format!("no module for package '{}': {error}", display(id))))?;
+        Ok(BzlModule {
+            label,
+            module,
+            fingerprint,
+            repos,
+            loads: load_labels,
+        })
+    }
+}
+
+/// What evaluating a BUILD file needs, or the package it is if it can't be
+/// parsed.
+enum Prepared {
+    Ready(starlark::syntax::AstModule, Box<Evaluation>),
+    Failed(Package),
+}
+
+/// A BUILD file, with the modules it loads.
+struct Evaluation {
+    id: PackageId,
+    build_file: Symbol,
+    build_label: Label,
+    source: String,
+    mapping: Arc<RepoMappingTable>,
+    loaded: Vec<(String, Arc<BzlModule>)>,
+    repos: Vec<bazel_label::RepoName>,
+    mappings: std::collections::HashMap<bazel_label::RepoName, Arc<RepoMappingTable>>,
+    builtins: Arc<crate::Builtins>,
+    module: Option<(String, String)>,
+    globber: GraphGlobber,
+}
+
+impl Evaluation {
+    fn load_labels(&self) -> Vec<Label> {
+        self.loaded.iter().map(|(_, module)| module.label).collect()
+    }
+
+    /// What evaluating the BUILD file takes besides its syntax and globals.
+    fn evaluation(&self) -> (Loads<'_>, EvalContext, PackageBuilder) {
+        let loads = Loads {
+            modules: self.loaded.iter().map(|(load, module)| (load.clone(), &module.module)).collect(),
+        };
+        let mut context = EvalContext::new(FileKind::Build, self.build_label);
+        context.mappings = self.mappings.clone();
+        context.globber = Some(Box::new(self.globber.clone()));
+        context.module = self.module.clone();
+        (loads, context, PackageBuilder::new(self.id, self.build_file))
+    }
+}
+
+/// Read and parse the BUILD file of `id`, and load what it loads.
+async fn prepare(ctx: &Ctx, id: PackageId) -> Result<Prepared, SkyError> {
     let lookup = ctx.compute(&PackageLookupKey(id)).await?;
     let (root, build_file) = match &*lookup {
         PackageLookup::Found { root, build_file } => (*root, *build_file),
@@ -100,13 +196,12 @@ async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyErro
     let mapping = ctx.compute(&RepoMappingKey(id.repo)).await?;
     let ast = match bazel_starlark::parse_reporting_all(build_label, source.clone()) {
         Ok(ast) => ast,
-        Err(errors) => return Ok(LoadedPackage(failed_package(id, build_file, errors))),
+        Err(errors) => return Ok(Prepared::Failed(failed_package(id, build_file, errors))),
     };
     let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), None, &mapping.0).await;
     let loaded = loaded.map_err(|error| crate::reworded(&error, |why| format!("error loading package '{}': {why}", display(id))))?;
     let repos = transitive_repos(id.repo, loaded.iter().map(|(_, module)| &**module));
     let mappings = mappings(ctx, &repos).await?;
-    let load_labels = loaded.iter().map(|(_, module)| module.label).collect();
     let builtins = ctx.compute(&crate::BuiltinsKey).await?;
     let module = ctx.global::<crate::Repositories>()?.0.module(ctx, id.repo).await?;
     let globber = GraphGlobber {
@@ -114,22 +209,19 @@ async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyErro
         package: RootedPath::new(root, id.path),
         runtime: tokio::runtime::Handle::current(),
     };
-
-    let (mut package, printed) = blocking(move || {
-        let loads = Loads {
-            modules: loaded.iter().map(|(load, module)| (load.clone(), &module.module)).collect(),
-        };
-        let mut context = EvalContext::new(FileKind::Build, build_label);
-        context.mappings = mappings;
-        context.globber = Some(Box::new(globber));
-        context.module = module;
-        let builder = PackageBuilder::new(id, build_file);
-        bazel_starlark::eval_build(ast, &builtins.build, &loads, context, builder)
-    })
-    .await?;
-    crate::report_printed(ctx, &printed).await;
-    package.loads = load_labels;
-    Ok(LoadedPackage(package))
+    Ok(Prepared::Ready(ast, Box::new(Evaluation {
+        id,
+        build_file,
+        build_label,
+        source,
+        mapping: Arc::new(mapping.0.clone()),
+        loaded,
+        repos,
+        mappings,
+        builtins,
+        module,
+        globber,
+    })))
 }
 
 /// A package whose BUILD file couldn't be parsed: it has no targets but the
@@ -150,6 +242,7 @@ pub fn display(id: PackageId) -> String {
 
 /// Evaluates `glob()` through [`Glob`] keys, blocking the BUILD file's
 /// evaluation thread until the result is ready.
+#[derive(Clone)]
 struct GraphGlobber {
     ctx: Ctx,
     package: RootedPath,

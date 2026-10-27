@@ -56,14 +56,12 @@ fn config_common_functions(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<ToolchainType> {
         self::toolchain_type(name, mandatory, eval)
     }
-
-    const FeatureFlagInfo: crate::opaque::Opaque = crate::opaque::Opaque {
-        type_name: String::new(),
-        lenient: false,
-    };
 }
 
 /// Add the `config_common` namespace.
 pub(crate) fn register(builder: &mut GlobalsBuilder) {
-    builder.namespace("config_common", config_common_functions);
+    builder.namespace("config_common", |namespace| {
+        config_common_functions(namespace);
+        crate::provider::register_namespace_providers(namespace, "config_common");
+    });
 }

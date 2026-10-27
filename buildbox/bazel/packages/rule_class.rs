@@ -47,6 +47,9 @@ pub struct RuleClass {
     /// The calls that defined a Starlark rule class: where `rule()` was
     /// called, outermost first.
     pub defined_at: Vec<crate::CallFrame>,
+    /// Whether it's an analysis test: a test whose implementation checks
+    /// other targets' analysis, registering no actions of its own.
+    pub analysis_test: bool,
 }
 
 /// How a build setting is set: whether it's a flag, which the command line
@@ -93,7 +96,17 @@ pub enum AttrDefault {
     Computed,
     /// Chosen by the configuration when the rule is analyzed, as for
     /// `configuration_field()`.
-    LateBound(Option<Label>),
+    LateBound(LateBound),
+}
+
+/// A `configuration_field()`: a fragment's field naming a label that the
+/// configuration chooses.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct LateBound {
+    pub fragment: Symbol,
+    pub name: Symbol,
+    /// Its label with the default options, which `query` follows.
+    pub default: Option<Label>,
 }
 
 /// The configuration an attribute's dependencies are built in.

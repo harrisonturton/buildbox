@@ -12,7 +12,8 @@ use crate::configured::{
     rule_input, setup,
 };
 use crate::transition::{AttrConfigs, configured_key, dep_configs};
-use bazel_config::{AspectDescriptor, ConfigId};
+use crate::late_bound::late_bound_value;
+use bazel_config::{AspectDescriptor, BuildOptions, ConfigId};
 use bazel_label::Label;
 use bazel_loading::{BzlLoadKey, BzlModule};
 use bazel_progress::Progress;
@@ -560,8 +561,8 @@ async fn propagates_to_toolchains(ctx: &Ctx, aspect: &LoadedAspect, edges: &Edge
 /// in `deps_config`.
 async fn own_setup(ctx: &Ctx, label: Label, aspect: &LoadedAspect, descriptor: &AspectDescriptor, deps_config: ConfigId) -> Result<RuleSetup, SkyError> {
     let class = aspect.class()?;
-    let attrs = aspect_attrs(&class, descriptor);
     let config = deps_config.get();
+    let attrs = aspect_attrs(&class, descriptor, &config.options)?;
     let toolchains = crate::toolchains::resolve(ctx, label, &class, &config, &[]).await?;
     let exec_platform = toolchains.exec_platform.unwrap_or(config.host_platform);
     let exec_config = exec_config(ctx, &class, deps_config, exec_platform).await?;
@@ -605,19 +606,20 @@ fn propagate(setup: &mut RuleSetup, descriptors: &[AspectDescriptor], aspects: &
 }
 
 /// An aspect's attribute values: its parameters' from the descriptor, the
-/// rest their defaults.
-fn aspect_attrs(class: &RuleClass, descriptor: &AspectDescriptor) -> Vec<(Symbol, AttrValue)> {
+/// rest their defaults under `options`.
+fn aspect_attrs(class: &RuleClass, descriptor: &AspectDescriptor, options: &BuildOptions) -> Result<Vec<(Symbol, AttrValue)>, SkyError> {
     let mut attrs = Vec::with_capacity(class.attrs.len());
     for schema in &class.attrs {
         let given = descriptor.params.iter().find(|(name, _)| name.as_str() == schema.name.as_str());
         let value = match (given, &schema.default) {
             (Some((_, text)), _) => parameter_value(schema, text).unwrap_or(AttrValue::None),
             (None, AttrDefault::Value(value)) => value.clone(),
-            (None, _) => AttrValue::None,
+            (None, AttrDefault::LateBound(late_bound)) => late_bound_value(late_bound, options)?,
+            (None, AttrDefault::Computed) => AttrValue::None,
         };
         attrs.push((schema.name, value));
     }
-    attrs
+    Ok(attrs)
 }
 
 /// Identifies what an aspect's application depends on.

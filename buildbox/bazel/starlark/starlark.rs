@@ -28,11 +28,12 @@ pub mod rule_value;
 pub mod select;
 pub mod subrule;
 pub mod symbolic_macro;
+pub mod testing;
 pub mod toolchain_type;
 pub mod transition;
 
 pub use context::{EvalContext, FileKind, Globber};
-pub use eval::{EvalError, Loads, eval_bzl, eval_build, heap_name, load_positions, loads, parse, parse_reporting_all};
+pub use eval::{EvalError, Loads, eval_bzl, eval_build, eval_build_module, heap_name, load_positions, loads, parse, parse_reporting_all};
 pub use package_builder::PackageBuilder;
 
 use starlark::environment::{GlobalFrozenHeapName, Globals, GlobalsBuilder, LibraryExtension};
@@ -204,6 +205,7 @@ fn bzl_globals_builder() -> GlobalsBuilder {
         .with(rule_value::rule_function)
         .with(subrule::subrule_function)
         .with(transition::transition_function)
+        .with(transition::analysis_test_transition_function)
         .with(aspect::aspect_function)
         .with(provider::provider_function)
         .with(bzl_api::bzl_functions)
@@ -213,6 +215,7 @@ fn bzl_globals_builder() -> GlobalsBuilder {
     attr_module::register(&mut builder);
     toolchain_type::register(&mut builder);
     config_module::register(&mut builder);
+    testing::register(&mut builder);
     for name in opaque::BUILTIN_NAMESPACES {
         let value = builder.alloc(opaque::Opaque::new(name));
         builder.set(name, value);

@@ -85,16 +85,18 @@ impl Files {
 }
 
 /// The source manifest of a runfiles tree: a line for each file, its path
-/// in the tree and the file's in the execution root, sorted, the
-/// repository mapping included. As in Bazel, a tree with nothing of the
+/// in the tree and the file's in the execution root, or nothing for an
+/// empty file, sorted, the repository mapping included. As in Bazel, a tree with nothing of the
 /// main repository has an empty file in its directory, so that the
 /// directory exists.
 fn source_manifest(tree: &RunfilesTree, repo_mapping: Artifact, exec_root: &Path) -> String {
     let absolute = |artifact: &Artifact| exec_root.join(artifact.exec_path.to_string()).display().to_string();
     let mut lines: Vec<String> = tree.entries.iter().map(|(path, artifact)| format!("{path} {}\n", absolute(artifact))).collect();
+    lines.extend(tree.empty.iter().map(|path| format!("{path} \n")));
     lines.push(format!("_repo_mapping {}\n", absolute(&repo_mapping)));
     let main = format!("{}/", bazel_analysis::runfiles_repo_name(RepoName::MAIN));
-    if !tree.entries.iter().any(|(path, _)| path.to_string().starts_with(&main)) {
+    let paths = tree.entries.iter().map(|(path, _)| path).chain(&tree.empty);
+    if !paths.map(|path| path.to_string()).any(|path| path.starts_with(&main)) {
         lines.push(format!("{main}.runfile \n"));
     }
     lines.sort();

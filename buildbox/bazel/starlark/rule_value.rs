@@ -7,7 +7,7 @@ use crate::instantiate::instantiate;
 use crate::native_rules;
 use allocative::Allocative;
 use bazel_label::Label;
-use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, CallFrame, Cfg, RuleClass, RuleClassRef};
+use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, CallFrame, Cfg, LateBound, RuleClass, RuleClassRef};
 use intern::Symbol;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
@@ -242,6 +242,7 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     }
     if let Some(setting) = build_setting(rule) {
         own.push(AttrSchema::new("build_setting_default", build_setting_type(setting)).mandatory().nonconfigurable());
+        own.push(AttrSchema::new("help", AttrType::String).nonconfigurable());
     }
     let incoming_transition = rule.option("cfg").is_some_and(|cfg| crate::transition::Transition::from_value(cfg).is_some());
     if incoming_transition || own.iter().any(|attr| attr.cfg == Cfg::Transition) {
@@ -257,6 +258,7 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     class.build_setting = build_setting(rule).map(crate::config_module::BuildSettingType::spec);
     class.advertised_providers = advertised_providers(rule);
     class.defined_at = rule.defined_at.clone();
+    class.analysis_test = rule.option("analysis_test").is_some_and(|value| value.to_bool());
     Ok(class)
 }
 
@@ -330,7 +332,7 @@ pub(crate) fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelP
     let default = match attribute.default {
         None => AttrDefault::Value(AttrValue::default_for(ty)),
         Some(value) if is_computed(value) => AttrDefault::Computed,
-        Some(value) if is_late_bound(value) => AttrDefault::LateBound(late_bound_default(value)),
+        Some(value) if is_late_bound(value) => AttrDefault::LateBound(late_bound(value)),
         Some(value) => AttrDefault::Value(
             convert::attr_value(value, ty, parser, name).map_err(|error| anyhow::anyhow!("default of attribute '{name}': {error}"))?,
         ),
@@ -417,19 +419,24 @@ fn is_late_bound(value: Value<'_>) -> bool {
     value.downcast_ref::<crate::bzl_api::LateBoundDefault>().is_some()
 }
 
-/// The label a late-bound default has with Bazel's default options.
-fn late_bound_default(value: Value<'_>) -> Option<Label> {
-    let late_bound = value.downcast_ref::<crate::bzl_api::LateBoundDefault>()?;
-    let default = match (late_bound.fragment.as_str(), late_bound.name.as_str()) {
-        ("proto", "proto_compiler") => "@@bazel_tools//tools/proto:protoc",
-        ("proto", "proto_toolchain_for_cc") => "@@bazel_tools//tools/proto:cc_toolchain",
-        ("proto", "proto_toolchain_for_java") => "@@bazel_tools//tools/proto:java_toolchain",
-        ("proto", "proto_toolchain_for_java_lite") => "@@bazel_tools//tools/proto:javalite_toolchain",
-        ("cpp", "zipper") => "@@bazel_tools//tools/zip:unzip_fdo",
-        ("java", "java_toolchain_bytecode_optimizer") => "@@bazel_tools//tools/jdk:bytecode_optimizer",
-        _ => return None,
+/// A `configuration_field()` default, with the label Bazel's default
+/// options give it.
+fn late_bound(value: Value<'_>) -> LateBound {
+    let field = value.downcast_ref::<crate::bzl_api::LateBoundDefault>().expect("a late-bound default");
+    let default = match (field.fragment.as_str(), field.name.as_str()) {
+        ("proto", "proto_compiler") => Some("@@bazel_tools//tools/proto:protoc"),
+        ("proto", "proto_toolchain_for_cc") => Some("@@bazel_tools//tools/proto:cc_toolchain"),
+        ("proto", "proto_toolchain_for_java") => Some("@@bazel_tools//tools/proto:java_toolchain"),
+        ("proto", "proto_toolchain_for_java_lite") => Some("@@bazel_tools//tools/proto:javalite_toolchain"),
+        ("cpp", "zipper") => Some("@@bazel_tools//tools/zip:unzip_fdo"),
+        ("java", "java_toolchain_bytecode_optimizer") => Some("@@bazel_tools//tools/jdk:bytecode_optimizer"),
+        _ => None,
     };
-    Label::parse_canonical(default).ok()
+    LateBound {
+        fragment: Symbol::intern(&field.fragment),
+        name: Symbol::intern(&field.name),
+        default: default.and_then(|label| Label::parse_canonical(label).ok()),
+    }
 }
 
 fn is_computed(value: Value<'_>) -> bool {
@@ -481,6 +488,50 @@ fn predeclared_outputs<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> anyho
     Ok(templates)
 }
 
+/// The rule class `rule()` defines, from its arguments besides the
+/// implementation. `analysis_test = True` makes it a test.
+pub(crate) fn new_rule<'v>(implementation: Value<'v>, arguments: Vec<(&str, Value<'v>)>, eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<StarlarkRule<'v>> {
+    let context = EvalContext::get(eval)?;
+    let mut attrs = Vec::new();
+    let mut test = false;
+    let mut executable = false;
+    let mut options = Vec::new();
+    for (name, value) in arguments {
+        match name {
+            "attrs" if !value.is_none() => {
+                let Some(dict) = DictRef::from_value(value) else {
+                    anyhow::bail!("rule(): attrs must be a dict");
+                };
+                for (attr, descriptor) in dict.iter() {
+                    let Some(attr) = attr.unpack_str() else {
+                        anyhow::bail!("rule(): attribute names must be strings");
+                    };
+                    attrs.push((attr.to_string(), descriptor));
+                }
+            }
+            "test" => test |= value.to_bool(),
+            "executable" => executable = value.to_bool(),
+            "analysis_test" => {
+                test |= value.to_bool();
+                options.push((name.to_string(), value));
+            }
+            "doc" => {}
+            other => options.push((other.to_string(), value)),
+        }
+    }
+    Ok(StarlarkRule {
+        implementation,
+        attrs,
+        test,
+        executable: executable || test,
+        options,
+        definition: context.caller_file(eval),
+        exported: OnceLock::new(),
+        exported_from: OnceLock::new(),
+        defined_at: crate::reported::call_frames(eval),
+    })
+}
+
 #[starlark_module]
 pub(crate) fn rule_function(builder: &mut GlobalsBuilder) {
     /// `rule(implementation, attrs = {}, test = False, executable = False, ...)`.
@@ -489,41 +540,8 @@ pub(crate) fn rule_function(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<StarlarkRule<'v>> {
-        let context = EvalContext::get(eval)?;
-        let mut attrs = Vec::new();
-        let mut test = false;
-        let mut executable = false;
-        let mut options = Vec::new();
-        for (name, value) in kwargs {
-            match name.as_str() {
-                "attrs" if !value.is_none() => {
-                    let Some(dict) = DictRef::from_value(value) else {
-                        anyhow::bail!("rule(): attrs must be a dict");
-                    };
-                    for (attr, descriptor) in dict.iter() {
-                        let Some(attr) = attr.unpack_str() else {
-                            anyhow::bail!("rule(): attribute names must be strings");
-                        };
-                        attrs.push((attr.to_string(), descriptor));
-                    }
-                }
-                "test" => test = value.to_bool(),
-                "executable" => executable = value.to_bool(),
-                "doc" => {}
-                other => options.push((other.to_string(), value)),
-            }
-        }
-        Ok(StarlarkRule {
-            implementation,
-            attrs,
-            test,
-            executable: executable || test,
-            options,
-            definition: context.caller_file(eval),
-            exported: OnceLock::new(),
-            exported_from: OnceLock::new(),
-            defined_at: crate::reported::call_frames(eval),
-        })
+        let arguments = kwargs.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+        new_rule(implementation, arguments, eval)
     }
 }
 

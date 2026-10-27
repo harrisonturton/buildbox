@@ -19,11 +19,6 @@ pub(crate) fn bzl_functions(builder: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    fn analysis_test_transition<'v>(#[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> anyhow::Result<crate::opaque::Opaque> {
-        let _ = kwargs;
-        Ok(crate::opaque::Opaque::new("transition"))
-    }
-
     /// `configuration_field(fragment, name)`: a late-bound default.
     fn configuration_field(fragment: &str, name: &str) -> anyhow::Result<LateBoundDefault> {
         Ok(LateBoundDefault {

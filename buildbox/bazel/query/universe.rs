@@ -670,8 +670,8 @@ const CONSTRAINT_ATTRS: [&str; 3] = ["target_compatible_with", "exec_compatible_
 fn default_labels(attr: &AttrSchema, labels: &mut Vec<Label>) {
     match &attr.default {
         AttrDefault::Value(value) => value.labels(labels),
-        AttrDefault::LateBound(Some(label)) => labels.push(*label),
-        AttrDefault::LateBound(None) | AttrDefault::Computed => {}
+        AttrDefault::LateBound(late_bound) => labels.extend(late_bound.default),
+        AttrDefault::Computed => {}
     }
 }
 

@@ -7,6 +7,7 @@
 //! providers, which its dependents see, and the actions its rule registered.
 
 mod action;
+mod action_value;
 pub mod aspect;
 mod actions;
 mod args;
@@ -23,15 +24,19 @@ mod failure;
 mod file_value;
 mod fragments;
 mod inputs;
+mod java;
+mod late_bound;
 mod native;
 mod package_spec;
 pub mod paging;
 mod platform;
 mod propagation;
 mod providers;
+mod python;
 mod repo_mapping;
 mod rule_ctx;
 mod shared;
+mod shell;
 mod runfiles;
 pub mod settings;
 mod state;
@@ -59,6 +64,8 @@ pub use target_value::{DEFAULT_GROUP, DEFAULT_INFO, TargetValue, depset_artifact
 /// evaluated.
 pub fn register() {
     cc::register();
+    java::register();
+    bazel_starlark::register_builtins_internal(python::register_builtins_internal);
     bazel_starlark::register_bzl_extension(coverage::register);
     build_ctx::register();
 }

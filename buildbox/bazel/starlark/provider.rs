@@ -271,6 +271,7 @@ const BUILTIN_PROVIDERS: &[(&str, Option<&[&str]>)] = &[
     ("DefaultInfo", Some(&["files", "runfiles", "data_runfiles", "default_runfiles", "executable", "files_to_run"])),
     ("OutputGroupInfo", None),
     ("RunEnvironmentInfo", Some(&["environment", "inherited_environment"])),
+    ("AnalysisTestResultInfo", Some(&["success", "message"])),
     ("InstrumentedFilesInfo", None),
     ("CcToolchainInfo", None),
     ("CcToolchainConfigInfo", None),
@@ -285,11 +286,18 @@ const PLATFORM_PROVIDERS: &[(&str, Option<&[&str]>)] = &[
     ("ConstraintSettingInfo", None),
 ];
 
+/// The providers of other namespaces, by namespace.
+const NAMESPACED_PROVIDERS: &[(&str, &str, Option<&[&str]>)] = &[
+    ("config_common", "FeatureFlagInfo", Some(&["value", "error"])),
+    ("testing", "ExecutionInfo", Some(&["requirements", "exec_group"])),
+];
+
 /// The builtin providers, allocated once, so every evaluation shares them.
 struct BuiltinProviders {
     heap: FrozenHeapRef,
     toplevel: Vec<(&'static str, FrozenValue)>,
     platform_common: Vec<(String, FrozenValue)>,
+    namespaced: Vec<(&'static str, &'static str, FrozenValue)>,
 }
 
 static BUILTIN_PROVIDER_VALUES: LazyLock<BuiltinProviders> = LazyLock::new(|| {
@@ -300,10 +308,12 @@ static BUILTIN_PROVIDER_VALUES: LazyLock<BuiltinProviders> = LazyLock::new(|| {
     };
     let toplevel = BUILTIN_PROVIDERS.iter().map(|(name, fields)| (*name, alloc(name, *fields))).collect();
     let platform_common = PLATFORM_PROVIDERS.iter().map(|(name, fields)| (name.to_string(), alloc(name, *fields))).collect();
+    let namespaced = NAMESPACED_PROVIDERS.iter().map(|(namespace, name, fields)| (*namespace, *name, alloc(name, *fields))).collect();
     BuiltinProviders {
         heap: heap.into_ref_named(starlark::values::FrozenHeapName::User(Box::new("builtin providers".to_string()))),
         toplevel,
         platform_common,
+        namespaced,
     }
 });
 
@@ -320,9 +330,19 @@ pub fn builtin_provider(name: &str) -> Option<(FrozenValue, &'static FrozenHeapR
     let providers = &*BUILTIN_PROVIDER_VALUES;
     let toplevel = providers.toplevel.iter().map(|(name, value)| (*name, *value));
     let platform = providers.platform_common.iter().map(|(name, value)| (name.as_str(), *value));
-    let mut all = toplevel.chain(platform);
+    let config = providers.namespaced.iter().map(|(_, name, value)| (*name, *value));
+    let mut all = toplevel.chain(platform).chain(config);
     let (_, value) = all.find(|(candidate, _)| *candidate == name)?;
     Some((value, &providers.heap))
+}
+
+/// Add the providers of a namespace, such as `config_common`, to it.
+pub(crate) fn register_namespace_providers(namespace: &mut GlobalsBuilder, name: &str) {
+    let providers = &*BUILTIN_PROVIDER_VALUES;
+    namespace.frozen_heap().add_reference(&providers.heap);
+    for (_, provider, value) in providers.namespaced.iter().filter(|(of, _, _)| *of == name) {
+        namespace.set(provider, *value);
+    }
 }
 
 /// Define `DefaultInfo` and the other builtin providers, and the

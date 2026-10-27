@@ -1,6 +1,8 @@
 //! Whether the conditions of `select()`s match a configuration.
 
 use crate::attrs::resolve_value;
+use crate::transition::configured_key;
+use bazel_starlark::provider::ProviderInstance;
 use crate::platform::{ConstraintValueKey, PlatformKey, labels};
 use bazel_config::{BuildConfiguration, ConfigId, FlagValue, OptionError};
 use bazel_label::{Label, LabelContext};
@@ -136,9 +138,13 @@ fn values_error(label: Label, error: OptionError) -> SkyError {
 }
 
 /// Whether a build setting has a value, as `config_setting(flag_values =
-/// ...)` asks: the value as its type reads it, or for lists, one value the
-/// list contains.
+/// ...)` asks: the value its `FeatureFlagInfo` gives, if it gives one, or
+/// else the value as its type reads it, or for lists, one value the list
+/// contains.
 async fn flag_matches(ctx: &Ctx, label: Label, config: &BuildConfiguration, flag: Label, expected: &str) -> Result<bool, SkyError> {
+    if let Some(value) = feature_flag_info(ctx, flag, config.id).await? {
+        return Ok(value == expected);
+    }
     let Some(setting) = crate::settings::build_setting(ctx, flag).await? else {
         return feature_flag_matches(ctx, flag, expected).await;
     };
@@ -165,6 +171,26 @@ async fn flag_matches(ctx: &Ctx, label: Label, config: &BuildConfiguration, flag
         }
         (actual, wanted) => Ok(*actual == wanted),
     }
+}
+
+/// The value a flag's `FeatureFlagInfo` gives in a configuration, if the
+/// flag is a rule that returns one.
+async fn feature_flag_info(ctx: &Ctx, flag: Label, config: ConfigId) -> Result<Option<String>, SkyError> {
+    let package = ctx.compute(&PackageKey(flag.package)).await?;
+    if !matches!(package.0.target(flag.name), Some(Target::Rule(_))) {
+        return Ok(None);
+    }
+    let key = configured_key(ctx, flag, config).await?;
+    let target = ctx.compute(&key).await?;
+    let providers = target.providers()?;
+    let Some(info) = providers.get().and_then(|value| value.provider("FeatureFlagInfo")).and_then(ProviderInstance::from_value) else {
+        return Ok(None);
+    };
+    if let Some(error) = info.field("error").and_then(|error| error.unpack_str()) {
+        return Err(SkyError::new(error.to_string()));
+    }
+    let value = info.field("value").and_then(|value| value.unpack_str()).unwrap_or_default();
+    Ok(Some(value.to_string()))
 }
 
 /// Whether a `config_feature_flag`, which bb only ever has at its default,

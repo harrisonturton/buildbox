@@ -210,6 +210,11 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
         state.expand(&escaped, &extra, style)
     }
 
+    /// `tokenize(option)`: split a string into words as a shell would.
+    fn tokenize<'v>(#[starlark(this)] _this: Value<'v>, option: &str) -> anyhow::Result<Vec<String>> {
+        crate::shell::tokenize(option).map_err(|error| anyhow::anyhow!("{error} while tokenizing '{option}'"))
+    }
+
     /// `expand_make_variables(attribute_name, command,
     /// additional_substitutions)`.
     fn expand_make_variables<'v>(

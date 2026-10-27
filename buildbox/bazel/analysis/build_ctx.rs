@@ -1,9 +1,11 @@
 //! Running a rule's implementation: its `ctx`, built from its attributes
 //! and analyzed dependencies, and what it returns.
 
-use crate::action::Action;
+use crate::action::{Action, ActionKind};
+use crate::inputs::InputSet;
 use crate::actions::{self, Actions};
 use crate::artifact::{self, Artifact};
+use crate::action_value::DepTargets;
 use crate::configured::{ConfiguredTarget, Implementation};
 use crate::exec_groups::ExecGroups;
 use crate::failure::ImplementationFailed;
@@ -25,6 +27,7 @@ use bazel_starlark::{EvalContext, FileKind};
 use intern::Symbol;
 use skycodec::Fingerprinter;
 use bazel_starlark::print::Printed;
+use bazel_starlark::provider::ProviderInstance;
 use starlark::collections::SmallMap;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
@@ -110,6 +113,9 @@ pub struct RuleInput {
     /// For an aspect: the target it's applied to.
     pub aspect: Option<AspectView>,
     pub toolchains: ResolvedToolchains,
+    /// A rule set's Starlark function a native rule's implementation calls:
+    /// for `java_plugins_flag_alias`, rules_java's merge of plugins.
+    pub helper: Option<starlark::values::OwnedFrozenValue>,
 }
 
 impl RuleInput {
@@ -216,13 +222,14 @@ pub fn target_executable<'v>(target: Value<'v>) -> Option<(Artifact, &'v Runfile
     Some((executable, Runfiles::from_value(files_to_run.runfiles)?))
 }
 
-/// Call the rule's implementation with `ctx`, returning what it returns.
-fn implement<'v>(input: &RuleInput, prepared: &Prepared<'v>, ctx: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+/// Call the rule's implementation with `ctx`, and an aspect's with its
+/// `target` too, returning what it returns.
+fn implement<'v>(input: &RuleInput, prepared: &Prepared<'v>, ctx: Value<'v>, target: Option<Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
     match &input.implementation {
         Implementation::Starlark { implementation, .. } | Implementation::Builtin { implementation, .. } => {
             let implementation = eval.heap().access_owned_frozen_value(implementation);
-            let arguments = match &input.aspect {
-                Some(view) => vec![aspect_target(view, eval.heap())?, ctx],
+            let arguments = match target {
+                Some(target) => vec![target, ctx],
                 None => vec![ctx],
             };
             eval.eval_function(implementation, &arguments, &[]).map_err(|error| ImplementationFailed::starlark(&error).into())
@@ -248,6 +255,11 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     let heap = module.heap();
     let mut state = RuleState::new(input.label, input.class.kind, input.config.clone(), input.mapping.clone(), input.main_mapping.clone());
     state.target_constraints = input.target_constraints.clone();
+    state.analysis_test = input.class.analysis_test && input.aspect.is_none();
+    state.toolchain_types = input.class.toolchain_types.clone();
+    if let Some(AttrValue::StringList(tags)) = input.attr("tags") {
+        state.tag_execution_info = crate::state::tag_execution_info(tags);
+    }
     state.set_make_variable("TARGET_CPU", &input.target_cpu);
     let prepared = Prepared {
         deps: dep_values(module, input)?,
@@ -269,17 +281,29 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     context.mappings = input.mappings.clone();
     context.extension = Some(Box::new(state));
     module.set(RULE_CTX, ctx);
+    let aspect_target = match &input.aspect {
+        Some(view) => Some(aspect_target(view, heap)?),
+        None => None,
+    };
     let returned = {
         let _analyzing = Analyzing::begin();
+        let _targets = DepTargets::begin(dep_targets(input, &prepared, aspect_target));
         let mut eval = Evaluator::new(module);
         eval.extra = Some(&context);
-        implement(input, &prepared, ctx, &mut eval)
+        implement(input, &prepared, ctx, aspect_target, &mut eval)
     };
     module.set(RULE_CTX, Value::new_none());
     printed.extend(context.printed.take());
     let returned = returned?;
     let state = context.extension.take().and_then(|state| state.downcast::<RuleState>().ok()).ok_or_else(|| anyhow::anyhow!("lost the rule's state"))?;
-    let defaults = defaults(&state, &prepared.outputs);
+    let script = match state.analysis_test {
+        true => Some(write_analysis_test_script(&state, returned)?),
+        false => None,
+    };
+    let mut defaults = defaults(&state, &prepared.outputs);
+    if script.is_some() {
+        defaults.executable = script;
+    }
     check_outputs(&state, &prepared.outputs)?;
     let target = match input.aspect {
         Some(_) => providers::collect_aspect(input.label, returned)?,
@@ -287,6 +311,52 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     };
     module.set("target", heap.alloc(target));
     Ok(state.actions.into_inner())
+}
+
+/// Write an analysis test's executable, `<name>.sh`: a script that passes
+/// or fails as the `AnalysisTestResultInfo` it returned says, as Bazel
+/// writes it.
+fn write_analysis_test_script(state: &RuleState, returned: Value<'_>) -> anyhow::Result<Artifact> {
+    let result = analysis_test_result(returned).ok_or_else(|| ImplementationFailed::reported("rules with analysis_test=true must return an instance of AnalysisTestResultInfo".to_string()))?;
+    let script = state.declare(&format!("{}.sh", state.label.name), false)?;
+    let mut content = String::from("#!/bin/sh\n");
+    for line in result.message.split('\n') {
+        let escaped: String = line.chars().flat_map(|c| ['\\', c]).collect();
+        content.push_str(&format!("echo {escaped}\n"));
+    }
+    content.push_str(if result.success { "exit 0" } else { "exit 1" });
+    state.register_own(Action {
+        mnemonic: Symbol::intern("FileWrite"),
+        progress_message: String::new(),
+        inputs: InputSet::default(),
+        runfiles: Vec::new(),
+        outputs: vec![script],
+        kind: ActionKind::Write {
+            content,
+            executable: true,
+            from_args: false,
+        },
+    })?;
+    Ok(script)
+}
+
+/// What an analysis test's `AnalysisTestResultInfo` says.
+struct AnalysisTestResult {
+    success: bool,
+    message: String,
+}
+
+/// The `AnalysisTestResultInfo` among what an implementation returned.
+fn analysis_test_result(returned: Value<'_>) -> Option<AnalysisTestResult> {
+    let items = match ProviderInstance::from_value(returned) {
+        Some(_) => vec![returned],
+        None => bazel_starlark::convert::items(returned)?,
+    };
+    let info = items.into_iter().filter_map(ProviderInstance::from_value).find(|info| info.provider_key().as_deref() == Some("AnalysisTestResultInfo"))?;
+    Some(AnalysisTestResult {
+        success: info.field("success").is_some_and(|success| success.to_bool()),
+        message: info.field("message").and_then(|message| message.unpack_str()).unwrap_or_default().to_string(),
+    })
 }
 
 /// What `DefaultInfo` defaults to: the predeclared outputs actions
@@ -313,6 +383,35 @@ fn check_outputs(state: &RuleState, outputs: &Predeclared) -> anyhow::Result<()>
         return Ok(());
     }
     anyhow::bail!("the following files have no generating action:\n{}", missing.join("\n"))
+}
+
+/// Each `Target` value the implementation gets, by address, with the
+/// configured targets it stands for: a target, or with aspects applied,
+/// their applications and then the target, as Bazel lists their actions.
+fn dep_targets(input: &RuleInput, prepared: &Prepared<'_>, aspect_target: Option<Value<'_>>) -> Vec<(usize, Vec<Arc<ConfiguredTarget>>)> {
+    let address = |value: Value<'_>| TargetValue::from_value(value).map(|target| target as *const TargetValue as usize);
+    let mut targets = Vec::new();
+    for (key, dep) in &input.deps {
+        let configured = match dep {
+            Dep::File(..) => continue,
+            Dep::Target(target) => vec![target.clone()],
+            Dep::Aspect(applied) => aspects_then_target(applied),
+        };
+        if let Some(address) = prepared.deps.get(key).and_then(|value| address(*value)) {
+            targets.push((address, configured));
+        }
+    }
+    if let (Some(view), Some(address)) = (&input.aspect, aspect_target.and_then(address)) {
+        targets.push((address, aspects_then_target(&view.targets)));
+    }
+    targets
+}
+
+/// A target and the applications of aspects to it, aspects first.
+fn aspects_then_target(applied: &[Arc<ConfiguredTarget>]) -> Vec<Arc<ConfiguredTarget>> {
+    let mut ordered: Vec<Arc<ConfiguredTarget>> = applied.iter().skip(1).cloned().collect();
+    ordered.extend(applied.first().cloned());
+    ordered
 }
 
 /// Each dependency as a `Target` value of `module`'s heap.

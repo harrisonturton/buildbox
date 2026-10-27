@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 /// The runfiles tree of a target's executable, if it has one.
 pub async fn layout(session: &Session, target: &ConfiguredTarget, exec_root: &Path, workspace: &Path) -> Result<Option<RunfilesLayout>, SkyError> {
-    let Some((executable, entries)) = executable_runfiles(target) else {
+    let Some(ExecutableRunfiles { executable, entries, empty }) = executable_runfiles(target) else {
         return Ok(None);
     };
     let mut roots = HashMap::new();
@@ -22,17 +22,30 @@ pub async fn layout(session: &Session, target: &ConfiguredTarget, exec_root: &Pa
     Ok(Some(RunfilesLayout {
         executable: exec_root.join(executable.exec_path.to_string()),
         entries: linked,
+        empty,
         repo_mapping: bazel_execution::repo_mapping(session, &entries).await?,
     }))
 }
 
+/// A target's executable, and its runfiles tree's files and empty files.
+pub struct ExecutableRunfiles {
+    pub executable: Artifact,
+    pub entries: Vec<(String, Artifact)>,
+    pub empty: Vec<String>,
+}
+
 /// A target's executable, and its runfiles.
-pub fn executable_runfiles(target: &ConfiguredTarget) -> Option<(Artifact, Vec<(String, Artifact)>)> {
+pub fn executable_runfiles(target: &ConfiguredTarget) -> Option<ExecutableRunfiles> {
     let providers = target.providers().ok()?;
     let value = providers.get()?;
     let executable = FileValue::artifact(value.default_info("executable")?)?;
     let runfiles = Runfiles::from_value(value.default_info("default_runfiles")?)?;
-    Some((executable, runfiles.entries(runfiles_repo_name(RepoName::MAIN))))
+    let workspace_dir = runfiles_repo_name(RepoName::MAIN);
+    Some(ExecutableRunfiles {
+        executable,
+        entries: runfiles.entries(workspace_dir),
+        empty: runfiles.empty_files(workspace_dir),
+    })
 }
 
 /// Where an artifact is: in the output tree, or in its repository's source

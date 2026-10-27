@@ -14,6 +14,8 @@ pub struct PackageBuilder {
     /// Whether `package()` has been called, which may happen once.
     pub package_called: bool,
     pub errors: Vec<PackageError>,
+    /// The rule classes the BUILD file defines itself.
+    pub defined_classes: Vec<RuleClass>,
     rule_classes: Vec<RuleClassRef>,
     rule_class_index: HashMap<RuleClassRef, u32>,
     targets: BTreeMap<Symbol, Target>,
@@ -31,6 +33,7 @@ impl PackageBuilder {
             loads: Vec::new(),
             package_called: false,
             errors: Vec::new(),
+            defined_classes: Vec::new(),
             rule_classes: Vec::new(),
             rule_class_index: HashMap::new(),
             targets: BTreeMap::new(),
@@ -116,6 +119,7 @@ impl PackageBuilder {
             id: self.id,
             build_file: self.id.label(self.build_file_name),
             rule_classes: self.rule_classes,
+            defined_classes: self.defined_classes,
             targets: self.targets.into_values().collect(),
             loads: self.loads,
             args: self.args,

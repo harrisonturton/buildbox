@@ -3,7 +3,8 @@
 
 use crate::condition::ConditionKey;
 use crate::configured::ConfiguredTargetKey;
-use bazel_config::ConfigId;
+use crate::late_bound::late_bound_value;
+use bazel_config::{BuildOptions, ConfigId};
 use bazel_label::Label;
 use bazel_loading::PackageKey;
 use bazel_packages::{AttrDefault, AttrSchema, AttrValue, DEFAULT_CONDITION, Rule, RuleClass, Select, SelectorPart, Target};
@@ -42,29 +43,31 @@ impl Key for ConfiguredAttrsKey {
 /// class's order.
 pub async fn resolve_attrs(ctx: &Ctx, rule: &Rule, class: &RuleClass, config: ConfigId) -> Result<Vec<(Symbol, AttrValue)>, SkyError> {
     let mut values = Vec::with_capacity(class.attrs.len());
+    let configuration = config.get();
     for schema in &class.attrs {
-        let raw = given_or_default(rule, schema);
+        let raw = given_or_default(rule, schema, &configuration.options).map_err(|error| error.context(format_args!("attribute '{}'", schema.name)))?;
         let value = resolve_value(ctx, &raw, config).await.map_err(|error| error.context(format_args!("attribute '{}'", schema.name)))?;
         values.push((schema.name, value));
     }
     Ok(values)
 }
 
-/// An attribute's value as the rule gives it, or as its default computes.
-/// `name` is the rule's name, which isn't kept among its attributes.
-fn given_or_default(rule: &Rule, schema: &AttrSchema) -> AttrValue {
+/// An attribute's value as the rule gives it, or as its default computes
+/// under `options`. `name` is the rule's name, which isn't kept among its
+/// attributes.
+fn given_or_default(rule: &Rule, schema: &AttrSchema, options: &BuildOptions) -> Result<AttrValue, SkyError> {
     if schema.name.as_str() == "name" {
-        return AttrValue::String(rule.name.as_str().to_string());
+        return Ok(AttrValue::String(rule.name.as_str().to_string()));
     }
     if let Some(value) = rule.attr_or_computed(schema.name) {
-        return value.clone();
+        return Ok(value.clone());
     }
-    match &schema.default {
+    let value = match &schema.default {
         AttrDefault::Value(value) => value.clone(),
         AttrDefault::Computed => AttrValue::default_for(schema.ty),
-        AttrDefault::LateBound(Some(label)) => AttrValue::Label(*label),
-        AttrDefault::LateBound(None) => AttrValue::None,
-    }
+        AttrDefault::LateBound(late_bound) => late_bound_value(late_bound, options)?,
+    };
+    Ok(value)
 }
 
 /// A value with its `select()`s resolved in a configuration.

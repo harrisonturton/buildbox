@@ -2,7 +2,9 @@
 //! rules read.
 
 use allocative::Allocative;
-use bazel_config::BuildOptions;
+use bazel_config::{BuildOptions, OptionValue};
+use bazel_starlark::depset::{Depset, Order};
+use bazel_starlark::label_value::LabelValue;
 use bazel_starlark::opaque::Opaque;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
@@ -84,6 +86,18 @@ impl<'v> StarlarkValue<'v> for Fragment {
             ("apple", "prefer_mutual_xcode") => Value::new_bool(true),
             ("apple", "include_xcode_exec_requirements") => Value::new_bool(false),
             ("apple", flag) if flag.ends_with("_flag") => Value::new_none(),
+            ("java", field) => match java_field(&self.options, field, heap) {
+                Some(value) => value,
+                None => heap.alloc(Opaque::new(&format!("ctx.fragments.java.{attribute}"))),
+            },
+            ("py", "build_python_zip") => Value::new_bool(self.options.string("build_python_zip") == "yes"),
+            ("py", "default_to_explicit_init_py") => Value::new_bool(self.options.bool("incompatible_default_to_explicit_init_py")),
+            ("py", "disallow_native_rules") => Value::new_bool(self.options.bool("incompatible_python_disallow_native_rules")),
+            ("py", "use_toolchains") => Value::new_bool(true),
+            ("py", "default_python_version") => heap.alloc("PY3"),
+            ("bazel_py", "python_path") => heap.alloc(self.options.get("python_path").ok().and_then(string_value).unwrap_or("python")),
+            ("bazel_py", "python_import_all_repositories") => Value::new_bool(self.options.bool("experimental_python_import_all_repositories")),
+            ("bazel_py", "python_top") => Value::new_none(),
             _ => heap.alloc(Opaque::new(&format!("ctx.fragments.{}.{attribute}", self.name))),
         };
         Some(value)
@@ -94,9 +108,128 @@ impl<'v> StarlarkValue<'v> for Fragment {
     }
 }
 
+/// A field of the `java` fragment, as Bazel's `JavaConfiguration` gives it,
+/// or `None` for one bb doesn't know.
+fn java_field<'v>(options: &BuildOptions, field: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+    let value = match field {
+        "default_javac_flags" => heap.alloc(AllocList(javac_flags(options).iter().map(String::as_str))),
+        "default_javac_flags_depset" => {
+            let joined = joined_javac_flags(options);
+            let direct = joined.iter().map(|flags| heap.alloc(flags.as_str())).collect();
+            heap.alloc(Depset {
+                direct,
+                transitive: Vec::new(),
+                order: Order::Default,
+            })
+        }
+        "strict_java_deps" => heap.alloc(options.string("strict_java_deps").to_ascii_lowercase()),
+        "default_jvm_opts" => heap.alloc(AllocList(options.strings("jvmopt"))),
+        "one_version_enforcement_level" => heap.alloc(options.string("experimental_one_version_enforcement").to_ascii_uppercase()),
+        "one_version_enforcement_on_java_tests" => Value::new_bool(options.bool("one_version_enforcement_on_java_tests")),
+        "add_test_support_to_compile_deps" => Value::new_bool(options.bool("experimental_add_test_support_to_compile_time_deps")),
+        "run_android_lint" => Value::new_bool(options.bool("experimental_run_android_lint_on_java_rules")),
+        "multi_release_deploy_jars" => Value::new_bool(options.bool("incompatible_multi_release_deploy_jars")),
+        "plugins" => heap.alloc(AllocList(options.labels("plugin").iter().map(|label| LabelValue(*label)))),
+        "bytecode_optimizer_mnemonic" => {
+            let optimizers = options.string("bytecode_optimizers");
+            heap.alloc(optimizers.split_once('=').map_or(optimizers, |(name, _)| name))
+        }
+        "split_bytecode_optimization_pass" => Value::new_bool(options.bool("split_bytecode_optimization_pass")),
+        "bytecode_optimization_pass_actions" => match options.get("bytecode_optimization_pass_actions") {
+            Ok(OptionValue::Int(actions)) => heap.alloc(*actions as i32),
+            _ => return None,
+        },
+        "enforce_proguard_file_extension" => Value::new_bool(options.bool("enforce_proguard_file_extension")),
+        _ => return None,
+    };
+    Some(value)
+}
+
+/// `--javacopt`s as Bazel keeps them: tokenized, then quoted and joined
+/// into one, or none if there are none. Options that don't tokenize are
+/// kept as they are.
+fn joined_javac_flags(options: &BuildOptions) -> Option<String> {
+    let mut tokens = Vec::new();
+    for option in options.strings("javacopt") {
+        match crate::shell::tokenize(option) {
+            Ok(words) => tokens.extend(words),
+            Err(_) => tokens.push(option.clone()),
+        }
+    }
+    match tokens.is_empty() {
+        true => None,
+        false => Some(tokens.iter().map(|token| crate::shell::escape(token)).collect::<Vec<_>>().join(" ")),
+    }
+}
+
+/// `--javacopt`s as the `java` fragment lists them: [`joined_javac_flags`]
+/// tokenized again.
+fn javac_flags(options: &BuildOptions) -> Vec<String> {
+    let Some(joined) = joined_javac_flags(options) else {
+        return Vec::new();
+    };
+    crate::shell::tokenize(&joined).unwrap_or_else(|_| vec![joined])
+}
+
+fn string_value(value: &OptionValue) -> Option<&str> {
+    match value {
+        OptionValue::String(text) => Some(text),
+        _ => None,
+    }
+}
+
+/// The options of a fragment, which must be `name`.
+fn fragment_options<'v>(this: Value<'v>, name: &str) -> anyhow::Result<&'v BuildOptions> {
+    let fragment = this.downcast_ref::<Fragment>().ok_or_else(|| anyhow::anyhow!("expected a fragment"))?;
+    if fragment.name != name {
+        anyhow::bail!("the {} fragment has no such method", fragment.name);
+    }
+    Ok(&fragment.options)
+}
+
 /// Fragment methods that answer as Bazel's do with default options.
 #[starlark_module]
 fn fragment_methods(builder: &mut MethodsBuilder) {
+    /// `java.use_header_compilation()`: `--java_header_compilation`.
+    fn use_header_compilation<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        Ok(fragment_options(this, "java")?.bool("java_header_compilation"))
+    }
+
+    /// `java.generate_java_deps()`: whether compilations write their
+    /// dependencies, as `--java_deps` or a reduced classpath needs.
+    fn generate_java_deps<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let options = fragment_options(this, "java")?;
+        Ok(options.bool("java_deps") || options.string("experimental_java_classpath") != "off")
+    }
+
+    /// `java.reduce_java_classpath()`: `--experimental_java_classpath`, as
+    /// Bazel's enum names it.
+    fn reduce_java_classpath<'v>(this: Value<'v>) -> anyhow::Result<String> {
+        Ok(fragment_options(this, "java")?.string("experimental_java_classpath").to_ascii_uppercase())
+    }
+
+    fn enforce_explicit_java_test_deps<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        Ok(fragment_options(this, "java")?.bool("explicit_java_test_deps"))
+    }
+
+    fn use_ijars<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        Ok(fragment_options(this, "java")?.bool("use_ijars"))
+    }
+
+    /// Always true in Bazel 9, which is removing the method.
+    fn use_header_compilation_direct_deps<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        fragment_options(this, "java")?;
+        Ok(true)
+    }
+
+    fn disallow_java_import_exports<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        Ok(fragment_options(this, "java")?.bool("incompatible_disallow_java_import_exports"))
+    }
+
+    fn auto_create_java_test_deploy_jars<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        Ok(fragment_options(this, "java")?.bool("experimental_java_test_auto_create_deploy_jar"))
+    }
+
     /// `cpp.compilation_mode()`: `fastbuild`, `dbg` or `opt`.
     fn compilation_mode<'v>(this: Value<'v>) -> anyhow::Result<String> {
         let fragment = this.downcast_ref::<Fragment>().ok_or_else(|| anyhow::anyhow!("expected a fragment"))?;

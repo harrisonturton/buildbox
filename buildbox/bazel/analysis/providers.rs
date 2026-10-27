@@ -174,8 +174,12 @@ fn default_info<'v>(label: Label, given: Option<Value<'v>>, defaults: &Defaults,
         None => default_runfiles,
     };
     let executable_value = executable.map(|artifact| heap.alloc(FileValue(artifact))).unwrap_or_else(Value::new_none);
+    let single_executable = field("files_to_run").and_then(FilesToRun::from_value).map(|files_to_run| files_to_run.executable);
     let files_to_run = heap.alloc(FilesToRun {
-        executable: executable_value,
+        executable: match executable {
+            Some(_) => executable_value,
+            None => single_executable.unwrap_or_else(Value::new_none),
+        },
         runfiles: default_runfiles,
     });
     instance(

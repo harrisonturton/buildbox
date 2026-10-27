@@ -32,6 +32,9 @@ impl Key for RuleClassKey {
             let class = builtins.rule_classes.get(&self.name).ok_or_else(|| SkyError::new(format!("no builtin rule named '{}'", self.name)))?;
             return Ok(RuleClassValue((**class).clone()));
         }
+        if is_build_file(self.bzl) {
+            return defined_in_build_file(ctx, self.bzl, self.name).await;
+        }
         let module = ctx.compute(&BzlLoadKey(self.bzl)).await?;
         let missing = || SkyError::new(format!("{} doesn't export a rule named '{}'", self.bzl, self.name));
         let (value, _) = module.module.get_any_visibility(self.name.as_str()).map_err(|_| missing())?;
@@ -39,6 +42,21 @@ impl Key for RuleClassKey {
         let class = rule.exported.get().ok_or_else(missing)?;
         Ok(RuleClassValue((**class).clone()))
     }
+}
+
+/// Whether a rule class's definition is a BUILD file rather than a `.bzl`
+/// file, as for those `testing.analysis_test` defines.
+pub fn is_build_file(definition: Label) -> bool {
+    crate::package::BUILD_FILE_NAMES.contains(&definition.name.as_str())
+}
+
+/// The schema of a rule class a BUILD file defines, which its package
+/// keeps.
+async fn defined_in_build_file(ctx: &Ctx, build_file: Label, kind: Symbol) -> Result<RuleClassValue, SkyError> {
+    let package = ctx.compute(&crate::PackageKey(build_file.package)).await?;
+    let class = package.0.defined_classes.iter().find(|class| class.kind == kind);
+    let class = class.ok_or_else(|| SkyError::new(format!("{build_file} doesn't define a rule named '{kind}'")))?;
+    Ok(RuleClassValue(class.clone()))
 }
 
 /// The schema of any rule class, native or not.

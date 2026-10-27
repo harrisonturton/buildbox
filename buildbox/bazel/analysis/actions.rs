@@ -214,17 +214,29 @@ fn sorted(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
 }
 
 /// The text of a progress message, with `%{label}`, and `%{input}` and
-/// `%{output}` substituted by their paths relative to their roots.
-fn progress_message(message: Option<&str>, state: &RuleState, inputs: &InputSet, outputs: &[Artifact]) -> String {
+/// `%{output}` substituted by the paths, relative to their roots, of the
+/// primary input and the first output.
+fn progress_message(message: Option<&str>, state: &RuleState, primary_input: Option<Artifact>, outputs: &[Artifact]) -> String {
     let Some(message) = message else {
         return String::new();
     };
-    let first_path = |artifacts: &[Artifact]| artifacts.first().map(|artifact| artifact.root_relative().to_string()).unwrap_or_default();
-    let mut message = message.replace("%{label}", &state.label.to_string()).replace("%{output}", &first_path(outputs));
+    let path = |artifact: Option<&Artifact>| artifact.map(|artifact| artifact.root_relative().to_string()).unwrap_or_default();
+    let mut message = message.replace("%{label}", &state.label.to_string()).replace("%{output}", &path(outputs.first()));
     if message.contains("%{input}") {
-        message = message.replace("%{input}", &first_path(&inputs.to_vec()));
+        message = message.replace("%{input}", &path(primary_input.as_ref()));
     }
     message
+}
+
+/// An action's primary input, as Bazel's Starlark actions have it: the
+/// first of the inputs it's given, in their order, or else of its tools.
+fn primary_input(given: Option<Value<'_>>, tools: &Tools) -> Option<Artifact> {
+    let given = given.filter(|value| !value.is_none());
+    let first_given = given.and_then(|value| match Depset::from_value(value) {
+        Some(depset) => depset.to_list().into_iter().find_map(FileValue::artifact),
+        None => bazel_starlark::convert::items(value)?.into_iter().find_map(FileValue::artifact),
+    });
+    first_given.or_else(|| tools.inputs.first().copied()).or_else(|| tools.sets.iter().find_map(|set| set.to_vec().first().copied()))
 }
 
 /// What `run` and `run_shell` share.
@@ -252,6 +264,7 @@ impl<'v> SpawnArgs<'v> {
             None => InputSet::default(),
         };
         tools.add_list(self.tools, state)?;
+        let primary = primary_input(self.inputs, &tools);
         let mut arguments = command;
         let mut direct = Vec::new();
         let mut param_files = Vec::new();
@@ -269,7 +282,7 @@ impl<'v> SpawnArgs<'v> {
         };
         let action = Action {
             mnemonic: Symbol::intern(self.mnemonic.unwrap_or("Action")),
-            progress_message: progress_message(self.progress_message, state, &inputs, &outputs),
+            progress_message: progress_message(self.progress_message, state, primary, &outputs),
             inputs,
             runfiles: tools.runfiles,
             outputs,
@@ -295,7 +308,7 @@ fn transform_status_file<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
 ) -> anyhow::Result<FileValue> {
     let heap = eval.heap();
-    let (file, values, which) = match status {
+    let (file, values, which): (_, &[(&str, &str)], _) = match status {
         StatusFile::Stable => (crate::workspace_status::info_file(), &crate::workspace_status::STABLE_STATUS, "stable"),
         StatusFile::Volatile => (crate::workspace_status::version_file(), &crate::workspace_status::VOLATILE_STATUS, "volatile"),
     };
@@ -511,7 +524,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         let message = progress_message.unwrap_or("Creating symlink %{output}");
         state.register(Action {
             mnemonic: Symbol::intern(mnemonic),
-            progress_message: self::progress_message(Some(message), state, &InputSet::default(), &[output]),
+            progress_message: self::progress_message(Some(message), state, Some(target), &[output]),
             inputs: InputSet::default(),
             runfiles: Vec::new(),
             outputs: vec![output],

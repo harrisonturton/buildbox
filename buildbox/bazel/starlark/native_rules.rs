@@ -145,6 +145,7 @@ fn class_of(kind: &str, common: Vec<AttrSchema>, own: Vec<AttrSchema>, test: boo
         build_setting: None,
         advertised_providers: Vec::new(),
         defined_at: Vec::new(),
+        analysis_test: false,
     }
 }
 

@@ -7,7 +7,7 @@ use crate::action_inputs::ShownInputs;
 use crate::action_output::{Ids, Owned, Printer, TEMPLATE_EXPAND, aspect_name, aspect_parameters, exec_platform};
 use bazel_analysis::{ActionKind, ConfiguredTarget, InputSet};
 use bazel_config::ConfigId;
-use bazel_label::{Label, RepoMappingTable};
+use bazel_label::Label;
 use bazel_query::proto::{self, Message};
 use intern::PathId;
 use rustc_hash::FxHashMap;
@@ -16,7 +16,6 @@ use rustc_hash::FxHashMap;
 /// container, and its value.
 struct Entries<'a> {
     printer: &'a mut Printer,
-    mapping: &'a RepoMappingTable,
     entries: Vec<(u32, &'static str, Message)>,
     rule_classes: Ids<String>,
     targets: Ids<Label>,
@@ -41,10 +40,9 @@ struct PendingSet {
 }
 
 impl<'a> Entries<'a> {
-    fn new(printer: &'a mut Printer, mapping: &'a RepoMappingTable) -> Entries<'a> {
+    fn new(printer: &'a mut Printer) -> Entries<'a> {
         Entries {
             printer,
-            mapping,
             entries: Vec::new(),
             rule_classes: Ids::new(),
             targets: Ids::new(),
@@ -202,7 +200,7 @@ impl<'a> Entries<'a> {
         let (id, new) = self.aspects.id(&aspect.to_string());
         if new {
             let mut message = Message::new();
-            message.int3(1, "id", id.into()).string3(2, "name", aspect_name(aspect, self.mapping));
+            message.int3(1, "id", id.into()).string3(2, "name", aspect_name(aspect));
             for (name, value) in aspect_parameters(aspect) {
                 message.repeated(3, "parameters", pair(&name, &value));
             }
@@ -264,6 +262,9 @@ fn kind_fields(message: &mut Message, owned: &Owned, printer: &Printer) {
                 message.string3(17, "file_contents", content.clone());
             }
         }
+        ActionKind::RepoMappingManifest { .. } => {
+            message.bool3(19, "is_executable", false);
+        }
         _ => {}
     }
 }
@@ -294,8 +295,8 @@ fn pair(key: &str, value: &str) -> Message {
     message
 }
 
-fn entries(actions: &[Owned], printer: &mut Printer, mapping: &RepoMappingTable) -> Vec<(u32, &'static str, Message)> {
-    let mut entries = Entries::new(printer, mapping);
+fn entries(actions: &[Owned], printer: &mut Printer) -> Vec<(u32, &'static str, Message)> {
+    let mut entries = Entries::new(printer);
     for owned in actions {
         entries.action(owned);
     }
@@ -303,9 +304,9 @@ fn entries(actions: &[Owned], printer: &mut Printer, mapping: &RepoMappingTable)
 }
 
 /// The actions as one `ActionGraphContainer`.
-pub(crate) fn container(actions: &[Owned], printer: &mut Printer, mapping: &RepoMappingTable) -> Message {
+pub(crate) fn container(actions: &[Owned], printer: &mut Printer) -> Message {
     let mut container = Message::new();
-    for (number, name, message) in entries(actions, printer, mapping) {
+    for (number, name, message) in entries(actions, printer) {
         container.repeated(number, name, message);
     }
     container
@@ -313,9 +314,9 @@ pub(crate) fn container(actions: &[Owned], printer: &mut Printer, mapping: &Repo
 
 /// The actions as `ActionGraphContainer`s of one entry each, in the order
 /// they were made, each prefixed by its length.
-pub(crate) fn streamed(actions: &[Owned], printer: &mut Printer, mapping: &RepoMappingTable) -> Vec<u8> {
+pub(crate) fn streamed(actions: &[Owned], printer: &mut Printer) -> Vec<u8> {
     let mut out = Vec::new();
-    for (number, name, message) in entries(actions, printer, mapping) {
+    for (number, name, message) in entries(actions, printer) {
         let mut container = Message::new();
         container.repeated(number, name, message);
         out.extend(proto::delimited(&container));
@@ -325,9 +326,9 @@ pub(crate) fn streamed(actions: &[Owned], printer: &mut Printer, mapping: &RepoM
 
 /// The actions as text format, each entry as it was made, as Bazel
 /// streams them.
-pub(crate) fn text(actions: &[Owned], printer: &mut Printer, mapping: &RepoMappingTable) -> String {
+pub(crate) fn text(actions: &[Owned], printer: &mut Printer) -> String {
     let mut out = String::new();
-    for (number, name, message) in entries(actions, printer, mapping) {
+    for (number, name, message) in entries(actions, printer) {
         let mut container = Message::new();
         container.repeated(number, name, message);
         out.push_str(&container.to_flat_text());

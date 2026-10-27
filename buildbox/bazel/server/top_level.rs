@@ -75,8 +75,8 @@ impl Key for TopLevelKey {
         let flattened = bazel_loading::blocking(move || flatten(&target, &groups)).await?;
         let Flattened { mut artifacts, runfiles } = flattened;
         let runfiles = match runfiles {
-            Some((executable, entries)) => {
-                let fingerprint = runfiles_fingerprint(&entries, &bazel_execution::repo_mapping(ctx, &entries).await?);
+            Some((executable, entries, empty)) => {
+                let fingerprint = runfiles_fingerprint(&entries, &empty, &bazel_execution::repo_mapping(ctx, &entries).await?);
                 Some(RunfilesTree { executable, fingerprint })
             }
             None => None,
@@ -89,7 +89,7 @@ impl Key for TopLevelKey {
 
 struct Flattened {
     artifacts: Vec<Artifact>,
-    runfiles: Option<(Artifact, Vec<(String, Artifact)>)>,
+    runfiles: Option<(Artifact, Vec<(String, Artifact)>, Vec<String>)>,
 }
 
 /// The files of a target's output groups, with, for `default`, its
@@ -112,20 +112,25 @@ fn flatten(target: &ConfiguredTarget, groups: &[String]) -> Flattened {
         return Flattened { artifacts, runfiles: None };
     };
     let entries = runfiles.entries(runfiles_repo_name(RepoName::MAIN));
+    let empty = runfiles.empty_files(runfiles_repo_name(RepoName::MAIN));
     artifacts.push(executable);
     artifacts.extend(entries.iter().map(|(_, artifact)| *artifact));
     Flattened {
         artifacts,
-        runfiles: Some((executable, entries)),
+        runfiles: Some((executable, entries, empty)),
     }
 }
 
-/// Identifies a runfiles tree by its entries and repository mapping.
-fn runfiles_fingerprint(entries: &[(String, Artifact)], repo_mapping: &str) -> Fingerprint {
+/// Identifies a runfiles tree by its entries, empty files and repository
+/// mapping.
+fn runfiles_fingerprint(entries: &[(String, Artifact)], empty: &[String], repo_mapping: &str) -> Fingerprint {
     let mut fingerprinter = Fingerprinter::new();
     fingerprinter.bytes(repo_mapping.as_bytes());
     for (path, artifact) in entries {
         fingerprinter.bytes(path.as_bytes()).bytes(artifact.exec_path.to_string().as_bytes());
+    }
+    for path in empty {
+        fingerprinter.bytes(path.as_bytes()).bytes(b"\0empty");
     }
     fingerprinter.finish()
 }

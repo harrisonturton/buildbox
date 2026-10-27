@@ -365,9 +365,7 @@ pub fn param_file_contents(state: &ArgsState) -> String {
         "gcc_quoted" => state.arguments.iter().map(|argument| gcc_quote(argument)).collect(),
         _ => state.arguments.clone(),
     };
-    let mut contents = lines.join("\n");
-    contents.push('\n');
-    contents
+    lines.iter().map(|line| format!("{line}\n")).collect()
 }
 
 /// An argument as GCC reads it from a params file: special characters
@@ -375,6 +373,9 @@ pub fn param_file_contents(state: &ArgsState) -> String {
 /// The arguments a params file of `format` holds: what
 /// [`param_file_contents`] wrote.
 pub fn param_file_arguments(contents: &str, format: &str) -> Vec<String> {
+    if contents.is_empty() {
+        return Vec::new();
+    }
     let lines = contents.strip_suffix('\n').unwrap_or(contents).split('\n');
     match format {
         "shell" => lines.map(shell_unquote).collect(),

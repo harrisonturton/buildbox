@@ -177,6 +177,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("compiler", String, Null),
         multiple("conlyopt", Strings),
         multiple("copt", Strings),
+        option("coverage_output_generator", Label, Text("@@bazel_tools//tools/test:lcov_merger")),
         option("cpu", String, HostCpu),
         option("crosstool_top", Label, Null),
         multiple("cxxopt", Strings),
@@ -191,6 +192,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("enforce_constraints", Bool, Text("true")),
         option("enforce_proguard_file_extension", Bool, Text("false")),
         option("enforce_transitive_configs_for_config_feature_flag", Bool, Text("false")),
+        option("evaluating for analysis test", Bool, Text("false")),
         multiple("experimental_action_listener", Labels),
         option("experimental_add_test_support_to_compile_time_deps", Bool, Text("true")),
         option("experimental_allow_android_library_deps_without_srcs", Bool, Text("false")),
@@ -232,6 +234,8 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("experimental_java_classpath", String, Text("bazel")),
         option("experimental_java_test_auto_create_deploy_jar", Bool, Text("false")),
         option("experimental_link_static_libraries_once", Bool, Text("true")),
+        option("experimental_local_java_optimization_configuration", Label, Null),
+        option("experimental_local_java_optimizations", Bool, Text("false")),
         option("experimental_objc_provider_from_linked", Bool, Text("false")),
         option("experimental_omit_resources_info_provider_from_android_binary", Bool, Text("false")),
         option("experimental_omitfp", Bool, Text("false")),
@@ -261,6 +265,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("experimental_use_platforms_in_output_dir_legacy_heuristic", Bool, Text("true")),
         option("experimental_use_rtxt_from_merged_resources", Bool, Text("false")),
         option("experimental_writable_outputs", Bool, Text("false")),
+        option("explicit_java_test_deps", Bool, Text("false")),
         option("extra_execution_platforms", CommaStrings, Text("")),
         multiple("extra_toolchains", CommaStrings),
         multiple("features", Strings),
@@ -338,6 +343,8 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         multiple("macos_cpus", CommaStrings),
         option("macos_minimum_os", String, Null),
         option("macos_sdk_version", String, Null),
+        option("min_param_file_size", Int, Text("32768")),
+        option("modify_execution_info", CommaStrings, Text("")),
         option("no configuration", Bool, Text("false")),
         option("non_incremental_per_target_dexopts", CommaStrings, Text("--positions")),
         option("objc_use_dotd_pruning", Bool, Text("true")),
@@ -345,6 +352,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         multiple("per_file_copt", Strings),
         option("platform_mappings", String, Text("")),
         option("platforms", Labels, Text("")),
+        multiple("plugin", Labels),
         option("proguard_top", Label, Null),
         option("proto_compiler", Label, Text("@@bazel_tools//tools/proto:protoc")),
         option("proto_toolchain_for_cc", Label, Text("@@bazel_tools//tools/proto:cc_toolchain")),
@@ -359,6 +367,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("stamp", Bool, Text("false")),
         option("start_end_lib", Bool, Text("true")),
         option("strict_filesets", Bool, Text("false")),
+        upper_choice("strict_java_deps", "default", STRICT_DEPS, STRICT_DEPS_MODES),
         upper_choice("strict_proto_deps", "error", STRICT_DEPS, STRICT_DEPS_MODES),
         upper_choice("strict_public_imports", "off", STRICT_DEPS, STRICT_DEPS_MODES),
         option("strict_system_includes", Bool, Text("false")),
@@ -764,4 +773,16 @@ fn assignment_matches(actual: &[(String, String)], expected: &[(String, String)]
         return false;
     };
     actual.iter().rev().find(|(candidate, _)| candidate == name).is_some_and(|(_, actual)| actual == value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_options_are_sorted_by_name() {
+        for pair in NATIVE_OPTIONS.windows(2) {
+            assert!(pair[0].name < pair[1].name, "{} must come before {}", pair[1].name, pair[0].name);
+        }
+    }
 }

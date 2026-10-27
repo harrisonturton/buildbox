@@ -487,17 +487,32 @@ pub fn apply<'v>(
     attr: Value<'v>,
     eval: &mut Evaluator<'v, '_, '_>,
 ) -> Result<Vec<(String, BuildOptions)>, TransitionError> {
-    let settings = settings_dict(transition, input, eval.heap()).map_err(TransitionError::call)?;
-    let returned = eval
-        .eval_function(transition.implementation.to_value(), &[settings, attr], &[])
-        .map_err(TransitionError::implementation)?;
+    let returned = match transition.analysis_test_settings {
+        Some(settings) => settings.to_value(),
+        None => {
+            let settings = settings_dict(transition, input, eval.heap()).map_err(TransitionError::call)?;
+            eval.eval_function(transition.implementation.to_value(), &[settings, attr], &[])
+                .map_err(TransitionError::implementation)?
+        }
+    };
     let invalid = |error: anyhow::Error| TransitionError::implementation(format!("invalid result from transition function: {error}"));
     let mut results = Vec::new();
     for (key, values) in returned_dicts(returned).map_err(invalid)? {
-        let options = transitioned(transition, input, values)?;
+        let mut options = transitioned(transition, input, values)?;
+        if transition.analysis_test_settings.is_some() {
+            for_analysis_test(&mut options, input);
+        }
         results.push((key, options));
     }
     Ok(results)
+}
+
+/// Mark options an analysis test's transition made as those of targets an
+/// analysis test evaluates, as Bazel does, which names their output
+/// directory too.
+fn for_analysis_test(options: &mut BuildOptions, input: &TransitionInput<'_>) {
+    options.set("evaluating for analysis test", OptionValue::Bool(true)).expect("a native option");
+    options.baseline = input.options.baseline.or(Some(input.config));
 }
 
 /// The `settings` dict the implementation gets: each input's value.
@@ -772,6 +787,7 @@ mod tests {
                 definition,
                 exec: false,
                 location: None,
+                analysis_test_settings: None,
             };
             let input = TransitionInput {
                 config,

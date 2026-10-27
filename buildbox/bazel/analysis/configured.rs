@@ -153,12 +153,26 @@ impl Key for ConfiguredTargetKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<ConfiguredTarget, SkyError> {
         let configured = configure(ctx, *self).await;
+        let configured = configured.map_err(|error| unsupported_analysis_failure(*self, error));
         let is_aspect = !self.config.get().aspects.is_empty();
         if let (false, Ok(progress)) = (is_aspect, ctx.global::<Progress>()) {
             progress.target_configured();
         }
         configured
     }
+}
+
+/// A failure in a configuration with `--allow_analysis_failures`, which
+/// Bazel would give dependents as an `AnalysisFailureInfo`: bb doesn't
+/// support that, so it fails saying so.
+fn unsupported_analysis_failure(key: ConfiguredTargetKey, error: SkyError) -> SkyError {
+    if !key.config.get().options.bool("allow_analysis_failures") || error.origin().is_some() {
+        return error;
+    }
+    SkyError::new(format!(
+        "--allow_analysis_failures isn't supported by bb yet, so this failure can't be given to dependents as AnalysisFailureInfo:\n{}",
+        error.message()
+    ))
 }
 
 /// Analyze the target `key` names, in its configuration.
@@ -260,7 +274,6 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     }
     let class = bazel_loading::rule_class(ctx, &class_ref).await?;
     let is_test = class.test;
-    let is_executable = class.executable || class.test;
     let setup = match setup(ctx, key, rule, &class_ref, class).await? {
         Setup::Ready(setup) => setup,
         Setup::Incompatible(reason) => return incompatible(ctx, key, class_ref.kind, is_test, reason),
@@ -278,7 +291,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     let exec_platform = setup.toolchains.exec_platform.unwrap_or(key.config.get().host_platform);
     let input = rule_input(ctx, key, package, setup, deps).await?;
     let analyzed = evaluate_reporting(ctx, label, input, heap_name("target", key, fingerprint)).await?;
-    let executable = is_executable.then(|| executable(&analyzed)).flatten();
+    let executable = executable(&analyzed);
     let mut target = configured(ctx, key, class_ref.kind, is_test, analyzed, fingerprint);
     target.executable = executable;
     target.deps = edges;
@@ -287,11 +300,13 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     Ok(target)
 }
 
-/// The executable a rule's analysis made, with its runfiles tree; `None`
-/// if it gave a source file, which runs without one.
+/// The executable a rule's analysis gave its `DefaultInfo`, with its
+/// runfiles tree, as Bazel gives any rule that returns one; `None` if it
+/// gave a source file, which runs without one.
 fn executable(analyzed: &Analyzed) -> Option<Executable> {
     let value = analyzed.module.get(TARGET).ok()?;
     let target = crate::target_value::TargetValue::from_value(value.value())?;
+    target.default_info("executable")?;
     let files_to_run = crate::runfiles::FilesToRun::from_value(target.default_info("files_to_run")?)?;
     let file = crate::file_value::FileValue::artifact(files_to_run.executable).filter(|file| !file.is_source())?;
     let runfiles = crate::runfiles::Runfiles::from_value(files_to_run.runfiles)?;
@@ -369,6 +384,7 @@ pub(crate) async fn rule_input(ctx: &Ctx, key: ConfiguredTargetKey, package: &Pa
         Implementation::Starlark { module, .. } => bazel_loading::mappings(ctx, &module.repos).await?,
         Implementation::Builtin { .. } | Implementation::Native(_) => Default::default(),
     };
+    let helper = native_helper(ctx, key.label, &setup.class).await?;
     Ok(RuleInput {
         label: key.label,
         config,
@@ -387,7 +403,24 @@ pub(crate) async fn rule_input(ctx: &Ctx, key: ConfiguredTargetKey, package: &Pa
         target_cpu: platform.cpu(),
         aspect: None,
         toolchains: setup.toolchains,
+        helper,
     })
+}
+
+/// The Starlark function a native rule's implementation calls, if it
+/// calls one: rules_java's merge of `JavaPluginInfo`s, which
+/// `java_plugins_flag_alias` provides one of, as rules_java's provider.
+async fn native_helper(ctx: &Ctx, label: Label, class: &RuleClass) -> Result<Option<OwnedFrozenValue>, SkyError> {
+    if class.kind.as_str() != "java_plugins_flag_alias" {
+        return Ok(None);
+    }
+    let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
+    let context = bazel_label::LabelContext::new(label.package, &mapping.0);
+    let java_info = Label::parse("@rules_java//java/private:java_info.bzl", &context).map_err(|error| SkyError::new(format!("{label}: finding rules_java: {error}")))?;
+    let module = ctx.compute(&BzlLoadKey(java_info)).await?;
+    let merge = module.module.get_any_visibility("merge_plugin_info_without_outputs");
+    let merge = merge.map_err(|_| SkyError::new(format!("{java_info} has no merge_plugin_info_without_outputs")))?;
+    Ok(Some(merge.0))
 }
 
 /// Run an implementation, reporting what it printed, with its errors at
@@ -800,9 +833,12 @@ async fn implementation(ctx: &Ctx, class: &RuleClassRef) -> Result<Implementatio
             class.kind
         )));
     }
-    let module = ctx.compute(&BzlLoadKey(bzl)).await?;
+    let (module, global) = match bazel_loading::is_build_file(bzl) {
+        true => (ctx.compute(&bazel_loading::BuildModuleKey(bzl.package)).await?, bazel_starlark::testing::analysis_test_global(name.as_str())),
+        false => (ctx.compute(&BzlLoadKey(bzl)).await?, name.as_str().to_string()),
+    };
     let missing = || SkyError::new(format!("{bzl} doesn't export a rule named '{name}'"));
-    let rule = module.module.get_any_visibility(name.as_str()).map_err(|_| missing())?.0;
+    let rule = module.module.get_any_visibility(&global).map_err(|_| missing())?.0;
     let implementation = rule
         .clone()
         .try_map(|value| {

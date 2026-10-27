@@ -32,6 +32,7 @@ rust_library(
         "select.rs",
         "subrule.rs",
         "symbolic_macro.rs",
+        "testing.rs",
         "toolchain_type.rs",
         "transition.rs",
         "starlark.rs",
