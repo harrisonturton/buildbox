@@ -72,70 +72,81 @@ impl<'v, V: ValueLike<'v>> fmt::Display for DepsetGen<V> {
 }
 
 impl<'v, V: ValueLike<'v>> DepsetGen<V> {
-    /// Every element, once, in the depset's order.
+    /// Every element, once, in the depset's order, as Bazel lists them: a
+    /// depset's elements and the depsets it includes are walked in its
+    /// order, each included depset where it's first met, and the list of
+    /// a topological depset reversed. The walk keeps its own stack, so deep
+    /// depsets can't exhaust the thread's.
     pub fn to_list(&self) -> Vec<Value<'v>> {
         let mut seen = Seen::default();
         let mut out = Vec::new();
-        match self.order {
-            Order::Default | Order::Postorder => self.postorder(&mut seen, &mut out),
-            Order::Preorder => self.preorder(&mut seen, &mut out),
-            Order::Topological => {
-                self.reverse_postorder(&mut seen, &mut out);
-                out.reverse();
+        let mut stack = vec![steps(self).into_iter()];
+        while let Some(top) = stack.last_mut() {
+            match top.next() {
+                None => {
+                    stack.pop();
+                }
+                Some(Step::Element(value)) => seen.add(value, &mut out),
+                Some(Step::Child(value, child)) => {
+                    if seen.visited.insert(value.identity()) {
+                        stack.push(steps(child).into_iter());
+                    }
+                }
             }
+        }
+        if self.order == Order::Topological {
+            out.reverse();
         }
         out
     }
 
+    /// Whether the depset and those it includes have no elements.
     pub fn is_empty(&self) -> bool {
-        self.direct.is_empty()
-            && self
-                .transitive
-                .iter()
-                .all(|child| Depset::from_value(child.to_value()).is_none_or(|child| child.is_empty()))
-    }
-
-    /// The children not yet visited, marking them visited. A depset is
-    /// usually reachable along many paths, so visiting it once keeps
-    /// flattening linear in the size of the graph.
-    fn unvisited_children(&self, seen: &mut Seen<'v>) -> Vec<&'v Depset<'v>> {
-        let mut children = Vec::with_capacity(self.transitive.len());
-        for child in &self.transitive {
-            let child = child.to_value();
+        if !self.direct.is_empty() {
+            return false;
+        }
+        let mut visited: FxHashSet<starlark::values::ValueIdentity<'v>> = FxHashSet::default();
+        let mut pending: Vec<Value<'v>> = self.transitive.iter().map(|child| child.to_value()).collect();
+        while let Some(child) = pending.pop() {
             let Some(depset) = Depset::from_value(child) else {
                 continue;
             };
-            if seen.visited.insert(child.identity()) {
-                children.push(depset);
+            if !visited.insert(child.identity()) {
+                continue;
             }
+            if !depset.direct.is_empty() {
+                return false;
+            }
+            pending.extend(depset.transitive.iter().copied());
         }
-        children
+        true
     }
+}
 
-    fn postorder(&self, seen: &mut Seen<'v>, out: &mut Vec<Value<'v>>) {
-        for child in self.unvisited_children(seen) {
-            child.postorder(seen, out);
-        }
-        for value in &self.direct {
-            seen.add(value.to_value(), out);
-        }
-    }
+/// One step of walking a depset: an element, or a depset it includes.
+enum Step<'v> {
+    Element(Value<'v>),
+    Child(Value<'v>, &'v Depset<'v>),
+}
 
-    fn preorder(&self, seen: &mut Seen<'v>, out: &mut Vec<Value<'v>>) {
-        for value in &self.direct {
-            seen.add(value.to_value(), out);
-        }
-        for child in self.unvisited_children(seen) {
-            child.preorder(seen, out);
-        }
-    }
-
-    fn reverse_postorder(&self, seen: &mut Seen<'v>, out: &mut Vec<Value<'v>>) {
-        for value in self.direct.iter().rev() {
-            seen.add(value.to_value(), out);
-        }
-        for child in self.unvisited_children(seen).into_iter().rev() {
-            child.reverse_postorder(seen, out);
+/// The steps of walking a depset's own elements and the depsets it
+/// includes, in its order: postorder walks the depsets first, preorder
+/// the elements first, and topological, whose list is reversed at the
+/// end, the depsets first, each part reversed.
+fn steps<'v, V: ValueLike<'v>>(set: &DepsetGen<V>) -> Vec<Step<'v>> {
+    let direct = set.direct.iter().map(|value| Step::Element(value.to_value()));
+    let children = set.transitive.iter().filter_map(|child| {
+        let child = child.to_value();
+        Depset::from_value(child).map(|depset| Step::Child(child, depset))
+    });
+    match set.order {
+        Order::Default | Order::Postorder => children.chain(direct).collect(),
+        Order::Preorder => direct.chain(children).collect(),
+        Order::Topological => {
+            let mut steps: Vec<Step<'v>> = children.collect();
+            steps.reverse();
+            steps.extend(direct.rev());
+            steps
         }
     }
 }
@@ -220,5 +231,61 @@ pub(crate) fn depset_function(builder: &mut GlobalsBuilder) {
             }
         }
         Ok(Depset { direct, transitive, order })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use starlark::environment::{GlobalsBuilder, Module};
+    use starlark::eval::Evaluator;
+    use starlark::syntax::{AstModule, Dialect};
+
+    /// The elements of the depset `source` evaluates to, as a list's repr.
+    fn listed(source: &str) -> String {
+        let globals = GlobalsBuilder::standard().with(super::depset_function).build();
+        let ast = AstModule::parse("test.bzl", source.to_string(), &Dialect::Extended).unwrap();
+        Module::with_temp_heap(|module| {
+            let mut eval = Evaluator::new(&module);
+            let value = eval.eval_module(ast, &globals).unwrap();
+            value.to_repr()
+        })
+    }
+
+    const DIAMOND: &str = r#"
+def create(order):
+    a = depset(["a"], order = order)
+    b = depset(["b"], transitive = [a], order = order)
+    c = depset(["c"], transitive = [a], order = order)
+    return depset(["d"], transitive = [b, c], order = order)
+"#;
+
+    #[test]
+    fn diamonds_list_in_bazels_orders() {
+        assert_eq!(listed(&format!("{DIAMOND}\ncreate('postorder').to_list()")), r#"["a", "b", "c", "d"]"#);
+        assert_eq!(listed(&format!("{DIAMOND}\ncreate('preorder').to_list()")), r#"["d", "b", "a", "c"]"#);
+        assert_eq!(listed(&format!("{DIAMOND}\ncreate('topological').to_list()")), r#"["d", "b", "c", "a"]"#);
+    }
+
+    #[test]
+    fn an_included_depset_is_listed_where_it_is_first_met() {
+        let source = r#"
+inner = depset(["x"])
+outer = depset(["y"], transitive = [inner])
+depset(["z"], transitive = [outer, inner]).to_list()
+"#;
+        assert_eq!(listed(source), r#"["x", "y", "z"]"#);
+    }
+
+    #[test]
+    fn deep_depsets_list_without_recursion() {
+        let source = r#"
+def deep():
+    d = depset([0])
+    for i in range(1, 100000):
+        d = depset([i], transitive = [d])
+    return len(d.to_list())
+deep()
+"#;
+        assert_eq!(listed(source), "100000");
     }
 }
