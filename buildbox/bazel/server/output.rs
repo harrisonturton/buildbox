@@ -14,6 +14,10 @@ use tokio::sync::{Mutex, mpsc};
 /// How often the progress bar is checked for changes.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(200);
 
+/// The most output one response carries, well under gRPC's default 4 MiB
+/// message limit, so output of any size reaches the client.
+const OUTPUT_CHUNK: usize = 1 << 20;
+
 /// How often the progress bar is printed, at most, when it can't be
 /// redrawn in place.
 const PRINT_INTERVAL: Duration = Duration::from_secs(1);
@@ -216,7 +220,9 @@ impl Ui {
         let bar = self.bar(Some(Instant::now()));
         let cleared = self.screen.redraw(&[]);
         self.send_stderr(cleared).await;
-        self.send(run_response::Output::Stdout(bytes.to_vec())).await;
+        for chunk in bytes.chunks(OUTPUT_CHUNK) {
+            self.send(run_response::Output::Stdout(chunk.to_vec())).await;
+        }
         let drawn = self.screen.redraw(&bar);
         self.drawn = bar;
         self.send_stderr(drawn).await;
@@ -310,8 +316,8 @@ impl Ui {
     }
 
     async fn send_stderr(&self, text: String) {
-        if !text.is_empty() {
-            self.send(run_response::Output::Stderr(text.into_bytes())).await;
+        for chunk in text.as_bytes().chunks(OUTPUT_CHUNK) {
+            self.send(run_response::Output::Stderr(chunk.to_vec())).await;
         }
     }
 
