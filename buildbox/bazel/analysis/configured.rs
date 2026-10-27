@@ -1,7 +1,7 @@
 //! Configured targets: targets analyzed in a configuration.
 
 use bazel_starlark::print::Printed;
-use crate::action::{Action, StoredAction};
+use crate::action::{Action, RunfilesTree, StoredAction};
 use crate::paging::PagedValue;
 use crate::artifact::{self, Artifact};
 use crate::attrs::resolve_attrs;
@@ -61,7 +61,17 @@ pub struct ConfiguredTarget {
     pub aspects: Vec<ConfiguredTargetKey>,
     /// The platform its actions run on, for a rule.
     pub exec_platform: Option<Label>,
+    /// For an executable rule, its executable and runfiles tree.
+    pub executable: Option<Executable>,
     size: usize,
+}
+
+/// The executable an executable rule makes, and its runfiles tree, which
+/// Bazel lays out with actions of the rule's own.
+#[derive(Clone, Debug)]
+pub struct Executable {
+    pub file: Artifact,
+    pub runfiles: Arc<RunfilesTree>,
 }
 
 /// A configured target's direct dependency, as `cquery` follows it.
@@ -250,6 +260,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     }
     let class = bazel_loading::rule_class(ctx, &class_ref).await?;
     let is_test = class.test;
+    let is_executable = class.executable || class.test;
     let setup = match setup(ctx, key, rule, &class_ref, class).await? {
         Setup::Ready(setup) => setup,
         Setup::Incompatible(reason) => return incompatible(ctx, key, class_ref.kind, is_test, reason),
@@ -267,11 +278,25 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     let exec_platform = setup.toolchains.exec_platform.unwrap_or(key.config.get().host_platform);
     let input = rule_input(ctx, key, package, setup, deps).await?;
     let analyzed = evaluate_reporting(ctx, label, input, heap_name("target", key, fingerprint)).await?;
+    let executable = is_executable.then(|| executable(&analyzed)).flatten();
     let mut target = configured(ctx, key, class_ref.kind, is_test, analyzed, fingerprint);
+    target.executable = executable;
     target.deps = edges;
     target.exec_platform = Some(exec_platform);
     target.aspects = applications;
     Ok(target)
+}
+
+/// The executable a rule's analysis made, with its runfiles tree; `None`
+/// if it gave a source file, which runs without one.
+fn executable(analyzed: &Analyzed) -> Option<Executable> {
+    let value = analyzed.module.get(TARGET).ok()?;
+    let target = crate::target_value::TargetValue::from_value(value.value())?;
+    let files_to_run = crate::runfiles::FilesToRun::from_value(target.default_info("files_to_run")?)?;
+    let file = crate::file_value::FileValue::artifact(files_to_run.executable).filter(|file| !file.is_source())?;
+    let runfiles = crate::runfiles::Runfiles::from_value(files_to_run.runfiles)?;
+    let runfiles = crate::state::runfiles_tree(file, runfiles);
+    Some(Executable { file, runfiles })
 }
 
 /// What a rule's analysis needs before its dependencies are analyzed.
@@ -339,6 +364,7 @@ pub(crate) async fn rule_input(ctx: &Ctx, key: ConfiguredTargetKey, package: &Pa
     let config = key.config.get();
     let platform = ctx.compute(&PlatformKey(config.platform)).await?;
     let mapping = ctx.compute(&RepoMappingKey(key.label.repo())).await?;
+    let main_mapping = ctx.compute(&RepoMappingKey(bazel_label::RepoName::MAIN)).await?;
     let mappings = match &setup.implementation {
         Implementation::Starlark { module, .. } => bazel_loading::mappings(ctx, &module.repos).await?,
         Implementation::Builtin { .. } | Implementation::Native(_) => Default::default(),
@@ -355,6 +381,7 @@ pub(crate) async fn rule_input(ctx: &Ctx, key: ConfiguredTargetKey, package: &Pa
         build_file: package.build_file,
         implementation: setup.implementation,
         mapping: Arc::new(mapping.0.clone()),
+        main_mapping: Arc::new(main_mapping.0.clone()),
         mappings,
         target_constraints: platform.values(),
         target_cpu: platform.cpu(),
@@ -862,6 +889,7 @@ pub(crate) fn forwarded(key: ConfiguredTargetKey, target: &ConfiguredTarget) -> 
         }],
         exec_platform: target.exec_platform,
         aspects: Vec::new(),
+        executable: None,
         size: 64,
     })
 }
@@ -881,6 +909,7 @@ pub(crate) fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_t
         generating.extend(action.outputs.iter().map(|output| (output.exec_path, index as u32)));
     }
     generating.sort();
+    generating.dedup_by_key(|(path, _)| *path);
     let value = analyzed.module.get(TARGET).expect("analysis sets the target");
     let size = analyzed.module.frozen_heap().allocated_bytes() + analyzed.actions.len() * size_of::<StoredAction>();
     let actions = analyzed.actions.into_iter().map(|action| StoredAction::new(ctx, action)).collect();
@@ -897,6 +926,7 @@ pub(crate) fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_t
         deps: Vec::new(),
         exec_platform: None,
         aspects: Vec::new(),
+        executable: None,
         size,
     }
 }
@@ -948,8 +978,8 @@ fn file(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> 
 
 /// The target that writes the status files.
 fn workspace_status(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarget, SkyError> {
-    let fingerprint = Fingerprint::of(format!("workspace status {}", key.config.get().output_directory).as_bytes());
-    let actions = crate::workspace_status::actions(&key.config.get());
+    let fingerprint = Fingerprint::of(b"workspace status");
+    let actions = crate::workspace_status::actions();
     let mut target = empty_target(ctx, key, "workspace status", false, fingerprint)?;
     target.generating = actions
         .iter()

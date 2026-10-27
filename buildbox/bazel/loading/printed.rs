@@ -8,7 +8,8 @@ use bazel_packages::PackageError;
 use bazel_progress::{Event, Progress};
 use bazel_starlark::print::Printed;
 use intern::PathId;
-use skyframe::Ctx;
+use skycodec::{Decode, Encode};
+use skyframe::{Ctx, Key, SkyError, encoded_value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -32,6 +33,26 @@ pub async fn read_source(ctx: &Ctx, label: Label) -> Option<String> {
     let name = PathId::parse(label.name.as_str()).ok()?;
     let bytes = bazel_fs::read_file(ctx, RootedPath::new(root.0, label.package.path.join_path(name))).await.ok()??;
     String::from_utf8(bytes).ok()
+}
+
+/// A source file's text, if it exists and is UTF-8.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct SourceText(pub Option<String>);
+
+encoded_value!(SourceText);
+
+/// The text of the source file a label names, as [`read_source`] reads
+/// it, kept in the graph for those who read it more than once.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct SourceTextKey(pub Label);
+
+impl Key for SourceTextKey {
+    type Value = SourceText;
+    const KIND: &'static str = "SOURCE_TEXT";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<SourceText, SkyError> {
+        Ok(SourceText(read_source(ctx, self.0).await))
+    }
 }
 
 /// Where a source file is on disk, as messages name it, if it's known.

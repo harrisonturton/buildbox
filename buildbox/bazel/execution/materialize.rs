@@ -115,9 +115,19 @@ fn write_runfiles_blocking(layout: &RunfilesLayout) -> Result<(), SkyError> {
         lines.push_str(&format!("{path} {}\n", target.display()));
         link(target, &dir.join(path))?;
     }
+    if !entries.iter().any(|(path, _)| path.starts_with(&format!("{MAIN_DIR}/"))) {
+        let marker = dir.join(MAIN_DIR).join(".runfile");
+        lines.push_str(&format!("{MAIN_DIR}/.runfile \n"));
+        std::fs::create_dir_all(dir.join(MAIN_DIR)).map_err(|error| io_error("create", &dir, error))?;
+        write_replacing(&marker, "")?;
+    }
     write_replacing(&manifest, &lines)?;
     link(&manifest, &dir.join("MANIFEST"))
 }
+
+/// The main repository's directory in runfiles trees, which Bazel makes
+/// exist even when it has no files.
+const MAIN_DIR: &str = "_main";
 
 fn write_replacing(path: &Path, contents: &str) -> Result<(), SkyError> {
     let _ = std::fs::remove_file(path);

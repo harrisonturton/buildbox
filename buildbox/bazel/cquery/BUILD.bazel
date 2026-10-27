@@ -5,12 +5,15 @@ package(default_visibility = ["//visibility:private"])
 rust_library(
     name = "cquery",
     srcs = [
+        "action_inputs.rs",
+        "action_key.rs",
         "action_output.rs",
         "action_proto.rs",
         "configured_graph.rs",
         "cquery.rs",
         "node.rs",
         "output.rs",
+        "runfiles_actions.rs",
         "starlark_output.rs",
     ],
     crate_name = "bazel_cquery",
@@ -21,6 +24,7 @@ rust_library(
         "//buildbox/bazel/analysis",
         "//buildbox/bazel/config",
         "//buildbox/bazel/label",
+        "//buildbox/bazel/loading",
         "//buildbox/bazel/packages",
         "//buildbox/bazel/query",
         "//buildbox/bazel/starlark",
@@ -32,6 +36,7 @@ rust_library(
         "@crates//:data-encoding",
         "@crates//:regex",
         "@crates//:ring",
+        "@crates//:rustc-hash",
         "@crates//:starlark",
     ],
 )

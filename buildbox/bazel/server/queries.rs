@@ -266,7 +266,7 @@ async fn configured_query(context: &CommandContext<'_>, args: &[String], languag
     };
     let output = match language {
         Language::Cquery => cquery_output(&options).map(ConfiguredOutput::Cquery),
-        Language::Aquery => aquery_output(&options).map(ConfiguredOutput::Aquery),
+        Language::Aquery => aquery_output(&options, crate::commands::output_base(context).join("execroot/_main")).map(ConfiguredOutput::Aquery),
     };
     let (expression, output) = match query_expression(&options).and_then(|expression| Ok((expression, output?))) {
         Ok(found) => found,
@@ -379,7 +379,7 @@ pub(crate) fn aquery_spec() -> OptionSpec {
 }
 
 /// How `aquery` prints results, as the options say.
-fn aquery_output(options: &ParsedOptions) -> Result<AqueryOutput, String> {
+fn aquery_output(options: &ParsedOptions, exec_root: std::path::PathBuf) -> Result<AqueryOutput, String> {
     let name = options.get("output").unwrap_or("text");
     let Some(format) = AqueryFormat::parse(name) else {
         return Err(format!("Invalid output format '{name}'. Valid values are: {}", AqueryFormat::NAMES.join(", ")));
@@ -389,6 +389,7 @@ fn aquery_output(options: &ParsedOptions) -> Result<AqueryOutput, String> {
         include_commandline: options.flag("include_commandline", true),
         include_artifacts: options.flag("include_artifacts", true),
         include_file_write_contents: options.flag("include_file_write_contents", false),
+        exec_root,
     })
 }
 

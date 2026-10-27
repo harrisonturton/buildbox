@@ -16,6 +16,7 @@ use starlark::values::StarlarkPagable;
 use super::config::{CcToolchainConfig, Reader};
 use super::features::{ToolchainFeatures, Variables};
 use super::values::{FeatureConfigurationValue, VariablesValue};
+use crate::artifact::Artifact;
 use crate::file_value::FileValue;
 use crate::inputs::{InputSet, InputSets};
 use bazel_starlark::depset::Depset;
@@ -563,7 +564,7 @@ fn toolchain_compile_files<'v>(sets: &mut InputSets, cc_toolchain: Value<'v>, ac
 }
 
 /// The module map files a compilation reads: its own and its direct
-/// dependencies'.
+/// dependencies', the toolchain's among them.
 fn module_map_files<'v>(cc_compilation_context: Value<'v>, heap: Heap<'v>) -> anyhow::Result<InputSet> {
     let mut module_maps = Vec::new();
     if let Some(module_map) = field(cc_compilation_context, "_module_map", heap) {
@@ -572,12 +573,17 @@ fn module_map_files<'v>(cc_compilation_context: Value<'v>, heap: Heap<'v>) -> an
     if let Some(direct) = field(cc_compilation_context, "_direct_module_maps", heap).and_then(Depset::from_value) {
         module_maps.extend(direct.to_list());
     }
-    let mut files = Vec::with_capacity(module_maps.len());
-    for module_map in module_maps {
-        let file = field(module_map, "file", heap);
-        files.extend(file.and_then(FileValue::artifact));
-    }
+    let files = module_maps.into_iter().filter_map(|module_map| module_map_file(module_map, heap)).collect();
     Ok(InputSet::of(files))
+}
+
+/// A module map's file. rules_cc keeps some module maps as their files,
+/// and others as structs holding them.
+fn module_map_file<'v>(module_map: Value<'v>, heap: Heap<'v>) -> Option<Artifact> {
+    if let Some(file) = FileValue::artifact(module_map) {
+        return Some(file);
+    }
+    field(module_map, "file", heap).and_then(FileValue::artifact)
 }
 
 /// A toolchain configuration from rules_cc's `CcToolchainConfigInfo`, whose

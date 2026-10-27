@@ -39,6 +39,7 @@ rust_library(
         "platform.rs",
         "propagation.rs",
         "providers.rs",
+        "repo_mapping.rs",
         "rule_ctx.rs",
         "runfiles.rs",
         "settings.rs",

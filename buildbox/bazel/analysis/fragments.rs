@@ -293,9 +293,15 @@ fn fragment_methods(builder: &mut MethodsBuilder) {
         Ok(false)
     }
 
+    /// Whether `--strip` says to strip: always, or sometimes, which is in
+    /// fastbuild builds.
     fn should_strip_binaries<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         let fragment = this.downcast_ref::<Fragment>().ok_or_else(|| anyhow::anyhow!("expected a fragment"))?;
-        Ok(fragment.options.string("compilation_mode") == "fastbuild")
+        Ok(match fragment.options.string("strip") {
+            "always" => true,
+            "sometimes" => fragment.options.string("compilation_mode") == "fastbuild",
+            _ => false,
+        })
     }
 }
 

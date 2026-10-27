@@ -716,6 +716,7 @@ fn implicit_outputs(state: &RuleState, toolchain: &CcToolchain<'_>, configuratio
                 kind: ActionKind::Write {
                     content: String::new(),
                     executable: false,
+                    from_args: false,
                 },
             })?;
         }

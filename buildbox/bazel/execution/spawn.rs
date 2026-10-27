@@ -175,7 +175,7 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
     let request = SpawnRequest {
         inputs,
         arguments: spawn.arguments.clone(),
-        env: spawn.env.clone(),
+        env: sorted_env(&spawn.env),
         output_files,
         output_directories,
         cacheable: !spawn.execution_info.iter().any(|(key, _)| key == "no-cache"),
@@ -575,6 +575,13 @@ fn output_paths(action: &Action) -> (Vec<String>, Vec<String>) {
     files.sort();
     directories.sort();
     (files, directories)
+}
+
+/// An action's environment sorted by name, as commands are given it.
+fn sorted_env(env: &[(String, String)]) -> Vec<(String, String)> {
+    let mut sorted = env.to_vec();
+    sorted.sort();
+    sorted
 }
 
 fn command_proto(request: &SpawnRequest) -> reapi::Command {

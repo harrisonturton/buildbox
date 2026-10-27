@@ -6,7 +6,7 @@ use crate::node::ConfiguredNode;
 use async_trait::async_trait;
 use bazel_analysis::{ConfiguredAttrsKey, ConfiguredTarget, ConfiguredTargetKey};
 use bazel_config::ConfigId;
-use bazel_label::Label;
+use bazel_label::{Label, RepoName};
 use bazel_packages::{AttrValue, RuleClass, RuleClassRef};
 use bazel_query::{
     AQUERY_FUNCTIONS, Arg, CQUERY_FUNCTIONS, Context, DEFAULT_FUNCTIONS, Function, NodeSet, QueryEnvironment, QueryError, TargetRef, Universe, attr_string, expr_arg,
@@ -14,7 +14,7 @@ use bazel_query::{
 };
 use intern::Symbol;
 use skyframe::Compute;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Which dependencies a configured query follows.
@@ -146,6 +146,27 @@ impl<C: Compute> ConfiguredGraph<C> {
             }
         }
         deps
+    }
+
+    /// The repositories of a node and of everything it depends on,
+    /// transitively: those whose packages its analysis loaded.
+    pub async fn transitive_repos(&self, node: &ConfiguredNode) -> BTreeSet<RepoName> {
+        let mut repos = BTreeSet::new();
+        let mut visited: HashSet<ConfiguredNode> = HashSet::new();
+        let mut pending = vec![*node];
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            repos.insert(node.label.repo());
+            if node.config.is_none() {
+                continue;
+            }
+            for dep in self.all_deps(&node).await {
+                pending.push(ConfiguredNode { label: dep.label, config: dep.config });
+            }
+        }
+        repos
     }
 
     /// The applications of aspects to each target of the universe, by the

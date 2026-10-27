@@ -97,7 +97,7 @@ async fn run_internal(ctx: &Ctx, backend: &Arc<Backend>, key: ActionKey, action:
     let inputs = read.iter().filter_map(|(_, generated_by)| generated_by.as_ref().map(ActionKey::progress_id)).collect();
     let shown = progress(ctx).map(|progress| progress.action_started(key.progress_id(), inputs, description(action, key.owner)));
     let outputs = match (&action.kind, read) {
-        (ActionKind::Write { content, executable }, _) => write(backend, action, content.as_bytes(), *executable).await,
+        (ActionKind::Write { content, executable, .. }, _) => write(backend, action, content.as_bytes(), *executable).await,
         (
             ActionKind::Template {
                 substitutions,
@@ -107,6 +107,7 @@ async fn run_internal(ctx: &Ctx, backend: &Arc<Backend>, key: ActionKey, action:
             Some((template, _)),
         ) => expand_template(backend, action, template, substitutions, *executable).await,
         (ActionKind::Symlink { executable, .. }, Some((target, _))) => copy(backend, action, target, *executable).await,
+        (ActionKind::SymlinkTree { .. } | ActionKind::RunfilesTree, _) => Err(SkyError::new("bb lays out runfiles trees as it runs their executables")),
         _ => Err(SkyError::new("an internal action's input wasn't read")),
     }?;
     if let Some(shown) = shown {

@@ -25,8 +25,9 @@ pub struct Action {
 pub enum ActionKind {
     /// Run a command.
     Spawn(Spawn),
-    /// Write a file with fixed contents.
-    Write { content: String, executable: bool },
+    /// Write a file with fixed contents. Contents made from an `Args`
+    /// are a params file's, which Bazel's aquery doesn't show.
+    Write { content: String, executable: bool, from_args: bool },
     /// Write a file by substituting strings in a template.
     Template {
         template: Artifact,
@@ -35,13 +36,22 @@ pub enum ActionKind {
     },
     /// Make an output that is a copy of another file.
     Symlink { target: Artifact, executable: bool },
+    /// Lay out a runfiles tree from its manifest, as Bazel's `SymlinkTree`
+    /// actions do, in an environment of `env`. bb lays out runfiles trees
+    /// as it runs their executables, so only `aquery` shows these.
+    SymlinkTree { env: Vec<(String, String)> },
+    /// Stand for a runfiles tree's files, which actions running its
+    /// executable read, as Bazel's `RunfilesTree` actions do. Only
+    /// `aquery` shows these.
+    RunfilesTree,
 }
 
 /// A command to run.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub struct Spawn {
     pub arguments: Vec<String>,
-    /// Environment variables, sorted by name.
+    /// Environment variables, in the order Bazel gives them, which
+    /// `aquery` shows; commands are given them sorted.
     pub env: Vec<(String, String)>,
     /// Hints for how to run it, such as `no-sandbox` or `requires-network`,
     /// sorted by name.
@@ -49,6 +59,19 @@ pub struct Spawn {
     /// The arguments that name params files holding more arguments, which
     /// another action writes.
     pub param_files: Vec<ParamFile>,
+}
+
+/// An environment of `variables`, in order, as Bazel makes them: one set
+/// more than once keeps its first place and takes its last value.
+pub fn environment(variables: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+    for (name, value) in variables {
+        match env.iter_mut().find(|(existing, _)| *existing == name) {
+            Some(entry) => entry.1 = value,
+            None => env.push((name, value)),
+        }
+    }
+    env
 }
 
 /// An argument of a command that names a params file: which argument, the
@@ -72,18 +95,26 @@ pub struct RunfilesTree {
     pub entries: Vec<(PathId, Artifact)>,
 }
 
+/// The mnemonics of actions Bazel gives no progress message, which it
+/// describes by their output alone, even when they build tools.
+const UNREPORTED: &[&str] = &["SolibSymlink"];
+
 impl Action {
     /// What progress output and `aquery` call the action, as Bazel does:
     /// its progress message, or its kind's default for its first output,
     /// marked if it builds a tool.
     pub fn description(&self, owner: &crate::ConfiguredTargetKey) -> String {
         let output = self.outputs.first().map(|output| output.root_relative().to_string());
+        if self.progress_message.is_empty() && UNREPORTED.contains(&self.mnemonic.as_str()) {
+            return format!("{} {}", self.mnemonic, output.unwrap_or_default());
+        }
         let message = match (self.progress_message.is_empty(), output) {
             (false, _) => self.progress_message.clone(),
             (true, Some(output)) => match &self.kind {
-                ActionKind::Write { .. } => format!("Writing file {output}"),
+                ActionKind::Write { executable: true, .. } => format!("Writing script {output}"),
+                ActionKind::Write { executable: false, .. } => format!("Writing file {output}"),
                 ActionKind::Template { .. } => format!("Expanding template {output}"),
-                ActionKind::Symlink { .. } | ActionKind::Spawn(_) => format!("{} {output}", self.mnemonic),
+                ActionKind::Symlink { .. } | ActionKind::Spawn(_) | ActionKind::SymlinkTree { .. } | ActionKind::RunfilesTree => format!("{} {output}", self.mnemonic),
             },
             (true, None) => format!("{} {}", self.mnemonic, owner.label),
         };

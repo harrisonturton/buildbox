@@ -10,7 +10,7 @@ use crate::runfiles::{FilesToRun, Runfiles};
 use crate::state::{RuleState, runfiles_tree};
 use allocative::Allocative;
 use bazel_starlark::depset::Depset;
-use intern::Symbol;
+use intern::{PathId, Symbol};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
@@ -64,6 +64,8 @@ pub fn files(value: Option<Value<'_>>, what: &str) -> anyhow::Result<Vec<Artifac
 #[derive(Default)]
 struct Tools {
     inputs: Vec<Artifact>,
+    /// Depsets of tools, kept as sets, which many actions share.
+    sets: Vec<InputSet>,
     runfiles: Vec<Arc<RunfilesTree>>,
 }
 
@@ -72,9 +74,24 @@ impl Tools {
         if let Some(files_to_run) = FilesToRun::from_value(value) {
             return self.add_files_to_run(files_to_run);
         }
+        if Depset::from_value(value).is_some() {
+            return self.add_set(value, state);
+        }
         for artifact in files(Some(value), "tools")? {
             self.add_file(artifact, state);
         }
+        Ok(())
+    }
+
+    /// A depset of tools: with the runfiles of those that are
+    /// dependencies' executables.
+    fn add_set(&mut self, value: Value<'_>, state: &RuleState) -> anyhow::Result<()> {
+        let set = state.input_sets.borrow_mut().convert(value, "tools")?;
+        let tool_runfiles = state.tool_runfiles.borrow();
+        if !tool_runfiles.is_empty() {
+            set.for_each(|artifact| self.runfiles.extend(tool_runfiles.get(&artifact).cloned()));
+        }
+        self.sets.push(set);
         Ok(())
     }
 
@@ -134,7 +151,7 @@ fn arguments(
     let mut out = Vec::new();
     for item in items {
         let Some(args) = item.downcast_ref::<Args>() else {
-            out.push(args::stringify(item));
+            out.push(args::stringify_with(item, Some(&state.main_mapping)));
             continue;
         };
         let args = args.state();
@@ -171,11 +188,13 @@ fn write_param_file(state: &RuleState, outputs: &[Artifact], args: &args::ArgsSt
         kind: ActionKind::Write {
             content: args::param_file_contents(args),
             executable: false,
+            from_args: true,
         },
     })?;
     Ok(params)
 }
 
+/// The entries of a dict of strings, in its order.
 fn string_dict(value: Option<Value<'_>>, what: &str) -> anyhow::Result<Vec<(String, String)>> {
     let Some(value) = value.filter(|value| !value.is_none()) else {
         return Ok(Vec::new());
@@ -186,8 +205,12 @@ fn string_dict(value: Option<Value<'_>>, what: &str) -> anyhow::Result<Vec<(Stri
         let key = key.unpack_str().ok_or_else(|| anyhow::anyhow!("{what} keys must be strings"))?;
         entries.push((key.to_string(), args::stringify(value)));
     }
-    entries.sort();
     Ok(entries)
+}
+
+fn sorted(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
+    entries.sort();
+    entries
 }
 
 /// The text of a progress message, with `%{label}`, and `%{input}` and
@@ -235,14 +258,15 @@ impl<'v> SpawnArgs<'v> {
         let first = arguments.len();
         arguments.extend(self::arguments(self.arguments, state, &outputs, &mut direct, first, &mut param_files)?);
         direct.extend(tools.inputs);
-        let inputs = InputSet::new(direct, vec![declared]);
+        let inputs = InputSet::new(direct, std::iter::once(declared).chain(tools.sets).collect());
+        let mut seen = std::collections::HashSet::new();
+        tools.runfiles.retain(|tree| seen.insert(Arc::as_ptr(tree)));
 
-        let mut env = string_dict(self.env, "env")?;
-        if self.use_default_shell_env {
-            env.extend(state.config.options.action_env.iter().cloned());
-            env.sort();
-            env.dedup_by(|a, b| a.0 == b.0);
-        }
+        let fixed = string_dict(self.env, "env")?;
+        let env = match self.use_default_shell_env {
+            true => crate::action::environment(state.config.options.action_env.iter().cloned().chain(fixed)),
+            false => crate::action::environment(fixed),
+        };
         let action = Action {
             mnemonic: Symbol::intern(self.mnemonic.unwrap_or("Action")),
             progress_message: progress_message(self.progress_message, state, &inputs, &outputs),
@@ -252,7 +276,7 @@ impl<'v> SpawnArgs<'v> {
             kind: ActionKind::Spawn(Spawn {
                 arguments,
                 env,
-                execution_info: string_dict(self.execution_requirements, "execution_requirements")?,
+                execution_info: sorted(string_dict(self.execution_requirements, "execution_requirements")?),
                 param_files,
             }),
         };
@@ -267,20 +291,24 @@ fn transform_status_file<'v>(
     transform_func: Value<'v>,
     template: Value<'v>,
     output_file_name: &str,
-    status: &[(&str, &str)],
+    status: StatusFile,
     eval: &mut Evaluator<'v, '_, '_>,
 ) -> anyhow::Result<FileValue> {
     let heap = eval.heap();
-    let status = heap.alloc(starlark::values::dict::AllocDict(status.iter().copied()));
+    let (file, values, which) = match status {
+        StatusFile::Stable => (crate::workspace_status::info_file(), &crate::workspace_status::STABLE_STATUS, "stable"),
+        StatusFile::Volatile => (crate::workspace_status::version_file(), &crate::workspace_status::VOLATILE_STATUS, "volatile"),
+    };
+    let status = heap.alloc(starlark::values::dict::AllocDict(values.iter().copied()));
     let substitutions = eval.eval_function(transform_func, &[status], &[]).map_err(|error| anyhow::anyhow!("{error}"))?;
     let substitutions = string_dict(Some(substitutions), "the substitutions transform_func returns")?;
     let state = RuleState::get(eval)?;
     let template = FileValue::artifact(template).ok_or_else(|| anyhow::anyhow!("template must be a File"))?;
     let output = state.declare(output_file_name, false)?;
     state.register(Action {
-        mnemonic: Symbol::intern("TemplateExpand"),
-        progress_message: String::new(),
-        inputs: InputSet::default(),
+        mnemonic: Symbol::intern("TranslateBuildInfo"),
+        progress_message: format!("Translating {which} BuildInfo file"),
+        inputs: InputSet::of(vec![file]),
         runfiles: Vec::new(),
         outputs: vec![output],
         kind: ActionKind::Template {
@@ -292,18 +320,28 @@ fn transform_status_file<'v>(
     Ok(FileValue(output))
 }
 
-/// The path of an output declared relative to a sibling file's directory,
-/// or the rule's package.
+/// Which status file a translated build info file comes from.
+enum StatusFile {
+    Stable,
+    Volatile,
+}
+
+/// The path, relative to the rule's package, of an output declared in a
+/// sibling file's directory, or in the package. As in Bazel, the sibling
+/// may be a source file, and the output must be in the rule's package.
 fn sibling_name(state: &RuleState, filename: &str, sibling: Option<Value<'_>>) -> anyhow::Result<String> {
     let Some(sibling) = sibling.filter(|value| !value.is_none()) else {
         return Ok(filename.to_string());
     };
     let sibling = FileValue::artifact(sibling).ok_or_else(|| anyhow::anyhow!("sibling must be a File"))?;
-    let package = artifact::parse(&state.config.bin_dir()).join_path(artifact::package_dir(state.label.package));
-    let dir = sibling.exec_path.parent().and_then(|parent| parent.strip_prefix(package));
-    match dir {
-        Some(dir) if !dir.is_root() => Ok(format!("{dir}/{filename}")),
-        _ => Ok(filename.to_string()),
+    let package = artifact::package_dir(state.label.package);
+    let dir = sibling.output_dir_relative().parent().unwrap_or(PathId::ROOT);
+    let Some(relative) = dir.strip_prefix(package) else {
+        anyhow::bail!("the output artifact '{dir}/{filename}' is not under package directory '{package}' for target '{}'", state.label);
+    };
+    match relative.is_root() {
+        true => Ok(filename.to_string()),
+        false => Ok(format!("{relative}/{filename}")),
     }
 }
 
@@ -389,9 +427,10 @@ fn actions_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let state = RuleState::get(eval)?;
         let output = FileValue::artifact(output).ok_or_else(|| anyhow::anyhow!("write: output must be a File"))?;
+        let from_args = content.downcast_ref::<Args>().is_some();
         let content = match content.downcast_ref::<Args>() {
             Some(args) => args::param_file_contents(&args.state()),
-            None => args::stringify(content),
+            None => args::stringify_with(content, Some(&state.main_mapping)),
         };
         state.register(Action {
             mnemonic: Symbol::intern(mnemonic.unwrap_or("FileWrite")),
@@ -402,6 +441,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
             kind: ActionKind::Write {
                 content,
                 executable: is_executable,
+                from_args,
             },
         })?;
         Ok(NoneType)
@@ -455,7 +495,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         // bb copies the target's contents, so where its path is taken from
         // makes no difference.
-        let _ = (progress_message, use_exec_root_for_source);
+        let _ = use_exec_root_for_source;
         let state = RuleState::get(eval)?;
         let output = FileValue::artifact(output).ok_or_else(|| anyhow::anyhow!("symlink: output must be a File"))?;
         if target_path.is_some() {
@@ -464,9 +504,14 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         let target = target_file
             .and_then(FileValue::artifact)
             .ok_or_else(|| anyhow::anyhow!("symlink: target_file must be a File"))?;
+        let mnemonic = match is_executable {
+            true => "ExecutableSymlink",
+            false => "Symlink",
+        };
+        let message = progress_message.unwrap_or("Creating symlink %{output}");
         state.register(Action {
-            mnemonic: Symbol::intern("Symlink"),
-            progress_message: String::new(),
+            mnemonic: Symbol::intern(mnemonic),
+            progress_message: self::progress_message(Some(message), state, &InputSet::default(), &[output]),
             inputs: InputSet::default(),
             runfiles: Vec::new(),
             outputs: vec![output],
@@ -584,8 +629,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named)] output_file_name: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<FileValue> {
-        let status = [("BUILD_TIMESTAMP", "0"), ("BUILD_SCM_REVISION", "0"), ("BUILD_SCM_STATUS", "")];
-        transform_status_file(transform_func, template, output_file_name, &status, eval)
+        transform_status_file(transform_func, template, output_file_name, StatusFile::Volatile, eval)
     }
 
     /// `transform_info_file(*, transform_func, template, output_file_name)`:
@@ -597,8 +641,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named)] output_file_name: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<FileValue> {
-        let status = [("BUILD_EMBED_LABEL", ""), ("BUILD_HOST", "bb"), ("BUILD_USER", "bb")];
-        transform_status_file(transform_func, template, output_file_name, &status, eval)
+        transform_status_file(transform_func, template, output_file_name, StatusFile::Stable, eval)
     }
 
     /// `do_nothing(*, mnemonic, inputs = [])`.

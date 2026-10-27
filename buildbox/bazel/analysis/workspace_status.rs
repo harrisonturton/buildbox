@@ -7,40 +7,52 @@
 use crate::inputs::InputSet;
 use crate::action::{Action, ActionKind};
 use crate::artifact::Artifact;
-use bazel_config::BuildConfiguration;
 use bazel_label::Label;
 use intern::{PathId, Symbol};
 use std::sync::LazyLock;
 
-/// The target that owns the status files: one in each configuration.
+/// The target that owns the status files. As in Bazel, there's one of each
+/// file for the whole build, outside every configuration's directory, so
+/// the target is analyzed in [`bazel_config::no_config`].
 pub static OWNER: LazyLock<Label> = LazyLock::new(|| Label::parse_canonical("@@bazel_tools//tools:workspace_status").expect("a valid label"));
 
-const STABLE: &str = "stable-status.txt";
-const VOLATILE: &str = "volatile-status.txt";
+const STABLE: &str = "bazel-out/stable-status.txt";
+const VOLATILE: &str = "bazel-out/volatile-status.txt";
 
-/// The stable status, which Bazel reruns actions for when it changes.
-pub fn info_file(config: &BuildConfiguration) -> Artifact {
-    artifact(config, STABLE)
+/// The values of the stable status, which Bazel reruns actions for when
+/// they change.
+pub const STABLE_STATUS: [(&str, &str); 3] = [("BUILD_EMBED_LABEL", ""), ("BUILD_HOST", "bb"), ("BUILD_USER", "bb")];
+
+/// The values of the volatile status, such as the time, which don't rerun
+/// actions.
+pub const VOLATILE_STATUS: [(&str, &str); 3] = [("BUILD_TIMESTAMP", "0"), ("BUILD_SCM_REVISION", "0"), ("BUILD_SCM_STATUS", "")];
+
+/// The stable status file.
+pub fn info_file() -> Artifact {
+    artifact(STABLE)
 }
 
-/// The volatile status, such as the time, which doesn't rerun actions.
-pub fn version_file(config: &BuildConfiguration) -> Artifact {
-    artifact(config, VOLATILE)
+/// The volatile status file.
+pub fn version_file() -> Artifact {
+    artifact(VOLATILE)
 }
 
 /// The actions that write the status files.
-pub fn actions(config: &BuildConfiguration) -> Vec<Action> {
-    let stable = "BUILD_EMBED_LABEL \nBUILD_HOST bb\nBUILD_USER bb\n";
-    let volatile = "BUILD_TIMESTAMP 0\n";
-    vec![write(info_file(config), stable), write(version_file(config), volatile)]
+pub fn actions() -> Vec<Action> {
+    vec![write(info_file(), &STABLE_STATUS), write(version_file(), &VOLATILE_STATUS[..1])]
 }
 
-fn artifact(config: &BuildConfiguration, name: &str) -> Artifact {
-    let name = PathId::parse(name).expect("a valid file name");
-    Artifact::derived(*OWNER, config, name, false)
+fn artifact(path: &str) -> Artifact {
+    Artifact {
+        exec_path: PathId::parse(path).expect("a valid path"),
+        owner: *OWNER,
+        config: Some(bazel_config::no_config()),
+        is_directory: false,
+    }
 }
 
-fn write(output: Artifact, content: &str) -> Action {
+fn write(output: Artifact, status: &[(&str, &str)]) -> Action {
+    let content: String = status.iter().map(|(key, value)| format!("{key} {value}\n")).collect();
     Action {
         mnemonic: Symbol::intern("WorkspaceStatus"),
         progress_message: String::new(),
@@ -48,8 +60,9 @@ fn write(output: Artifact, content: &str) -> Action {
         runfiles: Vec::new(),
         outputs: vec![output],
         kind: ActionKind::Write {
-            content: content.to_string(),
+            content,
             executable: false,
+            from_args: false,
         },
     }
 }

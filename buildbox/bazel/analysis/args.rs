@@ -9,8 +9,10 @@ use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, ValueLike, starlark_value};
+use crate::state::RuleState;
+use bazel_label::RepoMappingTable;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// A command line. Values are converted to strings as they're added, with
 /// `map_each` functions called then.
@@ -72,11 +74,21 @@ impl<'v> StarlarkValue<'v> for Args {
 /// A value as a command-line argument: a file's path, a label's canonical
 /// form, or a string.
 pub fn stringify(value: Value<'_>) -> String {
+    stringify_with(value, None)
+}
+
+/// A value as a command-line argument: a file's path, a string, or a
+/// label as the main repository would write it, seeing the others as
+/// `main_mapping` says; without one, its canonical form.
+pub fn stringify_with(value: Value<'_>, main_mapping: Option<&RepoMappingTable>) -> String {
     if let Some(artifact) = FileValue::artifact(value) {
         return artifact.exec_path.to_string();
     }
     if let Some(label) = value.downcast_ref::<LabelValue>() {
-        return label.0.canonical_form();
+        return match main_mapping {
+            Some(mapping) => label.0.display_form(Some(mapping)),
+            None => label.0.canonical_form(),
+        };
     }
     match value.unpack_str() {
         Some(text) => text.to_string(),
@@ -168,10 +180,11 @@ struct Expansion<'v> {
 
 impl<'v> Expansion<'v> {
     fn expand(&self, items: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Vec<String>> {
+        let main_mapping = main_mapping(eval);
         let mut out = Vec::new();
         for item in values(items)? {
             let Some(map_each) = self.map_each else {
-                out.push(format(self.format_each, &stringify(item))?);
+                out.push(format(self.format_each, &stringify_with(item, main_mapping.as_deref()))?);
                 continue;
             };
             let mapped = match wants_directory_expander(map_each) {
@@ -190,7 +203,7 @@ impl<'v> Expansion<'v> {
                 None => vec![mapped],
             };
             for value in mapped {
-                out.push(format(self.format_each, &stringify(value))?);
+                out.push(format(self.format_each, &stringify_with(value, main_mapping.as_deref()))?);
             }
         }
         if self.uniquify {
@@ -203,11 +216,17 @@ impl<'v> Expansion<'v> {
 
 /// The name and values of `add_all` and `add_joined`, which take either
 /// `(values)` or `(name, values)`.
-fn name_and_values<'v>(first: Value<'v>, values: Option<Value<'v>>) -> (Option<String>, Value<'v>) {
+fn name_and_values<'v>(first: Value<'v>, values: Option<Value<'v>>, eval: &Evaluator<'v, '_, '_>) -> (Option<String>, Value<'v>) {
     match values {
-        Some(values) => (Some(stringify(first)), values),
+        Some(values) => (Some(stringify_with(first, main_mapping(eval).as_deref())), values),
         None => (None, first),
     }
+}
+
+/// How the main repository of the rule being analyzed sees the others,
+/// if a rule is being analyzed.
+fn main_mapping(eval: &Evaluator<'_, '_, '_>) -> Option<Arc<RepoMappingTable>> {
+    RuleState::get(eval).ok().map(|state| state.main_mapping.clone())
 }
 
 #[starlark_module]
@@ -218,17 +237,19 @@ fn args_methods(builder: &mut MethodsBuilder) {
         arg_name_or_value: Value<'v>,
         value: Option<Value<'v>>,
         #[starlark(require = named)] format: Option<&str>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
         let args = this.downcast_ref::<Args>().ok_or_else(|| anyhow::anyhow!("expected Args"))?;
+        let main_mapping = main_mapping(eval);
         let mut added = Vec::new();
         let value = match value {
             Some(value) => {
-                added.push(stringify(arg_name_or_value));
+                added.push(stringify_with(arg_name_or_value, main_mapping.as_deref()));
                 value
             }
             None => arg_name_or_value,
         };
-        added.push(self::format(format, &stringify(value))?);
+        added.push(self::format(format, &stringify_with(value, main_mapping.as_deref()))?);
         args.push(added);
         Ok(this)
     }
@@ -253,7 +274,7 @@ fn args_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<Value<'v>> {
         let _ = (expand_directories, allow_closure);
         let args = this.downcast_ref::<Args>().ok_or_else(|| anyhow::anyhow!("expected Args"))?;
-        let (name, items) = name_and_values(arg_name_or_values, values);
+        let (name, items) = name_and_values(arg_name_or_values, values, eval);
         let expansion = Expansion {
             map_each: map_each.filter(|value| !value.is_none()),
             format_each,
@@ -295,7 +316,7 @@ fn args_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<Value<'v>> {
         let _ = (expand_directories, allow_closure);
         let args = this.downcast_ref::<Args>().ok_or_else(|| anyhow::anyhow!("expected Args"))?;
-        let (name, items) = name_and_values(arg_name_or_values, values);
+        let (name, items) = name_and_values(arg_name_or_values, values, eval);
         let expansion = Expansion {
             map_each: map_each.filter(|value| !value.is_none()),
             format_each,

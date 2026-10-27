@@ -6,11 +6,14 @@
 //! `config()` or `aquery`'s action filters, and prints results in
 //! `cquery`'s formats, or as `aquery` prints the actions of the targets.
 
+mod action_inputs;
+mod action_key;
 mod action_output;
 mod action_proto;
 mod configured_graph;
 mod node;
 mod output;
+mod runfiles_actions;
 mod starlark_output;
 
 pub use action_output::{ActionFilters, AqueryFormat, AqueryOutput};

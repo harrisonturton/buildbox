@@ -22,9 +22,10 @@ impl FileValue {
 }
 
 impl fmt::Display for FileValue {
+    /// As Bazel prints files: by their paths relative to their roots.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = if self.0.is_source() { "source" } else { "generated" };
-        write!(f, "<{kind} file {}>", self.0.short_path())
+        write!(f, "<{kind} file {}>", self.0.root_relative())
     }
 }
 

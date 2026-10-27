@@ -6,13 +6,13 @@ use crate::digest::BlobDigest;
 use crate::spawn::{SpawnRequest, TreePath, execute, finish};
 use bazel_analysis::{Artifact, ConfiguredTargetKey, FileValue, Runfiles, runfiles_repo_name};
 use bazel_label::{Label, RepoName};
-use bazel_loading::{PackageKey, RepoMappingKey};
+use bazel_loading::PackageKey;
 use bazel_packages::{AttrValue, Target};
 use bazel_starlark::provider::ProviderInstance;
 use intern::Symbol;
 use skycodec::{Decode, Encode};
 use skyframe::{Compute, Ctx, Key, SkyError, encoded_value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -284,20 +284,7 @@ async fn blob_input(ctx: &Ctx, contents: &[u8]) -> Result<Input, SkyError> {
 /// The repository mapping manifest of a runfiles tree: how each repository
 /// with runfiles sees the others that have runfiles.
 pub async fn repo_mapping(compute: &impl Compute, runfiles: &[(String, Artifact)]) -> Result<String, SkyError> {
-    let repos: BTreeSet<RepoName> = runfiles.iter().map(|(_, artifact)| artifact.owner.repo()).chain([RepoName::MAIN]).collect();
-    let mut lines = Vec::new();
-    for repo in &repos {
-        let mapping = compute.compute(&RepoMappingKey(*repo)).await?;
-        for (apparent, target) in &mapping.0.entries {
-            if apparent.is_empty() || !repos.contains(target) {
-                continue;
-            }
-            lines.push(format!("{},{apparent},{}", repo.as_str(), runfiles_repo_name(*target)));
-        }
-    }
-    lines.sort();
-    lines.dedup();
-    Ok(lines.into_iter().map(|line| line + "\n").collect())
+    bazel_analysis::repo_mapping_manifest(compute, runfiles.iter().map(|(_, artifact)| *artifact), None).await
 }
 
 /// The environment a `RunEnvironmentInfo` provider gives.

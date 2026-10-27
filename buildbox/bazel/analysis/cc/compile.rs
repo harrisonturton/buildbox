@@ -7,7 +7,6 @@ use crate::artifact::Artifact;
 use crate::inputs::InputSet;
 use crate::state::RuleState;
 use intern::Symbol;
-use std::collections::BTreeMap;
 
 /// The compile action of each kind of source, by file extension, as Bazel's
 /// `CppFileTypes` tell them apart.
@@ -56,7 +55,7 @@ pub fn register(state: &RuleState, configuration: &FeatureConfiguration, variabl
         outputs: compile.outputs,
         kind: ActionKind::Spawn(Spawn {
             arguments,
-            env: action_env(state, configuration, &action, variables)?,
+            env: compile_env(state, configuration, &action, variables)?,
             execution_info,
             param_files: Vec::new(),
         }),
@@ -75,18 +74,30 @@ pub fn action_name(source: &Artifact) -> anyhow::Result<&'static str> {
 
 /// "Compiling <source>", after the prefix if there is one.
 fn progress_message(prefix: Option<&str>, source: &Artifact) -> String {
-    let path = source.exec_path.strip_prefix(source.root()).unwrap_or(source.exec_path);
+    let path = source.root_relative();
     match prefix.filter(|prefix| !prefix.is_empty()) {
         Some(prefix) => format!("{prefix}: Compiling {path}"),
         None => format!("Compiling {path}"),
     }
 }
 
-/// The environment of C++ actions: the default shell environment, and the
-/// toolchain's for `action`.
+/// The environment of C++ actions other than compiles: the default shell
+/// environment, the toolchain's for `action`, and `PWD`, which keeps the
+/// working directory out of debug information.
 pub fn action_env(state: &RuleState, configuration: &FeatureConfiguration, action: &str, variables: &Variables) -> anyhow::Result<Vec<(String, String)>> {
-    let mut env: BTreeMap<String, String> = state.config.options.action_env.iter().cloned().collect();
-    env.insert("PWD".to_string(), "/proc/self/cwd".to_string());
-    env.extend(configuration.environment(action, variables)?);
-    Ok(env.into_iter().collect())
+    let default = state.config.options.action_env.iter().cloned();
+    let toolchain = configuration.environment(action, variables)?;
+    Ok(crate::action::environment(default.chain(toolchain).chain([pwd()])))
+}
+
+/// The environment of C++ compiles: as [`action_env`]'s, but with `PWD`
+/// before the toolchain's, as Bazel orders them.
+fn compile_env(state: &RuleState, configuration: &FeatureConfiguration, action: &str, variables: &Variables) -> anyhow::Result<Vec<(String, String)>> {
+    let default = state.config.options.action_env.iter().cloned();
+    let toolchain = configuration.environment(action, variables)?;
+    Ok(crate::action::environment(default.chain([pwd()]).chain(toolchain)))
+}
+
+fn pwd() -> (String, String) {
+    ("PWD".to_string(), "/proc/self/cwd".to_string())
 }

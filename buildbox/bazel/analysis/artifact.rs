@@ -70,8 +70,18 @@ impl Artifact {
         }
     }
 
-    /// The path relative to its root, as progress messages show it.
+    /// The path relative to its root, as progress messages show it: for
+    /// another repository's source files, relative to that repository.
     pub fn root_relative(&self) -> PathId {
+        match self.config {
+            Some(_) => self.output_dir_relative(),
+            None => self.exec_path.strip_prefix(repo_dir(self.owner.package.repo)).unwrap_or(self.exec_path),
+        }
+    }
+
+    /// The path relative to `File.root`: the output directory for generated
+    /// files, and the execution root for source files.
+    pub fn output_dir_relative(&self) -> PathId {
         self.exec_path.strip_prefix(self.root()).unwrap_or(self.exec_path)
     }
 

@@ -101,6 +101,8 @@ pub struct RuleInput {
     pub build_file: Label,
     pub implementation: Implementation,
     pub mapping: Arc<RepoMappingTable>,
+    /// How the main repository sees the others.
+    pub main_mapping: Arc<RepoMappingTable>,
     pub mappings: HashMap<RepoName, Arc<RepoMappingTable>>,
     pub target_constraints: Vec<Label>,
     /// The target platform's CPU, as `$(TARGET_CPU)` names it.
@@ -244,7 +246,7 @@ pub fn rule_ctx<'v>(eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
 /// fails.
 pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed>) -> anyhow::Result<Vec<Action>> {
     let heap = module.heap();
-    let mut state = RuleState::new(input.label, input.class.kind, input.config.clone(), input.mapping.clone());
+    let mut state = RuleState::new(input.label, input.class.kind, input.config.clone(), input.mapping.clone(), input.main_mapping.clone());
     state.target_constraints = input.target_constraints.clone();
     state.set_make_variable("TARGET_CPU", &input.target_cpu);
     let prepared = Prepared {
@@ -426,8 +428,8 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     set("configuration", heap.alloc(crate::fragments::Configuration(options.clone())));
     set("features", heap.alloc(AllocList::EMPTY));
     set("disabled_features", heap.alloc(AllocList::EMPTY));
-    set("info_file", heap.alloc(FileValue(crate::workspace_status::info_file(&input.config))));
-    set("version_file", heap.alloc(FileValue(crate::workspace_status::version_file(&input.config))));
+    set("info_file", heap.alloc(FileValue(crate::workspace_status::info_file())));
+    set("version_file", heap.alloc(FileValue(crate::workspace_status::version_file())));
     set("toolchains", heap.alloc(ToolchainContext::new(&input.toolchains, definition_mapping(input), target_description(input), heap)));
     set("fragments", heap.alloc(crate::fragments::Fragments(options)));
     set("exec_groups", heap.alloc(exec_groups(input)));

@@ -114,7 +114,7 @@ pub fn hash_if_too_long(filename: &str) -> String {
 }
 
 fn root_relative(artifact: &Artifact) -> String {
-    artifact.exec_path.strip_prefix(artifact.root()).unwrap_or(artifact.exec_path).to_string()
+    artifact.root_relative().to_string()
 }
 
 #[cfg(test)]
