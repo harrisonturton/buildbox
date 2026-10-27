@@ -26,8 +26,39 @@ cc_library(
     strip_include_prefix = "linux_x86_64/include",
 )
 
+# Generated for arm64 macOS, with the zone allocator off so that, as on
+# Linux, jemalloc serves only Rust's allocations. macOS has no background
+# threads.
+cc_library(
+    name = "config_macos_aarch64",
+    hdrs = ["macos_aarch64/" + header for header in HEADERS],
+    strip_include_prefix = "macos_aarch64/include",
+)
+
+config_setting(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "macos_aarch64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
 alias(
     name = "config",
-    actual = ":config_linux_x86_64",
+    actual = select(
+        {
+            ":linux_x86_64": ":config_linux_x86_64",
+            ":macos_aarch64": ":config_macos_aarch64",
+        },
+        no_match_error = "jemalloc is configured only for x86_64 Linux and arm64 macOS",
+    ),
     visibility = ["@jemalloc//:__pkg__"],
 )
