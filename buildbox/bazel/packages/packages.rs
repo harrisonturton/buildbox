@@ -135,9 +135,9 @@ pub fn visibility_label(label: Label) -> Label {
     }
 }
 
-/// Rules used to resolve dependencies, which package defaults such as
-/// licenses don't apply to.
-const DEPENDENCY_RESOLUTION_RULES: [&str; 7] = ["config_setting", "constraint_setting", "constraint_value", "platform", "toolchain", "toolchain_type", "alias"];
+/// Rules without the attribute package defaults such as licenses apply
+/// to, as Bazel 9 defines them.
+const DEPENDENCY_RESOLUTION_RULES: [&str; 3] = ["constraint_setting", "constraint_value", "platform"];
 
 impl Package {
     /// The licenses `package(default_applicable_licenses = ...)` applies to
