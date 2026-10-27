@@ -55,11 +55,12 @@ pub async fn target_message<C: Compute>(universe: &Universe<C>, target: &TargetR
 
 async fn rule_message<C: Compute>(universe: &Universe<C>, target: &TargetRef, values: AttrValues<'_>, name: String, location: String) -> Result<Message, QueryError> {
     let Target::Rule(rule) = target.target() else {
-        unreachable!("rule_message is given rules");
+        return Err(QueryError::in_evaluation(format!("{} isn't a rule", target.label())));
     };
     let mapping = &universe.main_mapping;
     let package = target.package();
-    let class = universe.rule_class(package.rule_class(rule)).await?;
+    let class_ref = package.rule_class(rule);
+    let class = universe.rule_class(class_ref).await?;
     let mut message = Message::new();
     message.string(1, "name", name).string(2, "rule_class", class.kind.to_string()).string(3, "location", location);
     let mut attributes: Vec<(String, Message)> = Vec::with_capacity(class.attrs.len() + 4);
@@ -77,6 +78,7 @@ async fn rule_message<C: Compute>(universe: &Universe<C>, target: &TargetRef, va
         attributes.push((proto_name(schema), attribute_message(schema, value.as_ref(), explicit, mapping)));
     }
     attributes.extend(synthesized_attributes(universe, target, rule, mapping).await?);
+    attributes.extend(internal_attributes(&class, class_ref.definition.is_some()));
     attributes.sort_by(|a, b| a.0.cmp(&b.0));
     for (_, attribute) in attributes {
         message.repeated(4, "attribute", attribute);
@@ -117,6 +119,35 @@ async fn synthesized_attributes<C: Compute>(universe: &Universe<C>, target: &Tar
     ])
 }
 
+/// The rule classes Bazel defines without its base rule class's
+/// attributes, such as `:action_listener`.
+const WITHOUT_BASE_ATTRIBUTES: &[&str] = &["alias", "constraint_setting", "constraint_value", "label_flag", "label_setting", "platform", "toolchain_type"];
+
+/// The internal attributes Bazel gives a rule's class, which bb has no use
+/// for: whether a Starlark rule is executable, the extra action listeners
+/// most rules have, and `config_setting`'s flag aliases.
+fn internal_attributes(class: &bazel_packages::RuleClass, is_starlark: bool) -> Vec<(String, Message)> {
+    let mut attributes = Vec::new();
+    if is_starlark && (class.executable || class.test) {
+        let mut message = Message::new();
+        message.string(1, "name", "$is_executable").enumeration(2, "type", 14, "BOOLEAN");
+        message.int(3, "int_value", 1).string(5, "string_value", "true").bool(13, "explicitly_specified", false).bool(14, "boolean_value", true);
+        attributes.push(("$is_executable".to_string(), message));
+    }
+    let empty_label_list = |name: &str| {
+        let mut message = Message::new();
+        message.string(1, "name", name.to_string()).enumeration(2, "type", 6, "LABEL_LIST").bool(13, "explicitly_specified", false).bool(20, "nodep", false);
+        (name.to_string(), message)
+    };
+    if !WITHOUT_BASE_ATTRIBUTES.contains(&class.kind.as_str()) {
+        attributes.push(empty_label_list(":action_listener"));
+    }
+    if class.kind.as_str() == "config_setting" {
+        attributes.push(empty_label_list(":flag_alias_settings"));
+    }
+    attributes
+}
+
 /// A rule's `visibility`, which Bazel's protos give as the labels of its
 /// visibility, as strings.
 fn visibility_message(target: &TargetRef, explicit: bool, mapping: &RepoMappingTable) -> Message {
@@ -133,11 +164,15 @@ fn visibility_message(target: &TargetRef, explicit: bool, mapping: &RepoMappingT
 }
 
 /// An attribute's name as Bazel's protos give it: a Starlark rule's
-/// private attributes start with `$`.
+/// private attributes start with `$`, or `:` if the configuration chooses
+/// their default.
 fn proto_name(schema: &AttrSchema) -> String {
-    match schema.name.as_str().strip_prefix('_') {
-        Some(rest) => format!("${rest}"),
-        None => schema.name.to_string(),
+    let Some(rest) = schema.name.as_str().strip_prefix('_') else {
+        return schema.name.to_string();
+    };
+    match schema.default {
+        bazel_packages::AttrDefault::LateBound(_) => format!(":{rest}"),
+        _ => format!("${rest}"),
     }
 }
 

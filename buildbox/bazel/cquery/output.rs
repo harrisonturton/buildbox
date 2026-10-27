@@ -134,13 +134,15 @@ async fn label_kinds<C: Compute>(graph: &ConfiguredGraph<C>, nodes: &[Configured
 }
 
 /// Rules as they'd be written in a BUILD file, with their attributes as
-/// configured.
+/// configured. As in Bazel, a rule in several configurations is written
+/// once, as first configured.
 async fn build<C: Compute>(graph: &ConfiguredGraph<C>, nodes: &[ConfiguredNode]) -> Result<String, QueryError> {
     let paths = RepoPaths::new(&graph.packages);
     let mut out = String::new();
+    let mut written = std::collections::HashSet::new();
     for node in nodes {
         let target = graph.target_of(node).await?;
-        if !matches!(target.target(), Target::Rule(_)) {
+        if !matches!(target.target(), Target::Rule(_)) || !written.insert(node.label) {
             continue;
         }
         let attrs = graph.configured_attrs(node).await?;
@@ -212,7 +214,7 @@ async fn proto_output<C: Compute>(graph: &ConfiguredGraph<C>, nodes: &[Configure
         let mut configured = Message::new();
         configured.message(1, "target", target_message(&graph.packages, &target, values, &paths, false).await?);
         if let Some(config) = node.config {
-            let id = match configs.iter().position(|known| *known == config) {
+            let id = match configs.iter().position(|known| known.get().digest == config.get().digest) {
                 Some(index) => index + 1,
                 None => {
                     configs.push(config);

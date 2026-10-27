@@ -112,22 +112,30 @@ than a silently wrong analysis. Two gaps remain:
 (`buildbox/bazel/query`): `query` reads the package graph, and `cquery` and
 `aquery` the configured graph analysis builds (`buildbox/bazel/cquery`).
 Their outputs match Bazel 9.3.1's on the formats people and tools read,
-`proto`, `jsonproto` and `xml` included. Still missing:
+`proto`, `jsonproto` and `xml` included. On bb's own repository, every
+action `aquery` lists, and every field of it, matches Bazel's, the runfiles
+actions of executables included. Still missing:
 
 - **Configuration checksums** are bb's own hash of its options, not
   Bazel's, so `cquery` names configurations by different ids, and bb has
   no test-trimmed configurations: where Bazel analyzes non-test targets in
   a configuration without test options, bb uses the same one.
-- **aquery's action keys** are bb's hash of the action, not Bazel's.
+- **aquery's action keys** are bb's hash of the action, not Bazel's, and
+  the nested sets of inputs its protos list are bb's, so their ids
+  differ, though each action's inputs are Bazel's. Source manifests name
+  files in bb's execution root.
 - rules_rust names outputs by `hash(repr(label))`, and bb's `repr` of a
   `Label` is its canonical form where Bazel's is `Label("//pkg:name")`, so
   those names differ. Changing it needs starlark-rust to format labels
   with `str()` in `%s` and `print()`, as Bazel's Starlark does.
 - `cquery --output=transitions`, `--show_config_fragments`, and the
   Starlark output's `FileProvider` and `FilesToRunProvider`.
-- Proto outputs leave out the internal attributes bb doesn't model, such
-  as `:action_listener`, `transitive_configs` and
-  `$rule_implementation_hash`.
+- Proto outputs leave out `transitive_configs` and
+  `$rule_implementation_hash`, and give native rules every common
+  attribute, where Bazel gives some, such as `alias` and
+  `constraint_value`, fewer.
+- `cquery` analyzes `_license_kind` targets in an exec configuration,
+  where Bazel uses the one without options.
 - Error messages for invalid regular expressions are Rust's, not Java's.
 - Where Bazel's own order varies from run to run, as for graphs, ranks and
   `cquery`'s results, bb prints results in one of the orders Bazel may:

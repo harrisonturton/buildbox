@@ -133,9 +133,10 @@ impl BuildConfiguration {
             true => platform_descriptor(&options, platform, &cpu),
             false => cpu.clone(),
         };
-        let mnemonic = match is_exec {
-            true => format!("{descriptor}-{compilation_mode}-exec"),
-            false => format!("{descriptor}-{compilation_mode}"),
+        let mnemonic = match (is_exec, options.bool(NO_CONFIGURATION)) {
+            (_, true) => format!("{compilation_mode}-noconfig"),
+            (true, false) => format!("{descriptor}-{compilation_mode}-exec"),
+            (false, false) => format!("{descriptor}-{compilation_mode}"),
         };
         let in_mnemonic = if named { "platforms" } else { "cpu" };
         let output_directory = match options.baseline {
@@ -348,6 +349,10 @@ const TOOLCHAIN_EXEC_PLATFORM: &str = "toolchain execution platform";
 /// bb's own option for the aspects a key applies to its target.
 const APPLIED_ASPECTS: &str = "applied aspects";
 
+/// bb's own option marking the configuration without options, which
+/// Bazel names apart: see [`no_config`].
+const NO_CONFIGURATION: &str = "no configuration";
+
 /// An aspect applied to targets: the `.bzl` file that exports it, its
 /// name, and the values of its parameters, as Bazel writes them:
 /// `//pkg:defs.bzl%name[param="value"]`.
@@ -469,9 +474,14 @@ fn split_params(params: &str) -> Vec<&str> {
 }
 
 /// The configuration Bazel analyzes the platforms a rule resolves
-/// toolchains for in: no options but the defaults.
+/// toolchains for in: no options but the defaults. Its outputs go in
+/// `fastbuild-noconfig`, as Bazel's do.
 pub fn no_config() -> ConfigId {
-    static NO_CONFIG: LazyLock<ConfigId> = LazyLock::new(|| ConfigId::intern(&BuildOptions::default()));
+    static NO_CONFIG: LazyLock<ConfigId> = LazyLock::new(|| {
+        let mut options = BuildOptions::default();
+        options.set(NO_CONFIGURATION, OptionValue::Bool(true)).expect("a native option");
+        ConfigId::intern(&options)
+    });
     *NO_CONFIG
 }
 

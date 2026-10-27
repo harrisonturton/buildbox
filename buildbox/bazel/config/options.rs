@@ -338,6 +338,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         multiple("macos_cpus", CommaStrings),
         option("macos_minimum_os", String, Null),
         option("macos_sdk_version", String, Null),
+        option("no configuration", Bool, Text("false")),
         option("non_incremental_per_target_dexopts", CommaStrings, Text("--positions")),
         option("objc_use_dotd_pruning", Bool, Text("true")),
         option("one_version_enforcement_on_java_tests", Bool, Text("true")),
