@@ -160,6 +160,39 @@ impl DepGraph {
         None
     }
 
+    /// How a module's repository sees others, in the order Bazel lists
+    /// them: the repositories it imports from extensions and with
+    /// `use_repo_rule`, then the main repository for the root, then
+    /// itself, then its `bazel_dep`s.
+    pub fn ordered_module_mapping(&self, index: usize) -> Vec<(String, RepoName)> {
+        let module = &self.modules[index];
+        let mut entries: Vec<(String, RepoName)> = Vec::new();
+        let mut put = |name: &str, repo: RepoName| match entries.iter_mut().find(|(existing, _)| existing == name) {
+            Some(entry) => entry.1 = repo,
+            None => entries.push((name.to_string(), repo)),
+        };
+        for (usage_index, usage) in module.file.extension_usages.iter().enumerate() {
+            let user = (index as u32, usage_index as u32);
+            let Some(extension) = self.extensions.iter().find(|extension| extension.users.contains(&user)) else {
+                continue;
+            };
+            for import in &usage.imports {
+                put(&import.apparent, RepoName::new(&format!("{}+{}", extension.prefix, import.exported)));
+            }
+        }
+        for (call, repo) in module.file.repo_rules.iter().zip(repo_rule_repos(module)) {
+            put(&call.name, repo);
+        }
+        if module.repo.is_main() {
+            put("", RepoName::MAIN);
+        }
+        put(&module.self_name, module.repo);
+        for (apparent, repo) in &module.deps {
+            put(apparent, *repo);
+        }
+        entries
+    }
+
     /// How a module's repository sees others.
     pub fn module_mapping(&self, index: usize) -> RepoMappingTable {
         let module = &self.modules[index];
@@ -187,7 +220,7 @@ impl DepGraph {
 /// The repositories of a module's `use_repo_rule` calls, in order, named as
 /// Bazel names them: `<module>+<rule>+<name>`, the rule's name numbered
 /// from 2 when the module uses rules of that name from several files.
-fn repo_rule_repos(module: &ResolvedModule) -> Vec<RepoName> {
+pub fn repo_rule_repos(module: &ResolvedModule) -> Vec<RepoName> {
     let mut rules: Vec<(&str, &str)> = Vec::new();
     let mut repos = Vec::with_capacity(module.file.repo_rules.len());
     for call in &module.file.repo_rules {
@@ -212,7 +245,6 @@ fn base_entries(module: &ResolvedModule) -> Vec<(Symbol, RepoName)> {
         (Symbol::intern(&module.self_name), module.repo),
         (Symbol::intern(""), RepoName::MAIN),
         (Symbol::intern("bazel_tools"), RepoName::new("bazel_tools")),
-        (Symbol::intern("local_config_platform"), RepoName::new("local_config_platform")),
     ];
     if module.repo.is_main() {
         entries.push((Symbol::intern(&module.name), RepoName::MAIN));

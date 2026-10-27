@@ -40,6 +40,11 @@ const COMMANDS: &[CommandHelp] = &[
         page: include_str!("help/dump.txt"),
     },
     CommandHelp {
+        name: "fetch",
+        summary: "Fetches external repositories that are prerequisites to the targets.",
+        page: include_str!("help/fetch.txt"),
+    },
+    CommandHelp {
         name: "help",
         summary: "Prints help for commands, or the index.",
         page: include_str!("help/help.txt"),
@@ -53,6 +58,11 @@ const COMMANDS: &[CommandHelp] = &[
         name: "license",
         summary: "Prints the license of this software.",
         page: include_str!("help/license.txt"),
+    },
+    CommandHelp {
+        name: "mod",
+        summary: "Queries the Bzlmod external dependency graph",
+        page: include_str!("help/mod.txt"),
     },
     CommandHelp {
         name: "query",

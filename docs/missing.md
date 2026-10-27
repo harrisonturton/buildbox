@@ -201,7 +201,8 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
   implement, such as `build_file` and `sparse_checkout_patterns`. A
   `git_override` of a branch or tag is fetched once and kept, where Bazel
   would fetch it again.
-- **Commands:** there's no `mod`, `fetch`, `vendor` or `sync`.
+- **Commands:** `fetch` works, but of `mod`'s subcommands only
+  `dump_repo_mapping` does, and there's no `vendor` or `sync`.
 - **Authentication:** downloads send the credentials of the `.netrc`
   file `$NETRC` or `$HOME` points to, and `repository_ctx.download` takes
   `auth` and `headers`, but there are no credential helpers

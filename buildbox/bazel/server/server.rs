@@ -10,6 +10,8 @@ mod build;
 mod build_id;
 mod command;
 mod commands;
+mod fetch;
+mod modcmd;
 mod help;
 mod memory;
 mod output;

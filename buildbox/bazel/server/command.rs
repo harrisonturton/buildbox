@@ -258,6 +258,8 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         "build" => crate::build::build(&context, args, out).await,
         "test" => crate::test::test(&context, args, out).await,
         "run" => crate::run::run(&context, args, out).await,
+        "fetch" => crate::fetch::fetch(&context, args, out).await,
+        "mod" => crate::modcmd::mod_command(&context, args, out).await,
         other => unsupported(other, out).await,
     }
 }
@@ -268,9 +270,7 @@ const UNSUPPORTED_COMMANDS: &[&str] = &[
     "canonicalize-flags",
     "config",
     "coverage",
-    "fetch",
     "mobile-install",
-    "mod",
     "print_action",
     "sync",
     "vendor",

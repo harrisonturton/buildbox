@@ -1,0 +1,9 @@
+Usage: bb fetch [<option> ...]
+
+Fetches external repositories. With no arguments, or with '--all',
+fetches every repository the module graph defines.
+
+  - --all: Fetches all external dependencies.
+  - --repo={repo}: Only fetches the specified repository, which can be
+    either {@apparent_repo_name} or {@@canonical_repo_name}.
+  - <targets>: Fetches dependencies only for given targets.

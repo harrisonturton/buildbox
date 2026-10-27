@@ -1,0 +1,7 @@
+Usage: bb mod <subcommand> [<options>] [<arg> ...]
+
+Inspects the module graph. bb supports this subcommand:
+
+  - dump_repo_mapping <canonical_repo_name>...: Prints the mappings of
+    the given repositories, as one line of JSON each. The main
+    repository's canonical name is ''.
