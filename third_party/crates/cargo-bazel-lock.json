@@ -1,5 +1,5 @@
 {
-  "checksum": "a7aec94566c2e3ca5174f73bee2ee78332c79eeb405c6ab2b1d5ba5767a4cea1",
+  "checksum": "19bb1b17670c5cf55906ef6a2f8cccc247a21f3961dca9cc040074fbcb729db3",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -11879,7 +11879,8 @@
             "@@//third_party/starlark:patches/starlark/0014-shrink-retained-bytecode-side-tables.patch",
             "@@//third_party/starlark:patches/starlark/0015-Record-statement-locations-only-when-something-reads.patch",
             "@@//third_party/starlark:patches/starlark/0016-Free-the-serializer-s-map-of-heaps-addresses-when-fo.patch",
-            "@@//third_party/starlark:patches/starlark/0017-Return-an-error-not-a-panic-for-a-value-of-an-unknow.patch"
+            "@@//third_party/starlark:patches/starlark/0017-Return-an-error-not-a-panic-for-a-value-of-an-unknow.patch",
+            "@@//third_party/starlark:patches/starlark/0018-Format-s-and-.format-x-with-str-as-the-spec-says.patch"
           ],
           "sha256": "9062e866918dc4c9701c98ac99f7f4fa9e4b3b4edce306e147393bc75458c4fc",
           "url": "https://static.crates.io/crates/starlark/0.14.2/download"

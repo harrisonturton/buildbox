@@ -25,6 +25,7 @@ crate.annotation(
         "//third_party/starlark:patches/starlark/0015-Record-statement-locations-only-when-something-reads.patch",
         "//third_party/starlark:patches/starlark/0016-Free-the-serializer-s-map-of-heaps-addresses-when-fo.patch",
         "//third_party/starlark:patches/starlark/0017-Return-an-error-not-a-panic-for-a-value-of-an-unknow.patch",
+        "//third_party/starlark:patches/starlark/0018-Format-s-and-.format-x-with-str-as-the-spec-says.patch",
     ],
 )
 

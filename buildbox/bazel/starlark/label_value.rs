@@ -14,8 +14,9 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
 
-/// A label, as a Starlark value. Converts to its canonical form,
-/// `@@repo//package:name`, with `str()`.
+/// A label, as a Starlark value. As in Bazel, `str()` gives its
+/// unambiguous canonical form, `@@repo//package:name` or `@@//package:name`,
+/// and `repr()` its canonical form in a call, `Label("//package:name")`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct LabelValue(#[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")] #[allocative(skip)] pub Label);
 
@@ -34,11 +35,15 @@ impl<'v> StarlarkValue<'v> for LabelValue {
         Some(METHODS.methods())
     }
 
-    /// The canonical form, as `str()` gives. Bazel's `repr()` wraps it in
-    /// `Label(...)`, but starlark's `"{}".format(x)` and `"%s" % x` use
-    /// `repr()` for values that aren't strings, and those must give the
-    /// canonical form as Bazel's do.
+    /// `Label("//package:name")`, or `Label("@@repo//package:name")` for
+    /// another repository's.
     fn collect_repr(&self, collector: &mut String) {
+        collector.push_str("Label(");
+        collector.push_str(&starlark::values::string::StarlarkStr::repr(&self.0.to_string()));
+        collector.push(')');
+    }
+
+    fn collect_str(&self, collector: &mut String) {
         collector.push_str(&self.0.canonical_form());
     }
 
@@ -123,5 +128,36 @@ pub(crate) fn label_constructor(builder: &mut GlobalsBuilder) {
         };
         let context = EvalContext::get(eval)?;
         Ok(LabelValue(context.parse_label_in_caller(text, eval)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use starlark::environment::{Globals, Module};
+    use starlark::syntax::{AstModule, Dialect};
+
+    /// What `expr` gives with `main` and `other` labels of the main
+    /// repository and another.
+    fn formatted(expr: &str) -> String {
+        Module::with_temp_heap(|module| {
+            module.set("main", module.heap().alloc(LabelValue(Label::parse_canonical("@@//pkg:x").unwrap())));
+            module.set("other", module.heap().alloc(LabelValue(Label::parse_canonical("@@rules_rust+//pkg:x").unwrap())));
+            let ast = AstModule::parse("test.bzl", expr.to_string(), &Dialect::Extended).unwrap();
+            let mut eval = Evaluator::new(&module);
+            eval.eval_module(ast, &Globals::standard()).unwrap().unpack_str().unwrap().to_string()
+        })
+    }
+
+    #[test]
+    fn labels_print_as_bazel_prints_them() {
+        assert_eq!(formatted("repr(main)"), r#"Label("//pkg:x")"#);
+        assert_eq!(formatted("repr(other)"), r#"Label("@@rules_rust+//pkg:x")"#);
+        assert_eq!(formatted("str(main)"), "@@//pkg:x");
+        assert_eq!(formatted("'%s' % main"), "@@//pkg:x");
+        assert_eq!(formatted("'%s %s' % (main, other)"), "@@//pkg:x @@rules_rust+//pkg:x");
+        assert_eq!(formatted("'<{}>'.format(main)"), "<@@//pkg:x>");
+        assert_eq!(formatted("'%r' % main"), r#"Label("//pkg:x")"#);
+        assert_eq!(formatted("str([main])"), r#"[Label("//pkg:x")]"#);
     }
 }

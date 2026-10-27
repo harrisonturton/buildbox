@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harrison Turton <harrisonturton@gmail.com>
+Date: Tue, 27 Oct 2026 01:54:39 -0400
+Subject: [PATCH] Format %s and '{}'.format(x) with str(), as the spec says
+
+The fast paths for a single %s and a single {} formatted values that
+aren't strings with repr(), where the general paths and the Starlark
+spec use str(). Values whose str() isn't their repr(), such as Bazel's
+labels, came out differently depending on how many arguments a format
+had.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/values/types/string/dot_format.rs    | 2 +-
+ src/values/types/string/interpolation.rs | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/values/types/string/dot_format.rs b/src/values/types/string/dot_format.rs
+index 09a46f7d..ce977308 100644
+--- a/src/values/types/string/dot_format.rs
++++ b/src/values/types/string/dot_format.rs
+@@ -71,7 +71,7 @@ pub(crate) fn format_one<'v>(
+         None => {
+             let mut result = String::with_capacity(before.len() + after.len() + 10);
+             result.push_str(before);
+-            arg.collect_repr(&mut result);
++            arg.collect_str(&mut result);
+             result.push_str(after);
+             heap.alloc_str(&result)
+         }
+diff --git a/src/values/types/string/interpolation.rs b/src/values/types/string/interpolation.rs
+index 186e6a30..b0f036b1 100644
+--- a/src/values/types/string/interpolation.rs
++++ b/src/values/types/string/interpolation.rs
+@@ -220,7 +220,7 @@ pub(crate) fn percent(format: &str, value: Value) -> crate::Result<String> {
+             Some(PercentSFormat::Str) => {
+                 let arg = next_value()?;
+                 match arg.unpack_str() {
+-                    None => arg.collect_repr(&mut res),
++                    None => arg.collect_str(&mut res),
+                     Some(s) => res.push_str(s),
+                 }
+             }

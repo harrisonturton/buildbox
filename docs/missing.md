@@ -124,10 +124,6 @@ actions of executables included. Still missing:
   the nested sets of inputs its protos list are bb's, so their ids
   differ, though each action's inputs are Bazel's. Source manifests name
   files in bb's execution root.
-- rules_rust names outputs by `hash(repr(label))`, and bb's `repr` of a
-  `Label` is its canonical form where Bazel's is `Label("//pkg:name")`, so
-  those names differ. Changing it needs starlark-rust to format labels
-  with `str()` in `%s` and `print()`, as Bazel's Starlark does.
 - `cquery --output=transitions`, `--show_config_fragments`, and the
   Starlark output's `FileProvider` and `FilesToRunProvider`.
 - Proto outputs leave out `transitive_configs` and

@@ -1,5 +1,6 @@
 //! `print()`: messages for the user, kept with where they were printed so
-//! that commands show them as Bazel's `DEBUG:` lines.
+//! that commands show them as Bazel's `DEBUG:` lines; and `fail()`, whose
+//! message shows values as `print()` does.
 
 use crate::context::EvalContext;
 use crate::label_value::LabelValue;
@@ -10,6 +11,7 @@ use starlark::starlark_module;
 use starlark::values::{Value, ValueLike};
 use starlark::values::tuple::UnpackTuple;
 use starlark::values::none::NoneType;
+use starlark::values::none::NoneOr;
 use std::path::Path;
 
 /// A message `print()` printed, at the `(` of its call.
@@ -50,6 +52,11 @@ fn debug_print(value: Value<'_>, main_mapping: Option<&RepoMappingTable>) -> Str
     }
 }
 
+/// How the main repository sees the others, for printing labels.
+fn main_mapping<'a>(context: &'a EvalContext) -> Option<&'a RepoMappingTable> {
+    context.mappings.get(&RepoName::MAIN).map(|mapping| &**mapping)
+}
+
 #[starlark_module]
 pub(crate) fn print_function(builder: &mut GlobalsBuilder) {
     /// `print(*args, sep = " ")`: show the arguments to the user, as
@@ -61,8 +68,7 @@ pub(crate) fn print_function(builder: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let context = EvalContext::get(eval)?;
-        let main_mapping = context.mappings.get(&RepoName::MAIN).map(|mapping| &**mapping);
-        let text = args.items.iter().map(|arg| debug_print(*arg, main_mapping)).collect::<Vec<_>>().join(sep);
+        let text = args.items.iter().map(|arg| debug_print(*arg, main_mapping(context))).collect::<Vec<_>>().join(sep);
         let Some(span) = eval.call_stack_top_location() else {
             anyhow::bail!("print() was called from outside Starlark code");
         };
@@ -74,5 +80,31 @@ pub(crate) fn print_function(builder: &mut GlobalsBuilder) {
             text,
         });
         Ok(NoneType)
+    }
+}
+
+#[starlark_module]
+pub(crate) fn fail_function(builder: &mut GlobalsBuilder) {
+    /// `fail(*args, msg = None, attr = None, sep = " ")`: stop with an
+    /// error whose message shows the arguments as `print()` does, after
+    /// `attribute ATTR: ` if `attr` is given.
+    fn fail<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(require = named, default = NoneOr::None)] msg: NoneOr<Value<'v>>,
+        #[starlark(require = named, default = NoneOr::None)] attr: NoneOr<&str>,
+        #[starlark(require = named, default = " ")] sep: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<NoneType> {
+        let main_mapping = EvalContext::get(eval).ok().and_then(main_mapping);
+        let parts: Vec<String> = msg.into_option().into_iter().chain(args.items).map(|value| debug_print(value, main_mapping)).collect();
+        let mut message = String::new();
+        if let NoneOr::Other(attr) = attr {
+            message.push_str(&format!(" attribute {attr}:"));
+        }
+        if !parts.is_empty() {
+            message.push(' ');
+            message.push_str(&parts.join(sep));
+        }
+        Err(starlark::Error::new_kind(starlark::ErrorKind::Fail(anyhow::Error::msg(message))))
     }
 }

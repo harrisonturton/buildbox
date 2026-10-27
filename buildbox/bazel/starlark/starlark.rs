@@ -69,6 +69,7 @@ fn standard() -> GlobalsBuilder {
     ]);
     json_module::register(&mut builder);
     print::print_function(&mut builder);
+    print::fail_function(&mut builder);
     hash::hash_function(&mut builder);
     builder
 }
