@@ -151,10 +151,13 @@ actions of executables included. Still missing:
 ## 6. The test runner
 
 The `shard_count` attribute has no effect: nothing sets
-`TEST_TOTAL_SHARDS`. `--runs_per_test`, `--flaky_test_attempts`,
-`--test_filter`, `--test_arg`, `--test_env`, `--test_timeout`,
-`--test_tag_filters`, `--build_tests_only` and `--cache_test_results`
-aren't implemented (section 11). There's
+`TEST_TOTAL_SHARDS`. `--test_filter`, `--test_arg`, `--test_env`,
+`--test_timeout`, `--test_tag_filters`, `--build_tag_filters`,
+`--build_tests_only` and `--cache_test_results` work as in Bazel, but
+`--runs_per_test`, `--flaky_test_attempts`, `--test_sharding_strategy`,
+`--test_size_filters`, `--test_timeout_filters` and `--test_lang_filters`
+aren't implemented (section 11). bb's action cache outlives `clean`, so
+tests that passed before it are still cached after it. There's
 no `coverage` command, no `coverage_common`, and no LCOV collection or
 merging.
 
@@ -226,9 +229,9 @@ doesn't are:
   `--remote_executor` and the other `--remote_*` options (bb keeps its own
   action cache, shared by every workspace);
 - `--announce_rc`, `--explain`, `--profile` and the Build Event Protocol;
-- most test options (section 6), `--run_under` and `--script_path`;
-- `--build_tag_filters`, `--infer_universe_scope`, and query output
-  options such as `--proto:default_values`.
+- some test options (section 6), `--run_under` and `--script_path`;
+- `--infer_universe_scope`, and query output options such as
+  `--proto:default_values`.
 
 Native options that only change how Bazel runs, such as
 `--local_resources`, and the locations of the repository caches, since
@@ -241,7 +244,8 @@ errors unless left at their defaults
 ## Suggested order
 
 1. Execution platforms and exec groups (section 3).
-2. Test options (section 6) and execution requirements (section 3).
+2. Execution requirements (section 3), and the test options left
+   (section 6).
 
 ## Not yet audited
 

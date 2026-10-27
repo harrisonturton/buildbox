@@ -50,8 +50,12 @@ pub struct TestResult {
     pub cached: bool,
     /// The epoch of the command that ran it.
     pub epoch: u64,
-    /// Its timeout, in seconds, as its size or `timeout` attribute gives it.
+    /// The default timeout, in seconds, of the category its size or
+    /// `timeout` attribute puts it in, which says whether it's sized well.
     pub timeout_seconds: u64,
+    /// Whether the result may be reused by later commands, as it can unless
+    /// the test is tagged `external` or `--cache_test_results` is off.
+    pub reusable: bool,
 }
 
 impl TestResult {
@@ -76,14 +80,34 @@ impl TestResult {
 
 encoded_value!(TestResult);
 
-/// Runs a test target.
+/// Runs a test target, with the command's [`TestSettings`].
 ///
 /// Results depend on more than the graph sees, such as the time a test
 /// takes, so the key is external: a failed test's result is invalidated so
 /// that it runs again, and passing results are reused from the action
 /// cache rather than from other workspaces' graphs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
-pub struct TestKey(pub ConfiguredTargetKey);
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
+pub struct TestKey {
+    pub target: ConfiguredTargetKey,
+    pub settings: TestSettings,
+}
+
+/// How a command runs tests, as its test options say.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
+pub struct TestSettings {
+    /// `--test_filter`, which the test gets as `TESTBRIDGE_TEST_ONLY`.
+    pub filter: Option<String>,
+    /// `--test_arg`s, which follow the rule's `args`.
+    pub args: Vec<String>,
+    /// `--test_env`'s variables, with inherited ones' values.
+    pub env: Vec<(String, String)>,
+    /// `--test_timeout`: the timeouts of short, moderate, long and eternal
+    /// tests in seconds, where they aren't Bazel's defaults.
+    pub timeouts: Vec<Option<u64>>,
+    /// Whether results may come from the action cache, as they may unless
+    /// `--cache_test_results` is off.
+    pub cached: bool,
+}
 
 impl Key for TestKey {
     type Value = TestResult;
@@ -92,10 +116,10 @@ impl Key for TestKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<TestResult, SkyError> {
         let backend = ctx.global::<Backend>()?;
-        let test = TestSpec::of(ctx, self.0).await?;
+        let test = TestSpec::of(ctx, self.target, &self.settings).await?;
         let request = test.request(ctx).await?;
         let _turn = crate::jobs::job_turn(ctx).await?;
-        let shown = progress(ctx).map(|progress| progress.action_started(test_progress_id(self), Vec::new(), format!("Testing {}", self.0.label)));
+        let shown = progress(ctx).map(|progress| progress.action_started(test_progress_id(self), Vec::new(), format!("Testing {}", self.target.label)));
         if let Some(shown) = &shown {
             shown.running(backend.runners.run);
         }
@@ -104,7 +128,7 @@ impl Key for TestKey {
         let duration_ms = started.elapsed().as_millis() as u64;
         let spawned = match spawned {
             Ok(spawned) => spawned,
-            Err(error) if error.message().contains("timed out") => return Ok(timed_out(duration_ms, test.timeout.as_secs())),
+            Err(error) if error.message().contains("timed out") => return Ok(timed_out(duration_ms, test.category_timeout, test.cacheable)),
             Err(error) => return Err(error),
         };
         finish(shown, backend.runners.name(spawned.cached));
@@ -133,7 +157,8 @@ impl Key for TestKey {
             xml,
             cached: spawned.cached,
             epoch: EPOCH.load(Ordering::Relaxed),
-            timeout_seconds: test.timeout.as_secs(),
+            timeout_seconds: test.category_timeout,
+            reusable: test.cacheable,
         })
     }
 }
@@ -145,7 +170,7 @@ fn test_progress_id(key: &TestKey) -> u64 {
     std::hash::Hasher::finish(&hasher)
 }
 
-fn timed_out(duration_ms: u64, timeout_seconds: u64) -> TestResult {
+fn timed_out(duration_ms: u64, timeout_seconds: u64, reusable: bool) -> TestResult {
     TestResult {
         status: TestStatus::TimedOut,
         exit_code: -1,
@@ -155,6 +180,7 @@ fn timed_out(duration_ms: u64, timeout_seconds: u64) -> TestResult {
         cached: false,
         epoch: EPOCH.load(Ordering::Relaxed),
         timeout_seconds,
+        reusable,
     }
 }
 
@@ -180,13 +206,20 @@ struct TestSpec {
     testlogs: String,
     size: String,
     timeout: Duration,
+    /// The default timeout of its category, in seconds.
+    category_timeout: u64,
     args: Vec<String>,
     env: Vec<(String, String)>,
     action_env: Vec<(String, String)>,
+    /// `--test_env`'s variables.
+    test_env: Vec<(String, String)>,
+    filter: Option<String>,
+    /// Whether its result may come from the action cache.
+    cacheable: bool,
 }
 
 impl TestSpec {
-    async fn of(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<TestSpec, SkyError> {
+    async fn of(ctx: &Ctx, key: ConfiguredTargetKey, settings: &TestSettings) -> Result<TestSpec, SkyError> {
         let target = ctx.compute(&key).await?;
         let providers = target.providers()?;
         let value = providers.get().ok_or_else(|| SkyError::new(format!("{} has no providers", key.label)))?;
@@ -205,10 +238,12 @@ impl TestSpec {
         };
         let size = string_attr(rule.attr(Symbol::intern("size"))).unwrap_or_else(|| "medium".to_string());
         let timeout = string_attr(rule.attr(Symbol::intern("timeout")));
-        let args = match rule.attr(Symbol::intern("args")) {
+        let mut args = match rule.attr(Symbol::intern("args")) {
             Some(AttrValue::StringList(args)) => args.clone(),
             _ => Vec::new(),
         };
+        args.extend(settings.args.iter().cloned());
+        let external = matches!(rule.attr(Symbol::intern("tags")), Some(AttrValue::StringList(tags)) if tags.iter().any(|tag| tag == "external"));
         if let Some(AttrValue::StringDict(entries)) = rule.attr(Symbol::intern("env")) {
             env.extend(entries.iter().cloned());
         }
@@ -224,11 +259,15 @@ impl TestSpec {
             runfiles,
             empty_runfiles,
             testlogs,
-            timeout: Duration::from_secs(timeout_seconds(timeout.as_deref(), &size)),
+            timeout: Duration::from_secs(timeout_seconds(timeout.as_deref(), &size, &settings.timeouts)),
+            category_timeout: timeout_seconds(timeout.as_deref(), &size, &[]),
             size,
             args,
             env,
             action_env: config.options.action_env.clone(),
+            test_env: settings.env.clone(),
+            filter: settings.filter.clone(),
+            cacheable: !external && settings.cached,
         })
     }
 
@@ -267,16 +306,18 @@ impl TestSpec {
             env: self.environment(),
             output_files: vec![self.xml_path()],
             output_directories: Vec::new(),
-            cacheable: true,
+            cacheable: self.cacheable,
             timeout: Some(self.timeout),
             description: format!("Testing {}", self.label),
         })
     }
 
-    /// The environment Bazel gives tests.
+    /// The environment Bazel gives tests: `--action_env`'s, then
+    /// `--test_env`'s, its own and the test runner's.
     fn environment(&self) -> Vec<(String, String)> {
         let srcdir = self.srcdir();
         let mut env: BTreeMap<String, String> = self.action_env.iter().cloned().collect();
+        env.extend(self.test_env.iter().cloned());
         let fixed = [
             ("TEST_TARGET", self.label.to_string()),
             ("TEST_SIZE", self.size.clone()),
@@ -296,6 +337,9 @@ impl TestSpec {
         ];
         env.extend(fixed.into_iter().map(|(name, value)| (name.to_string(), value)));
         env.extend(self.env.iter().cloned());
+        if let Some(filter) = &self.filter {
+            env.insert("TESTBRIDGE_TEST_ONLY".to_string(), filter.clone());
+        }
         env.into_iter().collect()
     }
 }
@@ -326,18 +370,20 @@ fn string_attr(value: Option<&AttrValue>) -> Option<String> {
     }
 }
 
-/// A test's timeout: from its `timeout` attribute, or its size.
-fn timeout_seconds(timeout: Option<&str>, size: &str) -> u64 {
+/// A test's timeout: from its `timeout` attribute, or its size, and
+/// `--test_timeout`'s `overrides`, by category.
+fn timeout_seconds(timeout: Option<&str>, size: &str, overrides: &[Option<u64>]) -> u64 {
     let category = timeout.unwrap_or(match size {
         "small" => "short",
         "large" => "long",
         "enormous" => "eternal",
         _ => "moderate",
     });
-    match category {
-        "short" => 60,
-        "long" => 900,
-        "eternal" => 3600,
-        _ => 300,
-    }
+    let (index, default) = match category {
+        "short" => (0, 60),
+        "long" => (2, 900),
+        "eternal" => (3, 3600),
+        _ => (1, 300),
+    };
+    overrides.get(index).copied().flatten().unwrap_or(default)
 }

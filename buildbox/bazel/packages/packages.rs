@@ -12,7 +12,7 @@ mod tests_of;
 pub use attr::{AttrType, AttrValue, Select, SelectorPart, DEFAULT_CONDITION};
 pub use error::{CallFrame, PackageError, SourcePosition, TraceFrame};
 pub use rule_class::{AspectRef, AttrDefault, AttrSchema, BuildSettingSpec, Cfg, DepRequirements, FileTypes, LateBound, ProviderRef, RuleClass, RuleClassRef};
-pub use tests_of::{TagFilter, is_manual, is_test_kind};
+pub use tests_of::{TagFilter, is_manual, is_test_kind, passes_tag_filters};
 
 use bazel_label::{Label, PackageId};
 use intern::Symbol;

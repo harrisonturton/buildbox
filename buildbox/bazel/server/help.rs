@@ -196,7 +196,7 @@ fn option_list(spec: &OptionSpec) -> String {
     let mut text = String::new();
     for (name, kind) in spec.options() {
         let line = match kind {
-            OptionKind::Bool => format!("  --[no]{name}\n"),
+            OptionKind::Bool | OptionKind::TriState => format!("  --[no]{name}\n"),
             OptionKind::Value | OptionKind::Int | OptionKind::Jobs => format!("  --{name}\n"),
             OptionKind::Multi => format!("  --{name} (may be used multiple times)\n"),
         };

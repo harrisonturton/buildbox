@@ -169,3 +169,15 @@ fn bazels_options_table_parses() {
     assert!(jobs.takes("build") && !jobs.takes("query"));
     assert!(bazel_option("remote_cache").unwrap().is_default(""));
 }
+
+#[test]
+fn tristate_options_take_auto() {
+    let rc = RcFile::default();
+    let spec = OptionSpec::new(&[("cache_test_results", OptionKind::TriState)]);
+    for (given, value) in [("--cache_test_results", "true"), ("--nocache_test_results", "false"), ("--cache_test_results=auto", "auto"), ("--cache_test_results=no", "false")] {
+        let parsed = parse(&args(given), &spec, &rc, "test").unwrap();
+        assert_eq!(parsed.get("cache_test_results"), Some(value), "{given}");
+    }
+    let error = parse(&args("--cache_test_results=maybe"), &spec, &rc, "test").unwrap_err();
+    assert_eq!(error.to_string(), "While parsing option --cache_test_results=maybe: 'maybe' is not a boolean or 'auto'");
+}

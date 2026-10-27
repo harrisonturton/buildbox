@@ -17,6 +17,9 @@ use std::collections::HashMap;
 pub enum OptionKind {
     /// `--flag`, `--noflag`, or `--flag=true|false|yes|no|1|0`.
     Bool,
+    /// A [`OptionKind::Bool`] that may also be `auto`, recorded as `true`,
+    /// `false` or `auto`.
+    TriState,
     /// `--flag=value` or `--flag value`; the last one given wins.
     Value,
     /// A [`OptionKind::Value`] that must be an integer.
@@ -141,6 +144,9 @@ pub enum OptionsError {
 
     #[error("While parsing option --{name}={value}: '{value}' is not an int")]
     InvalidInt { name: String, value: String },
+
+    #[error("While parsing option {spelled}: '{value}' is not a boolean or 'auto'")]
+    InvalidTriState { spelled: String, value: String },
 
     #[error("While parsing option {spelled}: {message}")]
     InvalidValue { spelled: String, message: String },
@@ -267,6 +273,17 @@ fn parse_into(
                 };
                 parsed.values.push((name.to_string(), (value != negated).to_string()));
             }
+            Some((name, OptionKind::TriState, negated)) => {
+                let value = match inline.as_deref() {
+                    Some("auto") if !negated => "auto".to_string(),
+                    Some(value) => match parse_bool(value) {
+                        Some(value) => (value != negated).to_string(),
+                        None => return Err(OptionsError::InvalidTriState { spelled: arg.clone(), value: value.to_string() }),
+                    },
+                    None => (!negated).to_string(),
+                };
+                parsed.values.push((name.to_string(), value));
+            }
             Some((name, kind, _)) => {
                 let (value, spelled) = match inline {
                     Some(value) => (value, arg.clone()),
@@ -382,6 +399,7 @@ fn option_kind<'a>(spec: &OptionSpec, name: &'a str) -> Option<(&'a str, OptionK
     let stripped = name.strip_prefix("no")?;
     match spec.kind(stripped) {
         Some(OptionKind::Bool) => Some((stripped, OptionKind::Bool, true)),
+        Some(OptionKind::TriState) => Some((stripped, OptionKind::TriState, true)),
         _ => None,
     }
 }

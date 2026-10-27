@@ -53,6 +53,27 @@ fn string_list(rule: &Rule, name: &str) -> Vec<String> {
     }
 }
 
+/// Whether a target passes `--build_tag_filters` or `--test_tag_filters`,
+/// a comma-separated list of tags, those starting `-` excluded: a rule
+/// passes if it has any of the other tags, or there are none, and none of
+/// the excluded ones; other targets pass if no tags are required.
+pub fn passes_tag_filters(rule: Option<&Rule>, filters: &str) -> bool {
+    let mut required = Vec::new();
+    let mut excluded = Vec::new();
+    for filter in filters.split(',').filter(|filter| !filter.is_empty()) {
+        match filter.strip_prefix('-') {
+            Some(tag) => excluded.push(tag),
+            None => required.push(filter.strip_prefix('+').unwrap_or(filter)),
+        }
+    }
+    let Some(rule) = rule else {
+        return required.is_empty();
+    };
+    let tags = string_list(rule, "tags");
+    let has = |tag: &&str| tags.iter().any(|given| given == tag);
+    !excluded.iter().any(has) && (required.is_empty() || required.iter().any(has))
+}
+
 /// Whether a rule of this kind is a test, as Bazel tells: its kind ends
 /// `_test`.
 pub fn is_test_kind(kind: &str) -> bool {

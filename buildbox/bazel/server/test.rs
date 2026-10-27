@@ -3,8 +3,13 @@
 use crate::build::{self, Built};
 use crate::command::{CommandContext, exit};
 use crate::output::Output;
+use crate::workspace::Workspace;
 use bazel_analysis::ConfiguredTargetKey;
-use bazel_execution::{Backend, TestKey, TestResult, TestStatus};
+use bazel_execution::{Backend, TestKey, TestResult, TestSettings, TestStatus};
+use bazel_loading::PackageKey;
+use bazel_options::ParsedOptions;
+use bazel_packages::Target;
+use std::collections::{BTreeMap, HashMap};
 use bazel_label::Label;
 use skyframe::Session;
 use std::path::{Path, PathBuf};
@@ -26,6 +31,13 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
         Ok(options) => options,
         Err(code) => return code,
     };
+    let settings = match test_settings(context, &options) {
+        Ok(settings) => settings,
+        Err(message) => {
+            out.error(&message).await;
+            return exit::COMMAND_LINE_ERROR;
+        }
+    };
     let epoch = bazel_execution::next_epoch();
     let workspace = context.server.workspaces().get(&context.workspace_root);
     workspace.refresh(crate::command::repo_environment(context, &options)).await;
@@ -44,12 +56,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
         return exit::BUILD_FAILURE;
     }
 
-    let tests: Vec<TestKey> = built
-        .targets
-        .iter()
-        .filter(|(_, target, _)| target.is_test && target.incompatible.is_none())
-        .map(|(label, target, _)| TestKey(ConfiguredTargetKey { label: *label, config: target.config }))
-        .collect();
+    let tests = select_tests(&session, &built, &options, &settings, out).await;
     let skipped: Vec<Label> = built
         .targets
         .iter()
@@ -57,22 +64,141 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
         .map(|(label, _, _)| *label)
         .collect();
     if tests.is_empty() && skipped.is_empty() {
+        build::report_stats(started, out).await;
+        build::completed(0, out).await;
         out.error("No test targets were found, yet testing was requested").await;
         return NO_TESTS_FOUND;
     }
+    let session = retry_failures(&workspace, session, &tests, &options).await;
     let output_mode = options.get("test_output").unwrap_or("summary").to_string();
     let results = run_tests(context, &session, &tests, &built, epoch, &output_mode, out).await;
     drop(session);
 
-    let failed: Vec<TestKey> = results.iter().filter(|(_, result)| !passed(result)).map(|(key, _)| *key).collect();
-    workspace.graph.invalidate(&failed).await;
+    let failed = results.iter().filter(|(_, result)| !passed(result)).count();
+    keep_results(&workspace, &results).await;
     build::report_stats(started, out).await;
-    build::completed(failed.len(), out).await;
+    build::completed(failed, out).await;
     summarize(&results, &skipped, &built, epoch, out).await;
-    match failed.is_empty() {
-        true => exit::SUCCESS,
-        false => TESTS_FAILED,
+    match failed {
+        0 => exit::SUCCESS,
+        _ => TESTS_FAILED,
     }
+}
+
+/// How the options say to run tests.
+fn test_settings(context: &CommandContext<'_>, options: &ParsedOptions) -> Result<TestSettings, String> {
+    Ok(TestSettings {
+        filter: options.get("test_filter").map(str::to_string),
+        args: options.all("test_arg").into_iter().map(str::to_string).collect(),
+        env: test_env(&context.env, &options.all("test_env")),
+        timeouts: test_timeouts(options.get("test_timeout").unwrap_or("-1"))?,
+        cached: options.get("cache_test_results") != Some("false"),
+    })
+}
+
+/// The variables `--test_env`s give: `name=value`, `name` for the client's
+/// value if it has one, or `=name` to drop an earlier one.
+fn test_env(client: &HashMap<String, String>, given: &[&str]) -> Vec<(String, String)> {
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    for entry in given {
+        if let Some(name) = entry.strip_prefix('=') {
+            env.remove(name);
+            continue;
+        }
+        let (name, value) = match entry.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (*entry, client.get(*entry).cloned()),
+        };
+        match value {
+            Some(value) => env.insert(name.to_string(), value),
+            None => env.remove(name),
+        };
+    }
+    env.into_iter().collect()
+}
+
+/// `--test_timeout`'s timeouts for short, moderate, long and eternal
+/// tests: one for all, or four, as Bazel parses them, with those that
+/// aren't positive left at their defaults.
+fn test_timeouts(text: &str) -> Result<Vec<Option<u64>>, String> {
+    let mut values = Vec::new();
+    for token in text.splitn(6, ',') {
+        if token.is_empty() && values.len() <= 1 {
+            continue;
+        }
+        let value: i64 = token.parse().map_err(|_| format!("While parsing option --test_timeout={text}: '{text}' is not an int"))?;
+        values.push(u64::try_from(value).ok().filter(|seconds| *seconds > 0));
+    }
+    match values.len() {
+        1 => Ok(vec![values[0]; 4]),
+        4 => Ok(values),
+        _ => Err(format!("While parsing option --test_timeout={text}: Invalid number of comma-separated entries")),
+    }
+}
+
+/// The tests to run: those built that are compatible with the
+/// configuration and that `--test_tag_filters` selects.
+async fn select_tests(session: &Session, built: &Built, options: &ParsedOptions, settings: &TestSettings, out: &Output) -> Vec<TestKey> {
+    let candidates: Vec<ConfiguredTargetKey> = built
+        .targets
+        .iter()
+        .filter(|(_, target, _)| target.is_test && target.incompatible.is_none())
+        .map(|(label, target, _)| ConfiguredTargetKey { label: *label, config: target.config })
+        .collect();
+    let selected = filter_tests(session, &candidates, options).await;
+    if selected.is_empty() && !candidates.is_empty() {
+        out.warning("All specified test targets were excluded by filters").await;
+    }
+    selected.into_iter().map(|target| TestKey { target, settings: settings.clone() }).collect()
+}
+
+/// Let the tests that failed before run again, unless
+/// `--cache_test_results=yes` reuses their failures, returning the session
+/// to run them in.
+async fn retry_failures(workspace: &Workspace, session: Session, tests: &[TestKey], options: &ParsedOptions) -> Session {
+    if options.get("cache_test_results") == Some("true") {
+        return session;
+    }
+    let stale = workspace.failed_tests.take_among(tests);
+    if stale.is_empty() {
+        return session;
+    }
+    drop(session);
+    workspace.graph.invalidate(&stale).await;
+    workspace.graph.session().await
+}
+
+/// Keep the results later commands may reuse: passes, and failures, which
+/// only `--cache_test_results=yes` reuses.
+async fn keep_results(workspace: &Workspace, results: &[(TestKey, Result<Arc<TestResult>, String>)]) {
+    let unreusable: Vec<TestKey> = results.iter().filter(|(_, result)| !reusable(result)).map(|(key, _)| key.clone()).collect();
+    workspace.graph.invalidate(&unreusable).await;
+    let failures = results.iter().filter(|(_, result)| reusable(result) && !passed(result));
+    workspace.failed_tests.extend(failures.map(|(key, _)| key.clone()));
+}
+
+/// The tests among `candidates` that `--test_tag_filters` selects.
+async fn filter_tests(session: &Session, candidates: &[ConfiguredTargetKey], options: &ParsedOptions) -> Vec<ConfiguredTargetKey> {
+    if options.get("test_tag_filters").unwrap_or_default().is_empty() {
+        return candidates.to_vec();
+    }
+    let mut selected = Vec::new();
+    for candidate in candidates {
+        let Ok(package) = session.evaluate(&PackageKey(candidate.label.package)).await else {
+            continue;
+        };
+        let rule = package.0.target(candidate.label.name).and_then(Target::as_rule);
+        if build::passes_test_filters(rule, options) {
+            selected.push(*candidate);
+        }
+    }
+    selected
+}
+
+/// Whether a later command may reuse a test's result: one that can be
+/// cached, though failures only with `--cache_test_results=yes`.
+fn reusable(result: &Result<Arc<TestResult>, String>) -> bool {
+    matches!(result, Ok(test) if test.reusable)
 }
 
 /// The width to pad a label to, so that statuses end in the same column.
@@ -106,7 +232,7 @@ async fn run_tests(
         if let Err(message) = &result {
             out.error(message).await;
         }
-        reported.push((*key, result));
+        reported.push((key.clone(), result));
     }
     reported
 }
@@ -114,7 +240,7 @@ async fn run_tests(
 /// Where a test's logs go.
 fn testlogs_dir(built: &Built, key: &TestKey) -> PathBuf {
     let config = built.config.get();
-    let relative = bazel_analysis::package_dir(key.0.label.package).join_path(bazel_analysis::name_path(key.0.label));
+    let relative = bazel_analysis::package_dir(key.target.label.package).join_path(bazel_analysis::name_path(key.target.label));
     built.exec_root.join("bazel-out").join(&config.output_directory).join("testlogs").join(relative.to_string())
 }
 
@@ -140,9 +266,9 @@ async fn write_logs(backend: Option<&Arc<Backend>>, built: &Built, key: &TestKey
 }
 
 async fn report_test(key: &TestKey, result: &TestResult, log: &Path, built: &Built, epoch: u64, output_mode: &str, out: &Output) {
-    let shown = bazel_query::display_label(key.0.label, &built.main_mapping);
+    let shown = bazel_query::display_label(key.target.label, &built.main_mapping);
     let failed = result.status != TestStatus::Passed;
-    if failed {
+    if failed && result.epoch >= epoch {
         let reason = match result.status {
             TestStatus::TimedOut => "TIMEOUT".to_string(),
             _ => format!("Exit {}", result.exit_code),
@@ -199,7 +325,7 @@ async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipp
             "PASSED" => passes += 1,
             _ => failures += 1,
         }
-        let label = bazel_query::display_label(key.0.label, &built.main_mapping);
+        let label = bazel_query::display_label(key.target.label, &built.main_mapping);
         let width = status_width(&label, prefix, word);
         out.stdout(&format!("{label:<width$}{prefix}{word} in {seconds:.1}s\n")).await;
         if word != "PASSED" {
@@ -244,7 +370,7 @@ fn summary_order(result: &Result<Arc<TestResult>, String>, epoch: u64, key: &Tes
         }
         Err(_) => (false, 0),
     };
-    (!cached, status, key.0.label.to_string(), *key)
+    (!cached, status, key.target.label.to_string(), key.clone())
 }
 
 /// Items joined as Bazel joins them in English: `a`, `a and b`, or `a, b,
@@ -255,5 +381,27 @@ fn english_list(items: &[String]) -> String {
         [only] => only.clone(),
         [first, second] => format!("{first} and {second}"),
         [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timeouts_parse_as_bazel_parses_them() {
+        assert_eq!(test_timeouts("-1"), Ok(vec![None; 4]));
+        assert_eq!(test_timeouts("7"), Ok(vec![Some(7); 4]));
+        assert_eq!(test_timeouts("7,"), Ok(vec![Some(7); 4]));
+        assert_eq!(test_timeouts("1,-1,0,4"), Ok(vec![Some(1), None, None, Some(4)]));
+        assert!(test_timeouts("1,2").unwrap_err().ends_with("Invalid number of comma-separated entries"));
+        assert!(test_timeouts("x").unwrap_err().ends_with("'x' is not an int"));
+    }
+
+    #[test]
+    fn test_env_inherits_and_drops_variables() {
+        let client = HashMap::from([("HOME".to_string(), "/home/me".to_string())]);
+        let env = test_env(&client, &["A=1", "HOME", "UNSET", "B=2", "=B"]);
+        assert_eq!(env, [("A".to_string(), "1".to_string()), ("HOME".to_string(), "/home/me".to_string())]);
     }
 }

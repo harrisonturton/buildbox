@@ -3,7 +3,7 @@
 use crate::written::Written;
 use bazel_analysis::workspace_status::{BuildStatus, StatusValues, WorkspaceStatusKey};
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
-use bazel_execution::{Jobs, SourceDigestKey};
+use bazel_execution::{Jobs, SourceDigestKey, TestKey};
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
 use bazel_progress::Progress;
 use skyframe::{Engine, Globals, Graph};
@@ -42,6 +42,32 @@ pub struct Workspace {
     pub progress: Arc<Progress>,
     /// How many actions builds' `--jobs` lets run at once.
     pub jobs: Arc<Jobs>,
+    /// The tests that failed, whose results only commands with
+    /// `--cache_test_results=yes` reuse.
+    pub failed_tests: FailedTests,
+}
+
+/// Tests whose failures a workspace's graph holds.
+#[derive(Default)]
+pub struct FailedTests(Mutex<Vec<TestKey>>);
+
+impl FailedTests {
+    pub fn extend(&self, tests: impl IntoIterator<Item = TestKey>) {
+        let mut failed = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for test in tests {
+            if !failed.contains(&test) {
+                failed.push(test);
+            }
+        }
+    }
+
+    /// Those of `tests` that failed, which are forgotten.
+    pub fn take_among(&self, tests: &[TestKey]) -> Vec<TestKey> {
+        let mut failed = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (taken, kept) = std::mem::take(&mut *failed).into_iter().partition(|test| tests.contains(test));
+        *failed = kept;
+        taken
+    }
 }
 
 impl Workspace {
@@ -138,6 +164,7 @@ impl Workspaces {
             written: Arc::default(),
             progress,
             jobs,
+            failed_tests: FailedTests::default(),
         });
         workspaces.insert(root.to_path_buf(), workspace.clone());
         workspace

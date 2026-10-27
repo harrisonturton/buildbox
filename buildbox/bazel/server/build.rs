@@ -14,7 +14,7 @@ use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
 use bazel_loading::RepoMappingKey;
 use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
-use bazel_packages::{AttrValue, Target};
+use bazel_packages::{AttrValue, Target, is_test_kind, passes_tag_filters};
 use bazel_query::{QueryOptions, TargetSet, Universe};
 use bazel_ui::Phase;
 use futures::StreamExt;
@@ -46,6 +46,14 @@ pub fn build_spec() -> OptionSpec {
         ("verbose_failures", Bool),
         ("jobs", Jobs),
         ("test_output", Value),
+        ("test_filter", Value),
+        ("test_arg", Multi),
+        ("test_env", Multi),
+        ("test_timeout", Value),
+        ("test_tag_filters", Value),
+        ("build_tag_filters", Value),
+        ("build_tests_only", Bool),
+        ("cache_test_results", TriState),
         ("color", Value),
         ("curses", Value),
         ("ui_actions_shown", Int),
@@ -928,12 +936,50 @@ async fn targets(
     if !skipped.is_empty() {
         patterns_skipped(&universe, &skipped, out).await;
     }
-    let labels = included.into_iter().filter(|label| !excluded.contains(label)).collect();
+    let labels: Vec<Label> = included.into_iter().filter(|label| !excluded.contains(label)).collect();
+    let labels = match purpose {
+        Purpose::Query => labels,
+        Purpose::Build | Purpose::Test => filter_by_tags(&universe, labels, options, purpose).await,
+    };
     Ok(Requested {
         labels,
         explicit,
         patterns_failed: !skipped.is_empty(),
     })
+}
+
+/// The targets to build of those the patterns name: those
+/// `--build_tag_filters` selects, and the tests to run, or with
+/// `--build_tests_only` only the tests.
+async fn filter_by_tags(universe: &Universe<&Session>, labels: Vec<Label>, options: &ParsedOptions, purpose: Purpose) -> Vec<Label> {
+    let build_filters = options.get("build_tag_filters").unwrap_or_default();
+    let tests_only = options.flag("build_tests_only", false);
+    if build_filters.is_empty() && !tests_only {
+        return labels;
+    }
+    let mut selected = Vec::with_capacity(labels.len());
+    for label in labels {
+        let Ok(target) = universe.target(label).await else {
+            selected.push(label);
+            continue;
+        };
+        let rule = target.target().as_rule();
+        let is_test = rule.is_some_and(|rule| is_test_kind(target.package().rule_class(rule).kind.as_str()));
+        let tested = is_test && passes_test_filters(rule, options);
+        let built = match tests_only {
+            true => tested,
+            false => passes_tag_filters(rule, build_filters) || (purpose == Purpose::Test && tested),
+        };
+        if built {
+            selected.push(label);
+        }
+    }
+    selected
+}
+
+/// Whether a test passes `--test_tag_filters`.
+pub fn passes_test_filters(rule: Option<&bazel_packages::Rule>, options: &ParsedOptions) -> bool {
+    passes_tag_filters(rule, options.get("test_tag_filters").unwrap_or_default())
 }
 
 /// The targets the command line's patterns name.
