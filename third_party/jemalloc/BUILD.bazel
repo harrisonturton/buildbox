@@ -1,25 +1,33 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
-# The headers jemalloc's configure generated for x86_64 Linux, configured as
+# The headers jemalloc's configure generates, configured as
 # tikv-jemalloc-sys configures it: symbols prefixed `_rjem_`, statistics,
-# and background threads on.
+# and background threads on where the platform supports them.
+HEADERS = [
+    "include/jemalloc/internal/jemalloc_internal_defs.h",
+    "include/jemalloc/internal/jemalloc_preamble.h",
+    "include/jemalloc/internal/public_namespace.h",
+    "include/jemalloc/internal/public_unnamespace.h",
+    "include/jemalloc/jemalloc.h",
+    "include/jemalloc/jemalloc_defs.h",
+    "include/jemalloc/jemalloc_macros.h",
+    "include/jemalloc/jemalloc_mangle.h",
+    "include/jemalloc/jemalloc_mangle_jet.h",
+    "include/jemalloc/jemalloc_protos.h",
+    "include/jemalloc/jemalloc_protos_jet.h",
+    "include/jemalloc/jemalloc_rename.h",
+    "include/jemalloc/jemalloc_typedefs.h",
+]
+
+# Generated for x86_64 Linux against the pinned sysroot.
 cc_library(
+    name = "config_linux_x86_64",
+    hdrs = ["linux_x86_64/" + header for header in HEADERS],
+    strip_include_prefix = "linux_x86_64/include",
+)
+
+alias(
     name = "config",
-    hdrs = [
-        "include/jemalloc/internal/jemalloc_internal_defs.h",
-        "include/jemalloc/internal/jemalloc_preamble.h",
-        "include/jemalloc/internal/public_namespace.h",
-        "include/jemalloc/internal/public_unnamespace.h",
-        "include/jemalloc/jemalloc.h",
-        "include/jemalloc/jemalloc_defs.h",
-        "include/jemalloc/jemalloc_macros.h",
-        "include/jemalloc/jemalloc_mangle.h",
-        "include/jemalloc/jemalloc_mangle_jet.h",
-        "include/jemalloc/jemalloc_protos.h",
-        "include/jemalloc/jemalloc_protos_jet.h",
-        "include/jemalloc/jemalloc_rename.h",
-        "include/jemalloc/jemalloc_typedefs.h",
-    ],
-    strip_include_prefix = "include",
+    actual = ":config_linux_x86_64",
     visibility = ["@jemalloc//:__pkg__"],
 )

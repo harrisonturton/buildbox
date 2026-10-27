@@ -1,7 +1,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
-# jemalloc as configure and make would build it on x86_64 Linux, with the
-# configured headers from //third_party/jemalloc. Library-private symbols
+# jemalloc as configure and make would build it, with the configured
+# headers for the target from //third_party/jemalloc. Library-private symbols
 # aren't renamed, as make's private_namespace.h step would; they have hidden
 # visibility.
 cc_library(

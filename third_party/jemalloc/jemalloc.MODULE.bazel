@@ -2,8 +2,8 @@
 
 The commit tikv-jemalloc-sys 0.6.1 builds. Its build script runs configure
 and make, which aren't hermetic, so jemalloc is built with cc_library and
-the headers configure generated for x86_64 Linux against the pinned sysroot,
-checked in under include/.
+the headers configure generated for each supported platform, checked in
+under <platform>/include/.
 """
 
 bazel_dep(name = "rules_cc", version = "0.2.17")
