@@ -137,11 +137,8 @@ impl DepGraph {
     /// The module whose `use_repo_rule` defined `repo`, and the call.
     pub fn repo_rule_of(&self, repo: RepoName) -> Option<(usize, usize)> {
         for (index, module) in self.modules.iter().enumerate() {
-            let prefix = format!("{}+_repo_rules+", module.repo);
-            let Some(name) = repo.as_str().strip_prefix(&prefix) else {
-                continue;
-            };
-            if let Some(call) = module.file.repo_rules.iter().position(|call| call.name == name) {
+            let names = repo_rule_repos(module);
+            if let Some(call) = names.iter().position(|name| *name == repo) {
                 return Some((index, call));
             }
         }
@@ -165,12 +162,32 @@ impl DepGraph {
                 entries.push((Symbol::intern(&import.apparent), repo));
             }
         }
-        for call in &module.file.repo_rules {
-            let repo = RepoName::new(&format!("{}+_repo_rules+{}", module.repo, call.name));
+        for (call, repo) in module.file.repo_rules.iter().zip(repo_rule_repos(module)) {
             entries.push((Symbol::intern(&call.name), repo));
         }
         RepoMappingTable::new(module.repo, entries)
     }
+}
+
+/// The repositories of a module's `use_repo_rule` calls, in order, named as
+/// Bazel names them: `<module>+<rule>+<name>`, the rule's name numbered
+/// from 2 when the module uses rules of that name from several files.
+fn repo_rule_repos(module: &ResolvedModule) -> Vec<RepoName> {
+    let mut rules: Vec<(&str, &str)> = Vec::new();
+    let mut repos = Vec::with_capacity(module.file.repo_rules.len());
+    for call in &module.file.repo_rules {
+        let rule = (call.bzl.as_str(), call.rule.as_str());
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+        let earlier = rules.iter().take_while(|seen| **seen != rule).filter(|seen| seen.1 == rule.1).count();
+        let disambiguator = match earlier {
+            0 => String::new(),
+            earlier => (earlier + 1).to_string(),
+        };
+        repos.push(RepoName::new(&format!("{}+{}{}+{}", module.repo, call.rule, disambiguator, call.name)));
+    }
+    repos
 }
 
 /// A module's mapping before extensions: itself, its dependencies, and
