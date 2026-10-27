@@ -49,6 +49,10 @@ pub struct HeapStore {
     session: SessionContext,
     arcs: DeserializedArcCache,
     state: Mutex<StoreState>,
+    /// Held while paging out. Page-outs share the session's record of the
+    /// heaps being serialized, which each forgets when it's done, so two
+    /// at once would lose each other's.
+    paging_out: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -90,6 +94,7 @@ impl HeapStore {
                 next_pin: 1,
                 ..StoreState::default()
             }),
+            paging_out: Mutex::new(()),
         }
     }
 
@@ -278,7 +283,8 @@ impl PagedValue {
 }
 
 /// Page out every live value of `values` that can be, together, returning
-/// how many were. Blocks on the filesystem.
+/// how many were. A value that can't be is kept in memory. Blocks on the
+/// filesystem.
 pub fn page_out<'a>(values: impl IntoIterator<Item = &'a PagedValue>) -> anyhow::Result<usize> {
     match store() {
         Some(store) => store.page_out(values),
@@ -307,6 +313,7 @@ impl HeapStore {
     /// than stored again: stored again, its heap could get another key, and
     /// reading both keys back would make two copies of one heap.
     fn page_out<'a>(self: &Arc<HeapStore>, values: impl IntoIterator<Item = &'a PagedValue>) -> anyhow::Result<usize> {
+        let _paging_out = self.paging_out.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let live: Vec<(&PagedValue, OwnedFrozenValue)> = values.into_iter().filter_map(|value| Some((value, value.live()?))).collect();
         let (read_back, new): (Vec<_>, Vec<_>) = live.into_iter().partition(|(value, _)| value.key().is_some());
         self.mark_paging(&new);
@@ -314,13 +321,17 @@ impl HeapStore {
         let stored = self.store_values(&new);
         starlark::pagable::forget_serialized_heaps(&self.session);
         self.forget_freed();
+        let mut paged = 0;
         for ((value, _), key) in new.iter().zip(stored?) {
-            value.stored(key);
+            if let Some(key) = key {
+                value.stored(key);
+                paged += 1;
+            }
         }
         for (value, _) in &read_back {
             value.release();
         }
-        Ok(new.len() + read_back.len())
+        Ok(paged + read_back.len())
     }
 
     /// Note the heaps of `values` as being paged out, other than those read
@@ -333,22 +344,30 @@ impl HeapStore {
         state.paging = paging;
     }
 
-    /// Serialize `values` and write them to a file, returning their keys.
-    fn store_values(&self, values: &[(&PagedValue, OwnedFrozenValue)]) -> anyhow::Result<Vec<DataKey>> {
+    /// Serialize `values` and write them to a file, returning their keys,
+    /// or `None` for those that couldn't be serialized, which are logged.
+    fn store_values(&self, values: &[(&PagedValue, OwnedFrozenValue)]) -> anyhow::Result<Vec<Option<DataKey>>> {
         let finished: DashMap<usize, Arc<ArcSerSlot>> = DashMap::new();
         let mut keys = Vec::with_capacity(values.len());
         for (_, value) in values {
-            let mut serializer = SerializerForPaging::new(&self.session);
-            value.pagable_serialize(&mut serializer)?;
-            let (data, arcs) = serializer.finish();
-            let key = self.page_out_item(data, arcs, &finished, &self.session).map_err(|error| match error {
-                PageOutError::Failed(error) => error,
-                PageOutError::AlreadyFailed => anyhow::anyhow!("paging out a heap failed"),
-            })?;
-            keys.push(key);
+            let key = self.store_value(value, &finished);
+            if let Err(error) = &key {
+                tracing::warn!("keeping a value in memory that couldn't be paged out: {error:#}");
+            }
+            keys.push(key.ok());
         }
         self.write_pending()?;
         Ok(keys)
+    }
+
+    fn store_value(&self, value: &OwnedFrozenValue, finished: &DashMap<usize, Arc<ArcSerSlot>>) -> anyhow::Result<DataKey> {
+        let mut serializer = SerializerForPaging::new(&self.session);
+        value.pagable_serialize(&mut serializer)?;
+        let (data, arcs) = serializer.finish();
+        self.page_out_item(data, arcs, finished, &self.session).map_err(|error| match error {
+            PageOutError::Failed(error) => error,
+            PageOutError::AlreadyFailed => anyhow::anyhow!("paging out a heap failed"),
+        })
     }
 
     /// Forget the heaps read back that have since been freed. The cache of
@@ -476,6 +495,30 @@ mod tests {
         let key = value.state.lock().unwrap().key.unwrap();
         let read = store.page_in(key).unwrap();
         assert_eq!(read.value().to_repr(), before);
+    }
+
+    #[test]
+    fn page_outs_at_once_take_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(HeapStore::new(dir.path().to_path_buf()));
+        let bzl = module("shared = {'key': 'value', 'other': [1, 2]}", "bzl", &[]);
+        let shared = bzl.get("shared").unwrap();
+        let values: Vec<PagedValue> = (0..64)
+            .map(|index| {
+                let code = format!("providers = {{'shared': shared, 'own': [{index}, 'x']}}");
+                let target = module(&code, &format!("target {index}"), &[("shared", &shared)]);
+                PagedValue::new(target.get("providers").unwrap())
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            for chunk in values.chunks(8) {
+                let store = store.clone();
+                scope.spawn(move || assert_eq!(store.page_out(chunk).unwrap(), chunk.len()));
+            }
+        });
+        for value in &values {
+            assert!(value.key().is_some());
+        }
     }
 
     #[test]

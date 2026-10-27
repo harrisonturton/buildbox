@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harrison Turton <harrisonturton@gmail.com>
+Date: Tue, 27 Oct 2026 00:26:48 -0400
+Subject: [PATCH] Return an error, not a panic, for a value of an unknown heap
+
+Serializing a frozen value whose heap the serializer wasn't told of
+panicked. A caller paging values out can recover from an error by
+keeping the values in memory, so return one instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pagable/starlark_serialize_context.rs | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/pagable/starlark_serialize_context.rs b/src/pagable/starlark_serialize_context.rs
+index 6fa8fa15..89450f90 100644
+--- a/src/pagable/starlark_serialize_context.rs
++++ b/src/pagable/starlark_serialize_context.rs
+@@ -191,12 +191,12 @@ impl StarlarkSerializeContext for StarlarkSerializerImpl<'_> {
+                     .ptr_to_location
+                     .get(&raw_ptr)
+                     .map(|loc| *loc)
+-                    .unwrap_or_else(|| {
+-                        panic!(
++                    .ok_or_else(|| {
++                        crate::Error::new_other(anyhow::anyhow!(
+                             "FrozenValue pointer {:#x} not found in any heap's value-index map",
+                             raw_ptr
+-                        )
+-                    });
++                        ))
++                    })?;
+ 
+                 let serialized = SerializedFrozenValue::HeapPtr {
+                     heap_id,
