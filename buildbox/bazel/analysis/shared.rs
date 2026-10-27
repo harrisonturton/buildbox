@@ -40,10 +40,13 @@ impl<T: Hash + Eq> Default for Sharing<T> {
 
 impl<T: Hash + Eq> Sharing<T> {
     /// The shared value equal to `value`: one already alive, or `value`.
+    /// Values of the same hash that have died are forgotten as it looks,
+    /// so a value made and dropped again and again costs nothing more.
     pub fn share(&self, value: T) -> Arc<T> {
         let hash = hash_of(&value);
         let mut shard = self.shard(hash);
         let candidates = shard.values.entry(hash).or_default();
+        candidates.retain(|candidate| candidate.strong_count() > 0);
         if let Some(existing) = candidates.iter().filter_map(Weak::upgrade).find(|existing| **existing == value) {
             return existing;
         }
@@ -92,6 +95,16 @@ mod tests {
         let c = sharing.share(vec![4]);
         assert!(Arc::ptr_eq(&a, &b));
         assert!(!Arc::ptr_eq(&a, &c));
+    }
+
+    #[test]
+    fn values_made_again_after_dying_are_not_kept_dead() {
+        let sharing = Sharing::default();
+        for _ in 0..1000 {
+            drop(sharing.share(7u32));
+        }
+        let held: usize = sharing.shards.iter().map(|shard| shard.lock().unwrap().values.values().map(Vec::len).sum::<usize>()).sum();
+        assert!(held <= 1, "{held}");
     }
 
     #[test]
