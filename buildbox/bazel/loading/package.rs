@@ -36,6 +36,10 @@ impl Key for PackageLookupKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<PackageLookup, SkyError> {
         let package = self.0;
+        if let Some(reason) = package.repo.unknown_reason() {
+            let reason = format!("The repository '@@{}' could not be resolved: {reason}", package.repo);
+            return Ok(PackageLookup::NotFound { reason });
+        }
         let root = ctx.compute(&RepoRootKey(package.repo)).await?.0;
         let keys: Vec<FileStateKey> = BUILD_FILE_NAMES
             .iter()

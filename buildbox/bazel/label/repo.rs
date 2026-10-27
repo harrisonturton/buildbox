@@ -44,6 +44,19 @@ impl RepoName {
         self.as_str().starts_with("[unknown repo")
     }
 
+    /// For an [unknown](RepoName::unknown) repository, why it's unknown, as
+    /// Bazel says: `No repository visible as '@b' from main repository`.
+    pub fn unknown_reason(self) -> Option<String> {
+        let rest = self.as_str().strip_prefix("[unknown repo '")?;
+        let (apparent, rest) = rest.split_once("' requested from @@")?;
+        let from = rest.strip_suffix(']')?;
+        let from = match from.is_empty() {
+            true => "main repository".to_string(),
+            false => format!("repository '@@{from}'"),
+        };
+        Some(format!("No repository visible as '@{apparent}' from {from}"))
+    }
+
     /// The repository, for messages: `the main repository` or `@@name`.
     pub fn describe(self) -> String {
         if self.is_main() {

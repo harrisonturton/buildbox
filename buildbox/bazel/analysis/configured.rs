@@ -607,16 +607,8 @@ fn wanted_deps(
         }
         let mut labels = Vec::new();
         value.labels(&mut labels);
-        let known: Vec<Label> = labels.iter().copied().filter(|label| !label.repo().is_unknown()).collect();
         for (_, dep_config) in dep_configs(schema.cfg, schema.name, config, exec_config, attr_configs) {
-            wanted.extend(known.iter().map(|label| (*label, dep_config, schema.name)));
-        }
-        for label in labels_of_unknown_repos(value) {
-            return Err(SkyError::new(format!(
-                "attribute '{}': no repository visible as '@{}'",
-                schema.name,
-                label.repo().as_str().rsplit('+').next().unwrap_or_default()
-            )));
+            wanted.extend(labels.iter().map(|label| (*label, dep_config, schema.name)));
         }
     }
     Ok(wanted)
@@ -800,13 +792,6 @@ async fn missing_dep(ctx: &Ctx, referrer: Label, message: &str) -> SkyError {
 /// doesn't support, so they have no value.
 fn is_late_bound(name: Symbol) -> bool {
     name.as_str().starts_with(':')
-}
-
-fn labels_of_unknown_repos(value: &AttrValue) -> Vec<Label> {
-    let mut labels = Vec::new();
-    value.labels(&mut labels);
-    labels.retain(|label| label.repo().is_unknown());
-    labels
 }
 
 /// One dependency: a file, or an analyzed rule, with the aspects its
