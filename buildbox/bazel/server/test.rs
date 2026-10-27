@@ -174,13 +174,15 @@ async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipp
     let mut executed = 0;
     let mut passes = 0;
     let mut failures = 0;
+    let mut wrong_size = false;
     let mut ordered: Vec<&(TestKey, Result<Arc<TestResult>, String>)> = results.iter().collect();
-    ordered.sort_by_key(|(key, result)| (!passed(result), *key));
+    ordered.sort_by_key(|(key, result)| summary_order(result, epoch, key));
     for (key, result) in ordered {
         let (word, prefix, seconds) = match result {
             Ok(result) => {
                 let cached = result.cached || result.epoch < epoch;
                 executed += usize::from(!cached);
+                wrong_size |= result.status == TestStatus::Passed && result.wrong_size();
                 let word = match result.status {
                     TestStatus::Passed => "PASSED",
                     TestStatus::Failed => "FAILED",
@@ -204,16 +206,51 @@ async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipp
     let total = results.len() + skipped.len();
     let tests = if total == 1 { "test" } else { "tests" };
     let mut parts = Vec::new();
-    if passes > 0 {
-        parts.push(format!("{passes} {} passes", if passes == 1 { "test" } else { "tests" }));
+    match passes {
+        0 => {}
+        1 => parts.push("1 test passes".to_string()),
+        count => parts.push(format!("{count} tests pass")),
     }
-    if failures > 0 {
-        parts.push(format!("{failures} fails locally"));
+    match failures {
+        0 => {}
+        1 => parts.push("1 fails locally".to_string()),
+        count => parts.push(format!("{count} fail locally")),
     }
     match skipped.len() {
         0 => {}
         1 => parts.push("1 was skipped".to_string()),
         count => parts.push(format!("{count} were skipped")),
     }
-    out.stdout(&format!("\nExecuted {executed} out of {total} {tests}: {}.\n", parts.join(" and "))).await;
+    out.stdout(&format!("\nExecuted {executed} out of {total} {tests}: {}.\n", english_list(&parts))).await;
+    if wrong_size {
+        out.stdout("There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.\n").await;
+    }
+}
+
+/// Where Bazel lists a test's result: cached ones first, then by status,
+/// passes first, then by label.
+fn summary_order(result: &Result<Arc<TestResult>, String>, epoch: u64, key: &TestKey) -> (bool, i32, String, TestKey) {
+    let (cached, status) = match result {
+        Ok(result) => {
+            let status = match result.status {
+                TestStatus::Passed => -1,
+                TestStatus::TimedOut => 3,
+                TestStatus::Failed => 4,
+            };
+            (result.cached || result.epoch < epoch, status)
+        }
+        Err(_) => (false, 0),
+    };
+    (!cached, status, key.0.label.to_string(), *key)
+}
+
+/// Items joined as Bazel joins them in English: `a`, `a and b`, or `a, b,
+/// and c`.
+fn english_list(items: &[String]) -> String {
+    match items {
+        [] => "nothing".to_string(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
 }

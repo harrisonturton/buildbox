@@ -50,6 +50,28 @@ pub struct TestResult {
     pub cached: bool,
     /// The epoch of the command that ran it.
     pub epoch: u64,
+    /// Its timeout, in seconds, as its size or `timeout` attribute gives it.
+    pub timeout_seconds: u64,
+}
+
+impl TestResult {
+    /// Whether it passed in much less time than its timeout allows, or
+    /// nearly timed out, so its size or timeout could be better, as Bazel
+    /// judges: outside of half the next shorter timeout and 90% of its own.
+    pub fn wrong_size(&self) -> bool {
+        let seconds = self.duration_ms / 1000;
+        let (shorter, longest) = match self.timeout_seconds {
+            60 => (0, false),
+            300 => (60, false),
+            900 => (300, false),
+            _ => (900, true),
+        };
+        let max = match longest {
+            true => 365 * 24 * 60 * 60,
+            false => self.timeout_seconds * 9 / 10,
+        };
+        seconds < shorter / 2 || seconds >= max
+    }
 }
 
 encoded_value!(TestResult);
@@ -82,7 +104,7 @@ impl Key for TestKey {
         let duration_ms = started.elapsed().as_millis() as u64;
         let spawned = match spawned {
             Ok(spawned) => spawned,
-            Err(error) if error.message().contains("timed out") => return Ok(timed_out(duration_ms)),
+            Err(error) if error.message().contains("timed out") => return Ok(timed_out(duration_ms, test.timeout.as_secs())),
             Err(error) => return Err(error),
         };
         finish(shown, backend.runners.name(spawned.cached));
@@ -111,6 +133,7 @@ impl Key for TestKey {
             xml,
             cached: spawned.cached,
             epoch: EPOCH.load(Ordering::Relaxed),
+            timeout_seconds: test.timeout.as_secs(),
         })
     }
 }
@@ -122,7 +145,7 @@ fn test_progress_id(key: &TestKey) -> u64 {
     std::hash::Hasher::finish(&hasher)
 }
 
-fn timed_out(duration_ms: u64) -> TestResult {
+fn timed_out(duration_ms: u64, timeout_seconds: u64) -> TestResult {
     TestResult {
         status: TestStatus::TimedOut,
         exit_code: -1,
@@ -131,6 +154,7 @@ fn timed_out(duration_ms: u64) -> TestResult {
         xml: None,
         cached: false,
         epoch: EPOCH.load(Ordering::Relaxed),
+        timeout_seconds,
     }
 }
 
