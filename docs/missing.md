@@ -187,23 +187,28 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
 - **Stamping:** `--workspace_status_command` isn't run, so the workspace
   status files hold fixed values.
 
-## 10. Checking dependencies
+## 10. Checking dependencies and visibility
 
-Analysis doesn't check that dependencies are what their attributes allow:
-`allow_files`, `providers`, `allow_rules` and `executable` aren't enforced.
-A rule that depends on a file its attribute doesn't allow, or on one that
-doesn't exist, as `attr.label()` with `":missing"` does, analyzes in bb
-where Bazel fails.
+Analysis checks a rule's direct dependencies as Bazel does, with Bazel's
+errors (`buildbox/bazel/analysis/dep_checks.rs`): that each is a file or
+rule its attribute's `allow_files`, `allow_single_file`, `allow_rules`
+and `providers` allow, that it's visible to the rule, from the `.bzl`
+file defining the rule for implicit dependencies, and from where the
+symbolic macros declaring the rule are defined, and that it isn't testonly
+unless the rule is; with warnings for deprecated dependencies, and the
+checks of `allow_empty = False`, executable attributes, duplicate labels
+and `select()`s' `config_setting`s. Still unchecked:
 
-## 11. Visibility
-
-Analysis doesn't check target visibility, so a build can succeed in bb that
-Bazel rejects.
+- native rules' attributes, whose allowed files and providers bb doesn't
+  know;
+- aspects' implicit dependencies, and toolchains;
+- Bazel's checks of output files of testonly rules, which
+  `--experimental_check_testonly_for_output_files` turns on.
 
 ## Suggested order
 
 1. Execution platforms and exec groups (section 3).
-2. Checking dependencies and visibility (sections 10 and 11).
+2. Options bb accepts but ignores, and execution requirements (section 3).
 
 ## Not yet audited
 

@@ -296,6 +296,62 @@ pub async fn target_location(ctx: &Ctx, label: Label) -> Option<String> {
     Some(format!("{}:{}:{}", path.display(), rule.location.line, rule.location.column))
 }
 
+/// What Bazel adds to the error for a target its package doesn't declare:
+/// that a file or directory of that name exists, and to export it, or the
+/// targets of the package whose names are like it.
+pub async fn missing_target_suggestion(ctx: &Ctx, label: Label, package: &Package) -> String {
+    let name = label.name.as_str();
+    let Ok(path) = PathId::parse(name) else {
+        return String::new();
+    };
+    if name == "*" {
+        return String::new();
+    }
+    let build_file = package.build_file.package.path.join(package.build_file.name);
+    match file_state(ctx, label.package, path).await {
+        Some(FileState::Directory) => {
+            format!("; however, a source directory of this name exists.  (Perhaps add 'exports_files([\"{name}\"])' to {build_file}, or define a filegroup?)")
+        }
+        Some(FileState::File { .. } | FileState::Other) => format!("; however, a source file of this name exists.  (Perhaps add 'exports_files([\"{name}\"])' to {build_file}?)"),
+        _ => suggested_targets(name, package.targets.iter().map(|target| target.name().as_str())),
+    }
+}
+
+/// What is at `path` in a package's directory, if the package is found.
+async fn file_state(ctx: &Ctx, package: PackageId, path: PathId) -> Option<FileState> {
+    let lookup = ctx.compute(&PackageLookupKey(package)).await.ok()?;
+    let PackageLookup::Found { root, .. } = &*lookup else {
+        return None;
+    };
+    let state = ctx.compute(&FileStateKey(RootedPath::new(*root, package.path.join_path(path)))).await.ok()?;
+    Some(state.as_ref().clone())
+}
+
+/// ` (did you mean a, b, or c?)` for the targets whose names are closest
+/// to `name`, as Bazel's `TargetSuggester` picks them.
+fn suggested_targets<'a>(name: &str, targets: impl Iterator<Item = &'a str>) -> String {
+    const MAX_DISTANCE: usize = 5;
+    const MAX_SUGGESTED: usize = 10;
+    let lower = name.to_lowercase();
+    let max = MAX_DISTANCE.min(name.chars().count().div_ceil(2));
+    let mut by_distance: std::collections::BTreeMap<usize, Vec<&str>> = std::collections::BTreeMap::new();
+    for target in targets {
+        if let Some(distance) = bazel_starlark::edit_distance(&lower, &target.to_lowercase(), max) {
+            by_distance.entry(distance).or_default().push(target);
+        }
+    }
+    let suggested: Vec<&str> = match (by_distance.get(&0), by_distance.get(&1)) {
+        (Some(exact), _) => exact.iter().take(MAX_SUGGESTED).copied().collect(),
+        (None, Some(close)) => close.iter().take(MAX_SUGGESTED).copied().collect(),
+        (None, None) => by_distance.range(2..max).flat_map(|(_, names)| names.iter().copied()).take(MAX_SUGGESTED).collect(),
+    };
+    match suggested.as_slice() {
+        [] => String::new(),
+        [only] => format!(" (did you mean {only}?)"),
+        [rest @ .., last] => format!(" (did you mean {}, or {last}?)", rest.join(", ")),
+    }
+}
+
 /// The error for a target its package doesn't declare.
 pub fn no_such_target(label: Label, build_file: &std::path::Path) -> String {
     format!(

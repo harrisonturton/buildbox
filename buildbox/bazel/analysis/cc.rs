@@ -25,4 +25,5 @@ pub const NATIVE_RULES: &[&str] = &["cc_toolchain", "cc_toolchain_alias", "cc_li
 pub fn register() {
     bazel_starlark::register_bzl_extension(api::register);
     bazel_starlark::register_builtins_internal(internal::register_builtins_internal);
+    bazel_starlark::provider::set_native_provider_name_fn(|value| starlark::values::ValueLike::downcast_ref::<values::NativeProvider>(value).map(|provider| provider.name));
 }

@@ -78,6 +78,40 @@ impl PackageSpecification {
         Ok(specification)
     }
 
+    /// The packages a visibility label names by itself: every package for
+    /// `//visibility:public`, none for `//visibility:private`, the package
+    /// for `//pkg:__pkg__`, and it and those beneath for
+    /// `//pkg:__subpackages__`; `None` for a label naming a package group.
+    pub fn of_visibility_label(label: Label) -> Option<PackageSpecification> {
+        let spec = match (label.package.path.to_string().as_str(), label.name.as_str()) {
+            ("visibility", "public") => Some(Spec::Everything),
+            ("visibility", "private") => None,
+            (_, "__pkg__") => Some(Spec::Exactly(label.package)),
+            (_, "__subpackages__") => Some(Spec::Beneath(label.package)),
+            _ => return None,
+        };
+        Some(PackageSpecification {
+            included: spec.into_iter().collect(),
+            excluded: Vec::new(),
+        })
+    }
+
+    /// The package alone.
+    pub fn package(package: PackageId) -> PackageSpecification {
+        PackageSpecification {
+            included: vec![Spec::Exactly(package)],
+            excluded: Vec::new(),
+        }
+    }
+
+    /// Every package.
+    pub fn everything() -> PackageSpecification {
+        PackageSpecification {
+            included: vec![Spec::Everything],
+            excluded: Vec::new(),
+        }
+    }
+
     pub fn contains(&self, package: PackageId) -> bool {
         self.included.iter().any(|spec| spec.contains(package)) && !self.excluded.iter().any(|spec| spec.contains(package))
     }

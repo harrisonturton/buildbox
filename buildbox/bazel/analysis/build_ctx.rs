@@ -8,7 +8,7 @@ use crate::artifact::{self, Artifact};
 use crate::action_value::DepTargets;
 use crate::configured::{ConfiguredTarget, Implementation};
 use crate::exec_groups::ExecGroups;
-use crate::failure::ImplementationFailed;
+use crate::failure::{AttributeErrors, ImplementationFailed};
 use crate::file_value::{FileRoot, FileValue};
 use crate::providers::{self, Defaults};
 use crate::rule_ctx::RuleCtx;
@@ -294,6 +294,15 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     };
     module.set(RULE_CTX, Value::new_none());
     printed.extend(context.printed.take());
+    let attribute_errors = context.extension.as_ref().and_then(|state| state.downcast_ref::<RuleState>()).map(|state| state.attribute_errors.take()).unwrap_or_default();
+    if !attribute_errors.is_empty() {
+        let implementation = returned.err().map(|error| error.downcast::<ImplementationFailed>().unwrap_or_else(|error| ImplementationFailed::reported(error.to_string())));
+        return Err(AttributeErrors {
+            errors: attribute_errors,
+            implementation,
+        }
+        .into());
+    }
     let returned = returned?;
     let state = context.extension.take().and_then(|state| state.downcast::<RuleState>().ok()).ok_or_else(|| anyhow::anyhow!("lost the rule's state"))?;
     let script = match state.analysis_test {
@@ -829,23 +838,31 @@ fn executable_struct<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepar
             continue;
         }
         let executable = targets.first().and_then(|target| attr_executable(*target));
+        if let (None, Some(AttrValue::Label(label))) = (executable, input.attr(schema.name.as_str())) {
+            let error = format!(
+                "in {} attribute of {} rule {}: {label} does not refer to a valid executable target",
+                crate::dep_checks::display_name(schema),
+                input.class.kind,
+                input.label
+            );
+            state.attribute_errors.borrow_mut().push(error);
+        }
         let value = executable.map(|artifact| heap.alloc(FileValue(artifact))).unwrap_or_else(Value::new_none);
         fields.push((schema.name.as_str(), value));
     }
     heap.alloc(AllocStruct(fields))
 }
 
-/// What an executable attribute runs: the target's executable, or the file
-/// itself when the target is a single file, such as a script in a source
-/// tree.
+/// What an executable attribute runs: the target's executable, as Bazel's
+/// `FilesToRunProvider` gives it, which for a file, or a filegroup of one,
+/// is the file itself.
 fn attr_executable(target: Value<'_>) -> Option<Artifact> {
     if let Some((executable, _)) = target_executable(target) {
         return Some(executable);
     }
-    match target_files(target).ok()?.as_slice() {
-        [file] if file.is_source() => Some(*file),
-        _ => None,
-    }
+    let target = TargetValue::from_value(target)?;
+    let files_to_run = FilesToRun::from_value(target.default_info("files_to_run")?)?;
+    FileValue::artifact(files_to_run.executable)
 }
 
 /// `ctx.outputs`: the predeclared outputs.

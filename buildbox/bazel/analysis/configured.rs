@@ -6,7 +6,7 @@ use crate::paging::PagedValue;
 use crate::artifact::{self, Artifact};
 use crate::attrs::resolve_attrs;
 use crate::build_ctx::{self, Dep, RuleInput};
-use crate::failure::{ImplementationFailed, ProvidersClash};
+use crate::failure::{AttributeErrors, ImplementationFailed, ProvidersClash};
 use crate::platform::PlatformKey;
 use crate::providers;
 use crate::toolchains::{self, ResolvedToolchains};
@@ -228,7 +228,7 @@ async fn toolchain_error(ctx: &Ctx, key: ConfiguredTargetKey, error: SkyError) -
 }
 
 /// The kind of a package group's configured target.
-const PACKAGE_GROUP: &str = "package group";
+pub(crate) const PACKAGE_GROUP: &str = "package group";
 
 /// Several errors as one error's message, which the server reports as
 /// Bazel does, each with its own `ERROR:`.
@@ -243,7 +243,8 @@ async fn no_such_target(ctx: &Ctx, label: Label, package: &Package) -> String {
         Ok(Some(path)) => path,
         _ => std::path::PathBuf::from(package.build_file.to_string()),
     };
-    bazel_loading::no_such_target(label, &build_file)
+    let suggestion = bazel_loading::missing_target_suggestion(ctx, label, package).await;
+    format!("{}{suggestion}", bazel_loading::no_such_target(label, &build_file))
 }
 
 /// What implements a rule class.
@@ -285,6 +286,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     if let Some(reason) = incompatible_dep(key, &deps) {
         return incompatible(ctx, key, class_ref.kind, is_test, reason);
     }
+    check_dependencies(ctx, key, package, rule, &setup, &deps).await?;
     let fingerprint = fingerprint(key, rule, &setup.implementation, &deps, &setup.toolchains);
     let edges = dependency_edges(ctx, key, package, rule, &setup, &deps).await?;
     let applications = aspect_applications(&deps);
@@ -435,6 +437,18 @@ pub(crate) async fn evaluate_reporting(ctx: &Ctx, label: Label, input: RuleInput
             Err(located(ctx, label, message).await)
         }
         Err(Failure::Clash(clash)) => Err(located(ctx, label, clash.to_string()).await.with_origin(label.to_string())),
+        Err(Failure::Attributes { errors, implementation }) => {
+            let mut messages = Vec::with_capacity(errors.len() + 1);
+            for error in errors {
+                messages.push(located(ctx, label, error).await.message().to_string());
+            }
+            if let Some((target, failed)) = implementation {
+                let message = format!("in {target}: {}", failed.describe(ctx).await);
+                messages.push(located(ctx, label, message).await.message().to_string());
+            }
+            let messages: Vec<&str> = messages.iter().map(String::as_str).collect();
+            Err(SkyError::new(self::errors(&messages)))
+        }
     }
 }
 
@@ -446,12 +460,24 @@ pub(crate) enum Failure {
     /// The providers of a dependency and of its aspects clash, which Bazel
     /// reports at the target alone.
     Clash(ProvidersClash),
+    /// Its attributes had errors, reported each at the target, then how the
+    /// implementation failed, if it did.
+    Attributes { errors: Vec<String>, implementation: Option<(String, ImplementationFailed)> },
 }
 
 impl Failure {
     fn of(input: &RuleInput, error: anyhow::Error) -> Failure {
         let error = match error.downcast::<ProvidersClash>() {
             Ok(clash) => return Failure::Clash(clash),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<AttributeErrors>() {
+            Ok(errors) => {
+                return Failure::Attributes {
+                    errors: errors.errors,
+                    implementation: errors.implementation.map(|failed| (implementing(input), failed)),
+                };
+            }
             Err(error) => error,
         };
         let failed = error.downcast::<ImplementationFailed>().unwrap_or_else(|error| ImplementationFailed::reported(error.to_string()));
@@ -559,7 +585,7 @@ pub(crate) async fn analyze_deps(
             Ok(dep) => deps.insert(wanted, dep),
             Err(DepError::Failed(error)) => return Err(error),
             Err(DepError::AspectFailed(error)) => return Err(error.with_origin(referrer.to_string())),
-            Err(DepError::Missing(message)) => return Err(missing_dep(ctx, referrer, &message).await),
+            Err(DepError::Missing(message)) => return Err(missing_dep(ctx, referrer, &message).await.with_origin(wanted.0.to_string())),
         };
     }
     Ok(deps)
@@ -735,9 +761,33 @@ enum DepError {
     AspectFailed(SkyError),
 }
 
+/// Fail as Bazel does when the rule's dependencies aren't what its
+/// attributes allow or aren't visible to it, reporting the warnings the
+/// checks found too.
+async fn check_dependencies(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, rule: &Rule, setup: &RuleSetup, deps: &BTreeMap<(Label, ConfigId), Dep>) -> Result<(), SkyError> {
+    let checked = crate::dep_checks::check(ctx, key, package, rule, setup, deps).await?;
+    let location = bazel_loading::target_location(ctx, key.label).await;
+    let at = |message: &str| match &location {
+        Some(location) => format!("{location}: {message}"),
+        None => message.to_string(),
+    };
+    if let Ok(progress) = ctx.global::<Progress>() {
+        for warning in &checked.warnings {
+            progress.report(Event::Warning(at(warning)));
+        }
+    }
+    if checked.errors.is_empty() {
+        return Ok(());
+    }
+    let located: Vec<String> = checked.errors.iter().map(|error| at(error)).collect();
+    let located: Vec<&str> = located.iter().map(String::as_str).collect();
+    Err(SkyError::new(errors(&located)))
+}
+
 /// The error for a dependency that doesn't exist, as Bazel reports it:
 /// where the target that refers to it was declared, and that it's
-/// referred to.
+/// referred to. It's the dependency's error, as the missing label is its
+/// origin.
 async fn missing_dep(ctx: &Ctx, referrer: Label, message: &str) -> SkyError {
     match bazel_loading::target_location(ctx, referrer).await {
         Some(location) => SkyError::new(format!("{location}: {message} and referenced by '{referrer}'")),

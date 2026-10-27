@@ -8,12 +8,16 @@ use starlark::values::{
     Freeze, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
 };
+use crate::context::EvalContext;
+use bazel_label::Label;
+use bazel_packages::MacroFrame;
 use std::fmt;
 use std::sync::OnceLock;
 
 /// A macro defined with `macro()`. Calling it calls its implementation with
 /// the same keyword arguments, and `visibility = None` if not given; the
-/// macro's own scoping of names and visibility isn't enforced.
+/// macro's own scoping of names isn't enforced. The targets it declares
+/// record it, for their visibility.
 #[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagable)]
 #[starlark_pagable(bound = "V: starlark::pagable::StarlarkPagable")]
 #[repr(C)]
@@ -24,6 +28,11 @@ pub struct SymbolicMacroGen<V: ValueLifetimeless> {
     #[allocative(skip)]
     #[starlark_pagable(serialize_with = "crate::paging::serialize_once_lock", deserialize_with = "crate::paging::deserialize_once_lock")]
     pub exported: OnceLock<String>,
+    /// The `.bzl` file that called `macro()`.
+    #[freeze(identity)]
+    #[allocative(skip)]
+    #[starlark_pagable(serialize_with = "crate::paging::serialize_encoded", deserialize_with = "crate::paging::deserialize_encoded")]
+    pub definition: Label,
 }
 
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<SymbolicMacroGen<To>> for SymbolicMacroGen<From> {}
@@ -56,6 +65,34 @@ where
         if !kwargs.iter().any(|(name, _)| *name == "visibility") {
             kwargs.push(("visibility", Value::new_none()));
         }
-        eval.eval_function(self.implementation.to_value(), &[], &kwargs)
+        let context = EvalContext::get(eval).map_err(starlark::Error::new_other)?;
+        let frame = MacroFrame {
+            definition: self.definition.package,
+            labels: given_labels(context, &kwargs),
+        };
+        context.macros.borrow_mut().push(frame);
+        let called = eval.eval_function(self.implementation.to_value(), &[], &kwargs);
+        context.macros.borrow_mut().pop();
+        called
     }
+}
+
+/// The labels a macro's caller gave it, as the BUILD file's package reads
+/// them: of each string or `Label`, alone or in a list, that is one.
+fn given_labels(context: &EvalContext, kwargs: &[(&str, Value<'_>)]) -> Vec<Label> {
+    let mut labels = Vec::new();
+    for (name, value) in kwargs {
+        if matches!(*name, "name" | "visibility") {
+            continue;
+        }
+        let values = crate::convert::items(*value).unwrap_or_else(|| vec![*value]);
+        for value in values {
+            let label = match value.downcast_ref::<crate::label_value::LabelValue>() {
+                Some(label) => Some(label.0),
+                None => value.unpack_str().and_then(|text| context.parse_in_package(text).ok()),
+            };
+            labels.extend(label);
+        }
+    }
+    labels
 }

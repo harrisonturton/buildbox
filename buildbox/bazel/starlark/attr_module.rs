@@ -32,6 +32,11 @@ pub struct AttributeGen<V: ValueLifetimeless> {
     pub allow_files: Option<V>,
     pub allow_single_file: Option<V>,
     pub providers: Option<V>,
+    pub allow_rules: Option<V>,
+    pub flags: Option<V>,
+    /// `allow_empty`, if given.
+    #[freeze(identity)]
+    pub allow_empty: Option<bool>,
     pub aspects: Option<V>,
     pub values: Option<V>,
 }
@@ -125,6 +130,9 @@ fn attribute<'v>(ty: AttrType, kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> 
         allow_files: None,
         allow_single_file: None,
         providers: None,
+        allow_rules: None,
+        flags: None,
+        allow_empty: None,
         aspects: None,
         values: None,
     };
@@ -146,6 +154,9 @@ fn attribute<'v>(ty: AttrType, kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> 
             "allow_files" => attribute.allow_files = option(value),
             "allow_single_file" => attribute.allow_single_file = option(value),
             "providers" => attribute.providers = option(value),
+            "allow_rules" => attribute.allow_rules = option(value),
+            "flags" => attribute.flags = option(value),
+            "allow_empty" => attribute.allow_empty = Some(value.to_bool()),
             "aspects" => {
                 crate::aspect::check_attached(value)?;
                 attribute.aspects = option(value);

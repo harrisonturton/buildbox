@@ -18,6 +18,7 @@ pub mod cc;
 mod condition;
 mod configured;
 mod coverage;
+mod dep_checks;
 mod exec_groups;
 mod expand;
 mod failure;

@@ -207,6 +207,8 @@ pub enum Event {
     ActionFailed(Arc<ActionFailure>),
     /// Something else went wrong, as an error message.
     Error(String),
+    /// Something may be wrong, as a warning.
+    Warning(String),
     /// Starlark code printed something: `file:line:column: text`.
     Debug(String),
 }

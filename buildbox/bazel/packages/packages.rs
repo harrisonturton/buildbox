@@ -11,7 +11,7 @@ mod tests_of;
 
 pub use attr::{AttrType, AttrValue, Select, SelectorPart, DEFAULT_CONDITION};
 pub use error::{CallFrame, PackageError, SourcePosition, TraceFrame};
-pub use rule_class::{AspectRef, AttrDefault, AttrSchema, BuildSettingSpec, Cfg, LateBound, RuleClass, RuleClassRef};
+pub use rule_class::{AspectRef, AttrDefault, AttrSchema, BuildSettingSpec, Cfg, DepRequirements, FileTypes, LateBound, ProviderRef, RuleClass, RuleClassRef};
 pub use tests_of::{TagFilter, is_manual, is_test_kind};
 
 use bazel_label::{Label, PackageId};
@@ -89,6 +89,17 @@ pub struct Rule {
     /// created it; a rule the BUILD file creates was created at its
     /// location.
     pub call_stack: Vec<CallFrame>,
+    /// The symbolic macros that declared the rule, outermost first, which
+    /// its visibility is checked against.
+    pub macros: Vec<MacroFrame>,
+}
+
+/// A symbolic macro that declared a target: the package of the `.bzl`
+/// file that defines it, and the labels its caller gave it.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct MacroFrame {
+    pub definition: PackageId,
+    pub labels: Vec<Label>,
 }
 
 /// Where in the BUILD file a rule was created.

@@ -33,6 +33,7 @@ pub mod toolchain_type;
 pub mod transition;
 
 pub use context::{EvalContext, FileKind, Globber};
+pub use reported::edit_distance;
 pub use eval::{EvalError, Loads, eval_bzl, eval_build, eval_build_module, heap_name, load_positions, loads, parse, parse_reporting_all};
 pub use package_builder::PackageBuilder;
 

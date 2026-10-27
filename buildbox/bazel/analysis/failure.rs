@@ -53,6 +53,16 @@ impl ImplementationFailed {
     }
 }
 
+/// Errors in a rule's attributes found as its `ctx` was made, each as
+/// Bazel words it, and how its implementation failed too, if it did:
+/// Bazel runs it all the same.
+#[derive(Debug, thiserror::Error)]
+#[error("{}", errors.join("\n"))]
+pub struct AttributeErrors {
+    pub errors: Vec<String>,
+    pub implementation: Option<ImplementationFailed>,
+}
+
 /// The providers of a target and of the aspects applied to it clash.
 #[derive(Debug, thiserror::Error)]
 #[error("Provider {0} provided twice")]

@@ -28,6 +28,7 @@ rust_library(
         "condition.rs",
         "configured.rs",
         "coverage.rs",
+        "dep_checks.rs",
         "exec_groups.rs",
         "failure.rs",
         "expand.rs",
@@ -64,6 +65,7 @@ rust_library(
     proc_macro_deps = ["@crates//:async-trait"],
     deps = [
         "//buildbox/bazel/config",
+        "//buildbox/bazel/fs",
         "//buildbox/bazel/label",
         "//buildbox/bazel/loading",
         "//buildbox/bazel/packages",

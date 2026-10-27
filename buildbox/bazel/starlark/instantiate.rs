@@ -4,7 +4,8 @@ use crate::context::EvalContext;
 use crate::convert::{self, LabelParser};
 use crate::select::selector_parts;
 use crate::reported::call_position;
-use bazel_packages::{AttrType, AttrValue, Generator, Location, PackageError, Rule, RuleClass, RuleClassRef};
+use bazel_label::Label;
+use bazel_packages::{AttrType, AttrValue, Generator, Location, PackageError, Rule, RuleClass, RuleClassRef, SelectorPart};
 use intern::Symbol;
 use starlark::codemap::FileSpan;
 use starlark::eval::Evaluator;
@@ -41,6 +42,8 @@ pub fn instantiate<'v>(
     let name = rule_name(schema, kwargs)?;
     let (mut rule, mut errors) = rule(schema, kwargs, computed, &parser, name, location, generator);
     rule.call_stack = call_stack;
+    rule.macros = context.macros.borrow().clone();
+    errors.extend(duplicated_labels(&rule));
     if let Err(error) = builder.add_rule(class, schema, rule) {
         errors.push(error);
     }
@@ -52,6 +55,45 @@ pub fn instantiate<'v>(
         builder.errors.push(error);
     }
     Ok(())
+}
+
+/// The errors for labels a rule's list attributes, or a branch of their
+/// `select()`s, give twice, as Bazel reports them.
+fn duplicated_labels(rule: &Rule) -> Vec<anyhow::Error> {
+    let mut errors = Vec::new();
+    for (attr, value) in &rule.attrs {
+        let lists: Vec<&Vec<Label>> = match value {
+            AttrValue::LabelList(labels) => vec![labels],
+            AttrValue::Configurable(parts) => parts.iter().flat_map(branch_label_lists).collect(),
+            _ => Vec::new(),
+        };
+        for labels in lists {
+            let mut seen = std::collections::HashSet::new();
+            for label in labels {
+                if !seen.insert(*label) {
+                    errors.push(anyhow::anyhow!("Label '{label}' is duplicated in the '{attr}' attribute of rule '{}'", rule.name));
+                }
+            }
+        }
+    }
+    errors
+}
+
+/// The label lists of a part of a `select()`'s value: its own, or each
+/// branch's.
+fn branch_label_lists(part: &SelectorPart) -> Vec<&Vec<Label>> {
+    match part {
+        SelectorPart::Value(AttrValue::LabelList(labels)) => vec![labels],
+        SelectorPart::Select(select) => select
+            .branches
+            .iter()
+            .filter_map(|(_, value)| match value {
+                AttrValue::LabelList(labels) => Some(labels),
+                _ => None,
+            })
+            .collect(),
+        SelectorPart::Value(_) => Vec::new(),
+    }
 }
 
 /// The rule `kwargs` and `computed` make, named `name`, and the errors in
@@ -108,6 +150,7 @@ fn rule<'v>(
         outputs,
         computed: computed_attrs,
         call_stack: Vec::new(),
+        macros: Vec::new(),
     };
     (rule, errors)
 }

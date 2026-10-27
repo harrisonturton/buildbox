@@ -299,7 +299,7 @@ pub fn did_you_mean(input: &str, candidates: &[String]) -> String {
 }
 
 /// The Levenshtein distance between `a` and `b`, if it's at most `max`.
-fn edit_distance(a: &str, b: &str, max: usize) -> Option<usize> {
+pub fn edit_distance(a: &str, b: &str, max: usize) -> Option<usize> {
     if a == b {
         return Some(0);
     }

@@ -78,6 +78,58 @@ pub struct AttrSchema {
     pub values: Vec<String>,
     /// For label attributes: the aspects applied to their dependencies.
     pub aspects: Vec<AspectRef>,
+    /// What the dependencies of a Starlark rule's label attribute must be,
+    /// which analysis checks; `None` for attributes bb doesn't check, such
+    /// as native rules'.
+    pub requirements: Option<Box<DepRequirements>>,
+    /// Whether the value mustn't be empty, as `allow_empty = False` says.
+    pub non_empty: bool,
+}
+
+/// What a label attribute's dependencies must be, as its `allow_files`,
+/// `allow_single_file`, `allow_rules` and `providers` say.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct DepRequirements {
+    /// The files it allows, by name.
+    pub files: FileTypes,
+    /// Whether each dependency must be one file, as `allow_single_file`
+    /// says.
+    pub single_file: bool,
+    /// Whether the types of the files rules give aren't checked, as the
+    /// flag `SKIP_ANALYSIS_TIME_FILETYPE_CHECK` asks.
+    pub skip_file_type_check: bool,
+    /// The kinds of rules it allows; any if empty.
+    pub rules: Vec<String>,
+    /// The providers a rule must have: all of one of these sets; any rule
+    /// if empty.
+    pub providers: Vec<Vec<ProviderRef>>,
+}
+
+/// The files a label attribute allows.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum FileTypes {
+    Any,
+    None,
+    /// Files whose names end with one of these.
+    Extensions(Vec<String>),
+}
+
+impl FileTypes {
+    pub fn allows(&self, name: &str) -> bool {
+        match self {
+            FileTypes::Any => true,
+            FileTypes::None => false,
+            FileTypes::Extensions(extensions) => extensions.iter().any(|extension| name.ends_with(extension.as_str())),
+        }
+    }
+}
+
+/// A provider an attribute requires: its key, as targets are indexed by
+/// it, and its name, as errors give it.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct ProviderRef {
+    pub key: String,
+    pub name: String,
 }
 
 /// An aspect, by the `.bzl` file that exports it and the name it's
@@ -143,6 +195,8 @@ impl AttrSchema {
             is_dependency: ty.has_labels(),
             values: Vec::new(),
             aspects: Vec::new(),
+            requirements: None,
+            non_empty: false,
         }
     }
 

@@ -244,6 +244,10 @@ impl Ui {
                     messages: vec![(Kind::Error, message.clone())],
                     ..Shown::default()
                 },
+                Event::Warning(message) => Shown {
+                    messages: vec![(Kind::Warning, message.clone())],
+                    ..Shown::default()
+                },
                 Event::Debug(message) => Shown {
                     messages: vec![(Kind::Debug, message.clone())],
                     ..Shown::default()

@@ -7,7 +7,7 @@ use crate::instantiate::instantiate;
 use crate::native_rules;
 use allocative::Allocative;
 use bazel_label::Label;
-use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, CallFrame, Cfg, LateBound, RuleClass, RuleClassRef};
+use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, CallFrame, Cfg, DepRequirements, FileTypes, LateBound, ProviderRef, RuleClass, RuleClassRef};
 use intern::Symbol;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
@@ -359,7 +359,103 @@ pub(crate) fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelP
         is_dependency: ty.has_labels(),
         values,
         aspects: attached_aspects(name, attribute)?,
+        requirements: dep_requirements(attribute)?.map(Box::new),
+        non_empty: attribute.allow_empty == Some(false),
     })
+}
+
+/// What a label attribute's dependencies must be, as Bazel's Starlark
+/// attributes say: files only as `allow_files` or `allow_single_file`
+/// allow, rules of the kinds `allow_rules` names, with the providers
+/// `providers` requires.
+fn dep_requirements(attribute: &Attribute<'_>) -> anyhow::Result<Option<DepRequirements>> {
+    let ty = attribute.ty;
+    if !ty.has_labels() || matches!(ty, AttrType::Output | AttrType::OutputList) {
+        return Ok(None);
+    }
+    let (files, single_file) = match (attribute.allow_files, attribute.allow_single_file) {
+        (Some(files), _) => (file_types(files)?, false),
+        (None, Some(files)) => (file_types(files)?, true),
+        (None, None) => (FileTypes::None, false),
+    };
+    let rules = attribute.allow_rules.and_then(|rules| convert::strings(rules.to_value())).unwrap_or_default();
+    let providers = match attribute.providers {
+        Some(providers) => required_providers(providers.to_value())?,
+        None => Vec::new(),
+    };
+    let flags = attribute.flags.and_then(|flags| convert::strings(flags.to_value())).unwrap_or_default();
+    Ok(Some(DepRequirements {
+        files,
+        single_file,
+        skip_file_type_check: flags.iter().any(|flag| flag == "SKIP_ANALYSIS_TIME_FILETYPE_CHECK"),
+        rules,
+        providers,
+    }))
+}
+
+/// The files `allow_files` or `allow_single_file` allows: any for `True`,
+/// none for `False`, or those with the extensions a list gives.
+fn file_types(value: Value<'_>) -> anyhow::Result<FileTypes> {
+    if let Some(allowed) = value.unpack_bool() {
+        return Ok(if allowed { FileTypes::Any } else { FileTypes::None });
+    }
+    match convert::strings(value) {
+        Some(extensions) => Ok(FileTypes::Extensions(extensions)),
+        None => anyhow::bail!("allow_files should be a boolean or a string list"),
+    }
+}
+
+/// The items of a list or tuple, and only those.
+fn sequence(value: Value<'_>) -> Option<Vec<Value<'_>>> {
+    if let Some(list) = starlark::values::list::ListRef::from_value(value) {
+        return Some(list.iter().collect());
+    }
+    starlark::values::tuple::TupleRef::from_value(value).map(|tuple| tuple.iter().collect())
+}
+
+/// A provider as an attribute requires it: an exported provider, or one
+/// of Bazel's that bb stands in for, such as `PackageSpecificationInfo`,
+/// by its name.
+fn provider_ref(value: Value<'_>) -> Option<ProviderRef> {
+    if let Some(name) = crate::provider::native_provider_name(value) {
+        return Some(ProviderRef { key: name.to_string(), name: name.to_string() });
+    }
+    if let Some(opaque) = value.downcast_ref::<crate::opaque::Opaque>() {
+        let name = opaque.type_name.rsplit('.').next().unwrap_or(&opaque.type_name).to_string();
+        return Some(ProviderRef { key: name.clone(), name });
+    }
+    let provider = crate::provider::Provider::from_value(value).filter(|provider| provider.name.get().is_some())?;
+    Some(ProviderRef {
+        key: provider.key(),
+        name: provider.name().to_string(),
+    })
+}
+
+/// The sets of providers `providers` requires, a dependency having all of
+/// one: a list of providers is one set, a list of lists several. A set of
+/// none requires nothing.
+fn required_providers(value: Value<'_>) -> anyhow::Result<Vec<Vec<ProviderRef>>> {
+    let items = sequence(value).ok_or_else(|| anyhow::anyhow!("providers must be a list"))?;
+    let nested = items.iter().any(|item| sequence(*item).is_some());
+    let sets: Vec<Vec<Value<'_>>> = match nested {
+        true => items.iter().map(|item| sequence(*item).unwrap_or_else(|| vec![*item])).collect(),
+        false => vec![items],
+    };
+    let mut required = Vec::with_capacity(sets.len());
+    for set in sets {
+        if set.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut refs = Vec::with_capacity(set.len());
+        for provider in set {
+            let Some(provider) = provider_ref(provider) else {
+                return Ok(Vec::new());
+            };
+            refs.push(provider);
+        }
+        required.push(refs);
+    }
+    Ok(required)
 }
 
 /// The aspects `attr.label(aspects = [...])` applies to an attribute's

@@ -54,6 +54,9 @@ pub struct RuleState {
     pub tag_execution_info: Vec<(String, String)>,
     /// The toolchain types the rule resolves toolchains for.
     pub toolchain_types: Vec<Label>,
+    /// Errors in the rule's attributes found as its `ctx` was made, as
+    /// Bazel words them, which fail its analysis.
+    pub attribute_errors: RefCell<Vec<String>>,
 }
 
 impl RuleState {
@@ -75,6 +78,7 @@ impl RuleState {
             analysis_test: false,
             tag_execution_info: Vec::new(),
             toolchain_types: Vec::new(),
+            attribute_errors: RefCell::new(Vec::new()),
         }
     }
 

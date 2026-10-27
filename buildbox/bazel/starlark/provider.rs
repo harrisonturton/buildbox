@@ -265,6 +265,22 @@ impl<'v, V: ValueLike<'v>> ProviderInstanceGen<V> {
     }
 }
 
+/// How the providers a higher layer implements natively are named, such as
+/// the C++ ones: by their keys, as targets are indexed by them.
+type NativeProviderNameFn = fn(Value<'_>) -> Option<&'static str>;
+
+static NATIVE_PROVIDER_NAME: OnceLock<NativeProviderNameFn> = OnceLock::new();
+
+/// Set how natively implemented providers are named.
+pub fn set_native_provider_name_fn(name: NativeProviderNameFn) {
+    let _ = NATIVE_PROVIDER_NAME.set(name);
+}
+
+/// The name of a natively implemented provider, which is its key.
+pub fn native_provider_name(value: Value<'_>) -> Option<&'static str> {
+    NATIVE_PROVIDER_NAME.get().and_then(|name| name(value))
+}
+
 /// The providers built into Bazel, with the fields each allows, or `None`
 /// for any.
 const BUILTIN_PROVIDERS: &[(&str, Option<&[&str]>)] = &[

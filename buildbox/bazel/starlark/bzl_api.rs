@@ -41,11 +41,14 @@ pub(crate) fn macro_function(builder: &mut GlobalsBuilder) {
     fn r#macro<'v>(
         #[starlark(require = named)] implementation: Value<'v>,
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<crate::symbolic_macro::SymbolicMacro<'v>> {
         let _ = kwargs;
+        let definition = EvalContext::get(eval)?.caller_file(eval);
         Ok(crate::symbolic_macro::SymbolicMacro {
             implementation,
             exported: std::sync::OnceLock::new(),
+            definition,
         })
     }
 }

@@ -561,6 +561,13 @@ fn actions_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let _ = (unused_inputs_list, input_manifests, exec_group, shadowed_action, resource_set, toolchain);
         let state = RuleState::get(eval)?;
+        let accepted = executable.unpack_str().is_some() || FileValue::artifact(executable).is_some() || FilesToRun::from_value(executable).is_some();
+        if !accepted {
+            anyhow::bail!(
+                "in call to run(), parameter 'executable' got value of type '{}', want 'File, string, or FilesToRunProvider'",
+                executable.get_type()
+            );
+        }
         let mut program = Tools::default();
         let command = match executable.unpack_str() {
             Some(path) => vec![path.to_string()],
