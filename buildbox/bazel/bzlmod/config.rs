@@ -1,6 +1,8 @@
 //! Where Bzlmod fetches from and keeps what it fetches.
 
-use bazel_fetch::DownloadCache;
+use crate::repo_env::ClientEnv;
+use bazel_fetch::{DownloadCache, Netrc};
+use skyframe::{Ctx, SkyError};
 use std::path::PathBuf;
 
 /// The default registry.
@@ -17,6 +19,14 @@ pub struct BzlmodConfig {
 }
 
 impl BzlmodConfig {
+    /// The download cache, sending the credentials of the `.netrc` file
+    /// of the latest command's environment, as Bazel's downloads do.
+    pub fn downloads_for(&self, ctx: &Ctx) -> Result<DownloadCache, SkyError> {
+        let env = ctx.global::<ClientEnv>()?.current();
+        let netrc = Netrc::load(|name| env.get(name).map(str::to_string));
+        Ok(self.downloads.with_netrc(netrc))
+    }
+
     /// A configuration keeping downloads in `repository_cache`, and the rest
     /// beneath `dir`.
     pub fn new(dir: PathBuf, repository_cache: PathBuf, bazel_tools: Option<PathBuf>) -> BzlmodConfig {

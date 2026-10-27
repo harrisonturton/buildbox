@@ -90,7 +90,8 @@ fn complete_marker(dest: &Path) -> PathBuf {
 /// Run `fetch` to fill a repository's directory, unless the repository
 /// was fetched before. Repositories are fetched in place, as in Bazel,
 /// since repository rules may record the paths of the files they create; the
-/// marker beside the directory says the fetch finished. Blocks.
+/// marker beside the directory says the fetch finished. A fetch that fails
+/// is tried again by the next command, as Bazel's are. Blocks.
 pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), SkyError> {
     let marker = complete_marker(dest);
     if marker.exists() {
@@ -103,7 +104,7 @@ pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) 
     std::fs::create_dir_all(dest).map_err(|error| SkyError::transient(format!("failed to create {}: {error}", dest.display())))?;
     if let Err(message) = fetch(dest) {
         let _ = std::fs::remove_dir_all(dest);
-        return Err(SkyError::new(message));
+        return Err(SkyError::transient(message));
     }
     if !BOUNDARY_FILES.iter().any(|name| dest.join(name).exists()) {
         let _ = std::fs::write(dest.join("REPO.bazel"), b"");
@@ -143,7 +144,7 @@ async fn fetch_archive(ctx: &Ctx, config: &BzlmodConfig, repo: RepoName, archive
         Some(url) => ctx.compute(&crate::registry::RegistryFileKey(url.clone())).await?.0.clone(),
         None => None,
     };
-    let downloads = config.downloads.clone();
+    let downloads = config.downloads_for(ctx)?;
     let archive = archive.clone();
     let span = tracing::info_span!("bzlmod.fetch", repo = %repo);
     let fetched_dest = dest.clone();
@@ -165,7 +166,7 @@ async fn fetch_git(ctx: &Ctx, config: &BzlmodConfig, repo: RepoName, git: &GitSp
         Some(url) => ctx.compute(&crate::registry::RegistryFileKey(url.clone())).await?.0.clone(),
         None => None,
     };
-    let downloads = config.downloads.clone();
+    let downloads = config.downloads_for(ctx)?;
     let git = git.clone();
     let span = tracing::info_span!("bzlmod.git", repo = %repo);
     let fetched_dest = dest.clone();
@@ -266,7 +267,7 @@ fn fill_archive(dir: &Path, downloads: &DownloadCache, archive: &ArchiveSpec, la
     let archive_type = archive_type.map_err(|error| error.to_string())?;
     let download = dir.join(".bb_download");
     downloads.download(&archive.urls, integrity.as_ref(), &download).map_err(|error| error.to_string())?;
-    bazel_fetch::extract(&download, archive_type, dir, &archive.strip_prefix, &HashMap::new()).map_err(|error| error.to_string())?;
+    bazel_fetch::extract(&download, archive_type, dir, &archive.strip_prefix, 0, &HashMap::new()).map_err(|error| error.to_string())?;
     let _ = std::fs::remove_file(&download);
 
     for (path, file) in &archive.overlay {

@@ -5,7 +5,7 @@ use crate::config::BzlmodConfig;
 use crate::fetch_repo::FetchSpecKey;
 use crate::module_file::{self, BazelDep, IncludeReader, ModuleFile, Override};
 use crate::fetch_repo::read_label_patch;
-use crate::registry::{self, Registries, RegistriesKey, RegistryFileKey, RegistryModule, RegistryModuleKey};
+use crate::registry::{self, Registries, RegistriesKey, RegistryFileKey, RegistryLookup, RegistryModule, RegistryModuleKey};
 use crate::repo_spec::{ArchiveSpec, GitSpec, RepoSpec};
 use crate::version::Version;
 use bazel_fs::{Root, RootedPath, Workspace};
@@ -283,7 +283,13 @@ async fn discover(
             registry_ids.push((name, version));
         }
         for (id, module) in registry_ids.into_iter().zip(ctx.compute_many(&registry_keys).await) {
-            let module = module.map_err(|error| error.context(format!("in module dependency chain {}", dependency_chain(&parents, &id))))?;
+            let module = match &*module? {
+                RegistryLookup::Found(module) => module.clone(),
+                RegistryLookup::Missing(missing) => {
+                    let chain = dependency_chain(&parents, &id);
+                    return Err(SkyError::new(format!("in module dependency chain {chain}: module {}@{} not found in registries:{missing}", id.0, id.1)));
+                }
+            };
             let mut spec = module.spec.clone();
             add_override_patches(&mut spec, overrides.get(&id.0));
             let file = patched_module_file(ctx, &module, &id, overrides.get(&id.0)).await?;

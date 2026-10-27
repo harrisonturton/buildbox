@@ -4,15 +4,18 @@
 
 use crate::graph_access::GraphAccess;
 use crate::path_value::PathValue;
-use bazel_fetch::{ArchiveType, DownloadCache, Integrity};
+use allocative::Allocative;
+use bazel_fetch::{ArchiveType, DownloadCache, Integrity, RequestHeaders};
 use bazel_starlark::label_value::LabelValue;
 use starlark::collections::SmallMap;
-use starlark::environment::MethodsBuilder;
+use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
+use starlark::starlark_simple_value;
 use starlark::values::dict::{AllocDict, DictRef};
 use starlark::values::none::{NoneOr, NoneType};
 use starlark::values::structs::AllocStruct;
-use starlark::values::{Heap, StringValue, Value, ValueLike};
+use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, StringValue, Value, ValueLike, starlark_value};
+use std::fmt;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -125,14 +128,133 @@ fn integrity(sha256: &str, integrity: &str) -> anyhow::Result<Option<Integrity>>
     Ok(None)
 }
 
-fn download_result<'v>(heap: Heap<'v>, success: bool, checksum: Option<&Integrity>) -> Value<'v> {
-    let sha256 = checksum.and_then(Integrity::sha256).unwrap_or_default();
-    let sri = checksum.map(Integrity::to_sri).unwrap_or_default();
-    heap.alloc(AllocStruct([
-        ("success", heap.alloc(success)),
-        ("sha256", heap.alloc(sha256.as_str())),
-        ("integrity", heap.alloc(sri.as_str())),
-    ]))
+/// What `download` returns: a struct of whether it succeeded and the
+/// file's checksums, or with `block = False`, a token whose `wait()`
+/// returns that struct. bb downloads before returning either.
+fn download_result<'v>(heap: Heap<'v>, success: bool, checksum: Option<&Integrity>, block: bool) -> Value<'v> {
+    let result = DownloadToken {
+        success,
+        sha256: checksum.and_then(Integrity::sha256).unwrap_or_default(),
+        integrity: checksum.map(Integrity::to_sri).unwrap_or_default(),
+    };
+    match block {
+        true => result.to_struct(heap),
+        false => heap.alloc(result),
+    }
+}
+
+/// A download that `block = False` asked not to wait for.
+#[derive(Debug, Clone, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+pub struct DownloadToken {
+    success: bool,
+    sha256: String,
+    integrity: String,
+}
+
+starlark_simple_value!(DownloadToken);
+
+impl DownloadToken {
+    fn to_struct<'v>(&self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc(AllocStruct([
+            ("success", heap.alloc(self.success)),
+            ("sha256", heap.alloc(self.sha256.as_str())),
+            ("integrity", heap.alloc(self.integrity.as_str())),
+        ]))
+    }
+}
+
+impl fmt::Display for DownloadToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<pending download>")
+    }
+}
+
+#[starlark_value(type = "repository_ctx.download_token")]
+impl<'v> StarlarkValue<'v> for DownloadToken {
+    fn get_methods() -> Option<&'static Methods> {
+        static METHODS: MethodsStatic = MethodsStatic::new("download_token", download_token_methods);
+        Some(METHODS.methods())
+    }
+}
+
+#[starlark_module]
+fn download_token_methods(builder: &mut MethodsBuilder) {
+    /// The download's result.
+    fn wait<'v>(this: &DownloadToken, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+        Ok(this.to_struct(heap))
+    }
+}
+
+/// The arguments of `download` and `download_and_extract` that bb reads
+/// from their keywords: `auth`, `headers` and `block`, with
+/// `canonical_id`, which only names the download in Bazel's cache.
+struct DownloadOptions {
+    headers: RequestHeaders,
+    block: bool,
+    /// For `download_and_extract`, the leading components to remove from
+    /// each entry's path.
+    strip_components: usize,
+}
+
+impl DownloadOptions {
+    fn of(function: &str, kwargs: &SmallMap<StringValue<'_>, Value<'_>>) -> anyhow::Result<DownloadOptions> {
+        let mut options = DownloadOptions {
+            headers: RequestHeaders::default(),
+            block: true,
+            strip_components: 0,
+        };
+        for (name, value) in kwargs.iter() {
+            match name.as_str() {
+                "canonical_id" => {}
+                "auth" => options.headers.authorization = authorizations(*value)?,
+                "headers" => options.headers.headers = headers(*value)?,
+                "block" => options.block = value.unpack_bool().ok_or_else(|| anyhow::anyhow!("block must be a bool"))?,
+                "strip_components" if function == "download_and_extract" => {
+                    let count = value.unpack_i32().ok_or_else(|| anyhow::anyhow!("strip_components must be an int"))?;
+                    options.strip_components = usize::try_from(count).map_err(|_| anyhow::anyhow!("'strip_components' must be non-negative"))?;
+                }
+                other => anyhow::bail!("{function}() got an unexpected keyword argument '{other}'"),
+            }
+        }
+        Ok(options)
+    }
+}
+
+/// The `Authorization` headers an `auth` dict gives, by URL: for each, a
+/// dict of a `type`, `basic` or `pattern`, a `login` and `password`, and
+/// for patterns, a `pattern` they're put in as `<login>` and `<password>`.
+fn authorizations(auth: Value<'_>) -> anyhow::Result<Vec<(String, String)>> {
+    let dict = DictRef::from_value(auth).ok_or_else(|| anyhow::anyhow!("auth must be a dict"))?;
+    let mut headers = Vec::new();
+    for (url, entry) in dict.iter() {
+        let url = url.unpack_str().ok_or_else(|| anyhow::anyhow!("auth's keys must be URLs"))?;
+        let entry = DictRef::from_value(entry).ok_or_else(|| anyhow::anyhow!("auth's values must be dicts"))?;
+        let field = |name: &str| entry.iter().find(|(key, _)| key.unpack_str() == Some(name)).and_then(|(_, value)| value.unpack_str().map(str::to_string));
+        let login = field("login").unwrap_or_default();
+        let password = field("password").unwrap_or_default();
+        let header = match field("type").as_deref() {
+            Some("basic") => bazel_fetch::Credentials { login, password }.basic_authorization(),
+            Some("pattern") => field("pattern").unwrap_or_default().replace("<login>", &login).replace("<password>", &password),
+            other => anyhow::bail!("auth for {url} has an unknown type: {other:?}"),
+        };
+        headers.push((url.to_string(), header));
+    }
+    Ok(headers)
+}
+
+/// The headers a `headers` dict gives: each a string, or a list of them.
+fn headers(value: Value<'_>) -> anyhow::Result<Vec<(String, String)>> {
+    let dict = DictRef::from_value(value).ok_or_else(|| anyhow::anyhow!("headers must be a dict"))?;
+    let mut headers = Vec::new();
+    for (name, values) in dict.iter() {
+        let name = name.unpack_str().ok_or_else(|| anyhow::anyhow!("headers' keys must be strings"))?;
+        let values = match values.unpack_str() {
+            Some(value) => vec![value.to_string()],
+            None => bazel_starlark::convert::strings(values).ok_or_else(|| anyhow::anyhow!("headers' values must be strings or lists of them"))?,
+        };
+        headers.extend(values.into_iter().map(|value| (name.to_string(), value)));
+    }
+    Ok(headers)
 }
 
 /// An `output` argument, unless it's missing, `None` or empty.
@@ -362,7 +484,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         heap: Heap<'v>,
     ) -> anyhow::Result<Value<'v>> {
-        let _ = kwargs;
+        let options = DownloadOptions::of("download", &kwargs)?;
         let io = io_of(this)?;
         let dest = match given_output(output) {
             Some(output) => io.path(output)?,
@@ -372,15 +494,15 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
             }
         };
         let expected = self::integrity(sha256, integrity)?;
-        match io.downloads.download(&urls(url)?, expected.as_ref(), &dest) {
+        match io.downloads.download_with(&urls(url)?, expected.as_ref(), &dest, &options.headers) {
             Ok(checksum) => {
                 if executable {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
                 }
-                Ok(download_result(heap, true, Some(&checksum)))
+                Ok(download_result(heap, true, Some(&checksum), options.block))
             }
-            Err(_) if allow_fail => Ok(download_result(heap, false, None)),
+            Err(_) if allow_fail => Ok(download_result(heap, false, None, options.block)),
             Err(error) => Err(error.into()),
         }
     }
@@ -401,7 +523,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         heap: Heap<'v>,
     ) -> anyhow::Result<Value<'v>> {
-        let _ = kwargs;
+        let options = DownloadOptions::of("download_and_extract", &kwargs)?;
         let io = io_of(this)?;
         let dest = match given_output(output) {
             Some(output) => io.path(output)?,
@@ -412,16 +534,16 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         let archive_type = archive_type?;
         let download = dest.join(format!(".bb_archive_{}", std::process::id()));
         let expected = self::integrity(sha256, integrity)?;
-        let checksum = match io.downloads.download(&urls, expected.as_ref(), &download) {
+        let checksum = match io.downloads.download_with(&urls, expected.as_ref(), &download, &options.headers) {
             Ok(checksum) => checksum,
-            Err(_) if allow_fail => return Ok(download_result(heap, false, None)),
+            Err(_) if allow_fail => return Ok(download_result(heap, false, None, options.block)),
             Err(error) => return Err(error.into()),
         };
         let prefix = stripPrefix.unwrap_or(strip_prefix);
-        let extracted = bazel_fetch::extract(&download, archive_type, &dest, prefix, &renames(rename_files));
+        let extracted = bazel_fetch::extract(&download, archive_type, &dest, prefix, options.strip_components, &renames(rename_files));
         let _ = std::fs::remove_file(&download);
         extracted?;
-        Ok(download_result(heap, true, Some(&checksum)))
+        Ok(download_result(heap, true, Some(&checksum), options.block))
     }
 
     fn extract<'v>(
@@ -435,6 +557,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         #[allow(non_snake_case)]
         #[starlark(require = named)]
         stripPrefix: Option<&str>,
+        #[starlark(require = named, default = 0)] strip_components: i32,
     ) -> anyhow::Result<NoneType> {
         let _ = watch_archive;
         let io = io_of(this)?;
@@ -444,7 +567,8 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
             None => io.base_dir.clone(),
         };
         let archive_type = if r#type.is_empty() { ArchiveType::parse(&archive.display().to_string()) } else { ArchiveType::parse(r#type) }?;
-        bazel_fetch::extract(&archive, archive_type, &dest, stripPrefix.unwrap_or(strip_prefix), &renames(rename_files))?;
+        let strip_components = usize::try_from(strip_components).map_err(|_| anyhow::anyhow!("'strip_components' must be non-negative"))?;
+        bazel_fetch::extract(&archive, archive_type, &dest, stripPrefix.unwrap_or(strip_prefix), strip_components, &renames(rename_files))?;
         Ok(NoneType)
     }
 

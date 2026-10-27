@@ -8,9 +8,11 @@
 mod download;
 mod extract;
 mod integrity;
+mod netrc;
 mod patch;
 
-pub use download::{DownloadCache, DownloadError};
+pub use download::{DownloadCache, DownloadError, RequestHeaders};
 pub use extract::{ArchiveType, ExtractError, extract};
 pub use integrity::{Integrity, IntegrityError};
+pub use netrc::{Credentials, Netrc};
 pub use patch::{PatchError, apply_patch, apply_to_file};

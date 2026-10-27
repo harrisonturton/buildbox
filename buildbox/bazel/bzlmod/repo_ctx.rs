@@ -116,7 +116,7 @@ pub async fn fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec) -> Result<Fet
     let local = local_inputs(&module, spec);
     let dest = repo_dir(&config, repo, &[stable_spec.as_bytes(), definer.as_bytes(), &inputs, env_inputs.as_bytes(), local.as_bytes()].concat());
     let access = GraphAccess::new(ctx.clone());
-    let downloads = config.downloads.clone();
+    let downloads = config.downloads_for(ctx)?;
     let spec = spec.clone();
     let span = tracing::info_span!("bzlmod.repository_rule", repo = %repo, rule = %spec.rule);
     let fetched_dest = dest.clone();

@@ -1,9 +1,11 @@
 //! Downloading files into a content-addressed cache.
 
 use crate::integrity::{HashAlgorithm, Hasher, Integrity};
+use crate::netrc::{Netrc, url_host};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,16 +37,52 @@ fn io(context: impl Into<String>) -> impl FnOnce(std::io::Error) -> DownloadErro
     move |error| DownloadError::Io { context, error }
 }
 
+/// What to send with a download's requests besides what every request
+/// sends: headers, and the `Authorization` header of some URLs, which
+/// takes the place of the `.netrc` file's credentials.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RequestHeaders {
+    pub headers: Vec<(String, String)>,
+    /// `Authorization` headers, by URL.
+    pub authorization: Vec<(String, String)>,
+}
+
+impl RequestHeaders {
+    /// The `Authorization` header for `url`: the one given for it, or
+    /// from the credentials `netrc` has for its host.
+    fn authorization(&self, url: &str, netrc: &Netrc) -> Option<String> {
+        if let Some((_, header)) = self.authorization.iter().find(|(given, _)| given == url) {
+            return Some(header.clone());
+        }
+        let credentials = netrc.credentials(url_host(url)?)?;
+        Some(credentials.basic_authorization())
+    }
+}
+
 /// Files downloaded before, by SHA-256, laid out as Bazel's repository
 /// cache is: `content_addressable/sha256/<hash>/file`.
+///
+/// Requests send the credentials of a `.netrc` file, if given one.
 #[derive(Clone, Debug)]
 pub struct DownloadCache {
     dir: PathBuf,
+    netrc: Arc<Netrc>,
 }
 
 impl DownloadCache {
     pub fn new(dir: impl Into<PathBuf>) -> DownloadCache {
-        DownloadCache { dir: dir.into() }
+        DownloadCache {
+            dir: dir.into(),
+            netrc: Arc::default(),
+        }
+    }
+
+    /// The same cache, downloading with `netrc`'s credentials.
+    pub fn with_netrc(&self, netrc: Netrc) -> DownloadCache {
+        DownloadCache {
+            dir: self.dir.clone(),
+            netrc: Arc::new(netrc),
+        }
     }
 
     fn entry(&self, sha256: &str) -> PathBuf {
@@ -55,6 +93,11 @@ impl DownloadCache {
     /// verifying it against `integrity` if given, and return its checksum.
     /// A file already in the cache isn't downloaded again. Blocks.
     pub fn download(&self, urls: &[String], integrity: Option<&Integrity>, dest: &Path) -> Result<Integrity, DownloadError> {
+        self.download_with(urls, integrity, dest, &RequestHeaders::default())
+    }
+
+    /// [`DownloadCache::download`], sending `headers` with each request.
+    pub fn download_with(&self, urls: &[String], integrity: Option<&Integrity>, dest: &Path, headers: &RequestHeaders) -> Result<Integrity, DownloadError> {
         if let Some(sha256) = integrity.and_then(Integrity::sha256) {
             let cached = self.entry(&sha256);
             if cached.is_file() {
@@ -72,9 +115,15 @@ impl DownloadCache {
         let mut failures = Vec::new();
         let mut all_missing = true;
         for url in urls {
-            match self.download_one(url, integrity, dest) {
+            let request = Request {
+                url,
+                headers: &headers.headers,
+                authorization: headers.authorization(url, &self.netrc),
+            };
+            match self.download_one(&request, integrity, dest) {
                 Ok(result) => return Ok(result),
                 Err(error @ DownloadError::Checksum { .. }) => return Err(error),
+                Err(error) if urls.len() == 1 => return Err(error),
                 Err(DownloadError::NotFound(url)) => failures.push(format!("{url} not found")),
                 Err(error) => {
                     all_missing = false;
@@ -88,12 +137,13 @@ impl DownloadCache {
         Err(DownloadError::All(failures.join("; ")))
     }
 
-    fn download_one(&self, url: &str, integrity: Option<&Integrity>, dest: &Path) -> Result<Integrity, DownloadError> {
+    fn download_one(&self, request: &Request<'_>, integrity: Option<&Integrity>, dest: &Path) -> Result<Integrity, DownloadError> {
+        let url = request.url;
         let _span = tracing::info_span!("fetch.download", url = %url).entered();
         let algorithm = integrity.map(Integrity::algorithm).unwrap_or(HashAlgorithm::Sha256);
         let partial = dest.with_extension("partial");
         let mut file = File::create(&partial).map_err(io(format!("failed to create {}", partial.display())))?;
-        let fetched = fetch_into(url, &mut file, algorithm);
+        let fetched = fetch_into(request, &mut file, algorithm);
         drop(file);
         let (sha256, actual) = match fetched {
             Ok(fetched) => fetched,
@@ -141,9 +191,17 @@ impl DownloadCache {
     }
 }
 
-/// Download `url` into `out`, returning its SHA-256 and its checksum with
-/// `algorithm`.
-fn fetch_into(url: &str, out: &mut File, algorithm: HashAlgorithm) -> Result<(Integrity, Integrity), DownloadError> {
+/// One request of a download.
+struct Request<'a> {
+    url: &'a str,
+    headers: &'a [(String, String)],
+    authorization: Option<String>,
+}
+
+/// Download the request's URL into `out`, returning its SHA-256 and its
+/// checksum with `algorithm`.
+fn fetch_into(request: &Request<'_>, out: &mut File, algorithm: HashAlgorithm) -> Result<(Integrity, Integrity), DownloadError> {
+    let url = request.url;
     if let Some(path) = url.strip_prefix("file://") {
         let mut input = match File::open(path) {
             Ok(input) => input,
@@ -157,9 +215,22 @@ fn fetch_into(url: &str, out: &mut File, algorithm: HashAlgorithm) -> Result<(In
         .timeout_read(READ_TIMEOUT)
         .try_proxy_from_env(true)
         .build();
-    let response = match agent.get(url).call() {
+    let mut call = agent.get(url);
+    for (name, value) in request.headers {
+        call = call.set(name, value);
+    }
+    if let Some(authorization) = &request.authorization {
+        call = call.set("Authorization", authorization);
+    }
+    let response = match call.call() {
         Ok(response) => response,
         Err(ureq::Error::Status(404, _)) | Err(ureq::Error::Status(410, _)) => return Err(DownloadError::NotFound(url.to_string())),
+        Err(ureq::Error::Status(code, response)) => {
+            return Err(DownloadError::Http {
+                url: url.to_string(),
+                message: format!("GET returned {code} {}", response.status_text()),
+            });
+        }
         Err(error) => {
             return Err(DownloadError::Http {
                 url: url.to_string(),

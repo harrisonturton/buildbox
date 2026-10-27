@@ -75,7 +75,7 @@ impl Key for RegistryFileKey {
         let config = ctx.global::<BzlmodConfig>()?;
         let url = self.0.clone();
         let cache_path = config.registry_cache.join(Fingerprint::of(url.as_bytes()).to_string());
-        let downloads = config.downloads.clone();
+        let downloads = config.downloads_for(ctx)?;
         let result = tokio::task::spawn_blocking(move || read_registry_file(&downloads, &url, &cache_path)).await;
         result.map_err(|error| SkyError::transient(error.to_string()))?
     }
@@ -98,6 +98,7 @@ fn read_registry_file(downloads: &bazel_fetch::DownloadCache, url: &str, cache_p
     match downloads.download(&[url.to_string()], None, &partial) {
         Ok(_) => {}
         Err(bazel_fetch::DownloadError::NotFound(_)) => return Ok(RegistryFile(None)),
+        Err(bazel_fetch::DownloadError::Http { message, .. }) => return Err(SkyError::transient(format!("Failed to fetch registry file {url}: {message}"))),
         Err(error) => return Err(SkyError::transient(error.to_string())),
     }
     let bytes = std::fs::read(&partial).map_err(|error| SkyError::transient(format!("failed to read {}: {error}", partial.display())))?;
@@ -113,7 +114,7 @@ fn source_url(registry: &str, name: &str, version: &str) -> String {
     format!("{}/modules/{name}/{version}/source.json", registry.trim_end_matches('/'))
 }
 
-/// A module version from the first registry that has it.
+/// A module version from a registry.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub struct RegistryModule {
     pub registry: String,
@@ -121,7 +122,15 @@ pub struct RegistryModule {
     pub spec: RepoSpec,
 }
 
-encoded_value!(RegistryModule);
+/// A module version from the first registry that has it, or if none has
+/// it, what each said, as lines of a message.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum RegistryLookup {
+    Found(RegistryModule),
+    Missing(String),
+}
+
+encoded_value!(RegistryLookup);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct RegistryModuleKey {
@@ -133,14 +142,15 @@ pub struct RegistryModuleKey {
 }
 
 impl Key for RegistryModuleKey {
-    type Value = RegistryModule;
+    type Value = RegistryLookup;
     const KIND: &'static str = "REGISTRY_MODULE";
 
-    async fn compute(&self, ctx: &Ctx) -> Result<RegistryModule, SkyError> {
+    async fn compute(&self, ctx: &Ctx) -> Result<RegistryLookup, SkyError> {
         let mut missing = String::new();
         for registry in &self.registries {
             let url = module_file_url(registry, &self.name, &self.version);
-            let module_file = ctx.compute(&RegistryFileKey(url.clone())).await?;
+            let module_file = ctx.compute(&RegistryFileKey(url.clone())).await;
+            let module_file = module_file.map_err(|error| error.context(format!("Error accessing registry {registry}")))?;
             let Some(bytes) = &module_file.0 else {
                 missing.push_str(&format!("\n* {url}: not found"));
                 continue;
@@ -163,13 +173,13 @@ impl Key for RegistryModuleKey {
                 module_base_path: registry_json.module_base_path.as_deref(),
             };
             let spec = parse_source(&found, source_json)?;
-            return Ok(RegistryModule {
+            return Ok(RegistryLookup::Found(RegistryModule {
                 registry: registry.clone(),
                 file,
                 spec,
-            });
+            }));
         }
-        Err(SkyError::new(format!("module {}@{} not found in registries:{missing}", self.name, self.version)))
+        Ok(RegistryLookup::Missing(missing))
     }
 }
 
@@ -183,7 +193,8 @@ struct RegistryJson {
 /// A registry's `bazel_registry.json`, or the defaults if it has none.
 async fn registry_json(ctx: &Ctx, registry: &str) -> Result<RegistryJson, SkyError> {
     let url = format!("{}/bazel_registry.json", registry.trim_end_matches('/'));
-    let file = ctx.compute(&RegistryFileKey(url.clone())).await?;
+    let file = ctx.compute(&RegistryFileKey(url.clone())).await;
+    let file = file.map_err(|error| error.context(format!("Error accessing registry {registry}")))?;
     let Some(bytes) = &file.0 else {
         return Ok(RegistryJson::default());
     };

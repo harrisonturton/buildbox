@@ -196,8 +196,10 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
   `git_override` of a branch or tag is fetched once and kept, where Bazel
   would fetch it again.
 - **Commands:** there's no `mod`, `fetch`, `vendor` or `sync`.
-- **Authentication:** downloads support neither `.netrc` nor credential
-  helpers, so private registries and authenticated `http_archive`s fail.
+- **Authentication:** downloads send the credentials of the `.netrc`
+  file `$NETRC` or `$HOME` points to, and `repository_ctx.download` takes
+  `auth` and `headers`, but there are no credential helpers
+  (`--credential_helper`).
 - **Stamping:** builds run `--workspace_status_command`, but the status
   files' host, user and time are fixed, and a change to the volatile
   status reruns the actions that read it, which Bazel doesn't.

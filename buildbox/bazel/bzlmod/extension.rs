@@ -62,7 +62,7 @@ impl Key for ExtensionKey {
         let io = IoState {
             base_dir: work_dir.clone(),
             graph: GraphAccess::new(ctx.clone()),
-            downloads: config.downloads.clone(),
+            downloads: config.downloads_for(ctx)?,
             env: ctx.global::<crate::repo_env::ClientEnv>()?.current().env.iter().cloned().collect(),
         };
         let span = tracing::info_span!("bzlmod.module_extension", extension = %info.prefix);

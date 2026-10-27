@@ -9,6 +9,7 @@ rust_library(
         "extract.rs",
         "fetch.rs",
         "integrity.rs",
+        "netrc.rs",
         "patch.rs",
     ],
     crate_name = "bazel_fetch",

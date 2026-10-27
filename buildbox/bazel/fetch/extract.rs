@@ -74,13 +74,16 @@ impl ArchiveType {
 }
 
 /// Extract `archive` into `dest`. Entries outside `strip_prefix` are
-/// skipped, and the prefix removed from the rest; `renames` renames entries
-/// (by their path in the archive) before the prefix is stripped. Blocks.
+/// skipped, and the prefix removed from the rest; then `strip_components`
+/// leading components are removed from each, skipping those with no more.
+/// `renames` renames entries (by their path in the archive) before
+/// either. Blocks.
 pub fn extract(
     archive: &Path,
     archive_type: ArchiveType,
     dest: &Path,
     strip_prefix: &str,
+    strip_components: usize,
     renames: &HashMap<String, String>,
 ) -> Result<(), ExtractError> {
     let _span = tracing::info_span!("fetch.extract", archive = %archive.display()).entered();
@@ -89,6 +92,7 @@ pub fn extract(
     let mapper = PathMapper {
         dest,
         prefix,
+        strip_components,
         renames,
         found_prefix: prefix.is_empty(),
     };
@@ -106,6 +110,7 @@ pub fn extract(
 struct PathMapper<'a> {
     dest: &'a Path,
     prefix: &'a str,
+    strip_components: usize,
     renames: &'a HashMap<String, String>,
     found_prefix: bool,
 }
@@ -125,6 +130,10 @@ impl PathMapper<'_> {
             rest
         } else {
             return Ok(None);
+        };
+        let relative = match relative.splitn(self.strip_components + 1, '/').nth(self.strip_components) {
+            Some(rest) => rest,
+            None => return Ok(None),
         };
         if relative.is_empty() {
             return Ok(None);
@@ -259,16 +268,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let archive = tar_gz(dir.path(), &[("pkg-1.0/BUILD", "b"), ("pkg-1.0/src/a.c", "a"), ("other.txt", "x")]);
         let dest = dir.path().join("out");
-        extract(&archive, ArchiveType::parse("archive.tar.gz").unwrap(), &dest, "pkg-1.0", &HashMap::new()).unwrap();
+        extract(&archive, ArchiveType::parse("archive.tar.gz").unwrap(), &dest, "pkg-1.0", 0, &HashMap::new()).unwrap();
         assert_eq!(std::fs::read_to_string(dest.join("src/a.c")).unwrap(), "a");
         assert!(!dest.join("other.txt").exists());
+    }
+
+    #[test]
+    fn leading_components_are_stripped() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = tar_gz(dir.path(), &[("a/b/c.txt", "c"), ("a/top.txt", "t"), ("d.txt", "d")]);
+        let dest = dir.path().join("out");
+        extract(&archive, ArchiveType::TarGz, &dest, "", 1, &HashMap::new()).unwrap();
+        assert_eq!(std::fs::read_to_string(dest.join("b/c.txt")).unwrap(), "c");
+        assert_eq!(std::fs::read_to_string(dest.join("top.txt")).unwrap(), "t");
+        assert!(!dest.join("d.txt").exists());
     }
 
     #[test]
     fn missing_prefixes_are_errors() {
         let dir = tempfile::tempdir().unwrap();
         let archive = tar_gz(dir.path(), &[("a/b", "")]);
-        let error = extract(&archive, ArchiveType::TarGz, &dir.path().join("out"), "nope", &HashMap::new()).unwrap_err();
+        let error = extract(&archive, ArchiveType::TarGz, &dir.path().join("out"), "nope", 0, &HashMap::new()).unwrap_err();
         assert!(matches!(error, ExtractError::PrefixNotFound(_)));
     }
 

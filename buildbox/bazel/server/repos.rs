@@ -64,7 +64,7 @@ fn extract_builtins(jar: &Path, dest: &Path) -> Result<(), String> {
     let inner = dest.join("builtins_bzl.zip");
     let mut out = std::fs::File::create(&inner).map_err(|error| error.to_string())?;
     std::io::copy(&mut entry, &mut out).map_err(|error| error.to_string())?;
-    bazel_fetch::extract(&inner, bazel_fetch::ArchiveType::Zip, dest, "", &Default::default()).map_err(|error| error.to_string())?;
+    bazel_fetch::extract(&inner, bazel_fetch::ArchiveType::Zip, dest, "", 0, &Default::default()).map_err(|error| error.to_string())?;
     let _ = std::fs::remove_file(&inner);
     Ok(())
 }
