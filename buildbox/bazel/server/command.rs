@@ -4,6 +4,7 @@ use crate::output::Output;
 use crate::running::RunningCommand;
 use crate::BazelServer;
 use crate::workspace;
+use bazel_bzlmod::registry::Registries;
 use bazel_bzlmod::repo_env::RepoEnvironment;
 use bazel_options::{ParsedOptions, RcFile};
 use std::collections::HashMap;
@@ -30,6 +31,26 @@ pub fn repo_environment(context: &CommandContext<'_>, options: &ParsedOptions) -
     RepoEnvironment::new(client, &options.all("repo_env"))
 }
 
+/// Give the workspace's graph the command's inputs from outside it: the
+/// environment, `--registry`, `--module_mirrors` and the files that
+/// changed.
+pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Workspace, options: &ParsedOptions) {
+    workspace.refresh(repo_environment(context, options)).await;
+    let urls = |name: &str| options.all(name).into_iter().map(|url| url.trim_end_matches('/').to_string()).collect();
+    let mirrors = options.all("module_mirrors").into_iter().flat_map(|list| list.split(',')).filter(|url| !url.is_empty());
+    let registries = Registries {
+        registries: urls("registry"),
+        mirrors: mirrors.map(|url| url.trim_end_matches('/').to_string()).collect(),
+    };
+    workspace.set_registries(registries).await;
+}
+
+/// The error for a main repository mapping that couldn't be computed, as
+/// Bazel words it.
+pub fn main_mapping_error(error: &skyframe::SkyError) -> String {
+    format!("Error computing the main repository mapping: {}", error.message())
+}
+
 /// Bazel's exit codes.
 pub mod exit {
     pub const SUCCESS: i32 = 0;
@@ -39,6 +60,9 @@ pub mod exit {
     pub const ANALYSIS_FAILURE: i32 = 7;
     pub const INTERRUPTED: i32 = 8;
     pub const INTERNAL_ERROR: i32 = 37;
+    /// The modules or repositories the build depends on couldn't be
+    /// resolved or fetched.
+    pub const EXTERNAL_DEPS_ERROR: i32 = 48;
 }
 
 /// The startup options given before the command, which affect how the

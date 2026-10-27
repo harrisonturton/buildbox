@@ -5,7 +5,7 @@ use crate::config::BzlmodConfig;
 use crate::fetch_repo::FetchSpecKey;
 use crate::module_file::{self, BazelDep, IncludeReader, ModuleFile, Override};
 use crate::fetch_repo::read_label_patch;
-use crate::registry::{self, RegistryFileKey, RegistryModule, RegistryModuleKey};
+use crate::registry::{self, Registries, RegistriesKey, RegistryFileKey, RegistryModule, RegistryModuleKey};
 use crate::repo_spec::{ArchiveSpec, RepoSpec};
 use crate::version::Version;
 use bazel_fs::{Root, RootedPath, Workspace};
@@ -218,8 +218,9 @@ impl Key for DepGraphKey {
     async fn compute(&self, ctx: &Ctx) -> Result<DepGraph, SkyError> {
         let config = ctx.global::<BzlmodConfig>()?;
         let root = ctx.compute(&RootModuleKey).await?.0.clone();
+        let registries = (*ctx.compute(&RegistriesKey).await?).clone();
         let overrides: HashMap<String, Override> = root.overrides.iter().cloned().collect();
-        let discovered = discover(ctx, &config, &root, &overrides).await?;
+        let discovered = discover(ctx, &config, &registries, &root, &overrides).await?;
         let selected = select(&discovered, &overrides)?;
         let modules = reachable(&root, &discovered, &selected)?;
         let extensions = extensions(&modules)?;
@@ -246,6 +247,7 @@ fn requested_version(dep: &BazelDep, overrides: &HashMap<String, Override>) -> S
 async fn discover(
     ctx: &Ctx,
     config: &BzlmodConfig,
+    registries: &Registries,
     root: &ModuleFile,
     overrides: &HashMap<String, Override>,
 ) -> Result<HashMap<(String, String), Discovered>, SkyError> {
@@ -258,6 +260,7 @@ async fn discover(
         .collect();
     frontier.push(("bazel_tools".to_string(), String::new()));
     let mut seen: HashSet<(String, String)> = frontier.iter().cloned().collect();
+    let mut parents: HashMap<(String, String), (String, String)> = HashMap::new();
 
     while !frontier.is_empty() {
         let mut registry_keys = Vec::new();
@@ -267,34 +270,54 @@ async fn discover(
                 discovered.insert((name, version), found);
                 continue;
             }
-            let registries = match overrides.get(&name) {
+            let selected_registries = match overrides.get(&name) {
                 Some(Override::SingleVersion { registry, .. }) if !registry.is_empty() => vec![registry.clone()],
-                _ => config.registries.clone(),
+                _ => registries.registries.clone(),
             };
             registry_keys.push(RegistryModuleKey {
-                registries,
+                registries: selected_registries,
+                mirrors: registries.mirrors.clone(),
                 name: name.clone(),
                 version: version.clone(),
             });
             registry_ids.push((name, version));
         }
         for (id, module) in registry_ids.into_iter().zip(ctx.compute_many(&registry_keys).await) {
-            let module = module.map_err(|error| error.context(format!("resolving {}@{}", id.0, id.1)))?;
+            let module = module.map_err(|error| error.context(format!("in module dependency chain {}", dependency_chain(&parents, &id))))?;
             let mut spec = module.spec.clone();
             add_override_patches(&mut spec, overrides.get(&id.0));
             let file = patched_module_file(ctx, &module, &id, overrides.get(&id.0)).await?;
             discovered.insert(id, Discovered { file, spec: Some(spec) });
         }
-        for found in discovered.values() {
+        for (parent, found) in &discovered {
             for dep in &found.file.deps {
                 let id = (dep.name.clone(), requested_version(dep, overrides));
                 if id.0 != root.name && seen.insert(id.clone()) {
+                    parents.insert(id.clone(), parent.clone());
                     frontier.push(id);
                 }
             }
         }
     }
     Ok(discovered)
+}
+
+/// How the root module comes to depend on a module, as Bazel shows it:
+/// `<root> -> a@1.0 -> b@2.0`.
+fn dependency_chain(parents: &HashMap<(String, String), (String, String)>, id: &(String, String)) -> String {
+    let shown = |(name, version): &(String, String)| match version.is_empty() {
+        true => format!("{name}@_"),
+        false => format!("{name}@{version}"),
+    };
+    let mut chain = vec![shown(id)];
+    let mut current = id;
+    while let Some(parent) = parents.get(current) {
+        chain.push(shown(parent));
+        current = parent;
+    }
+    chain.push("<root>".to_string());
+    chain.reverse();
+    chain.join(" -> ")
 }
 
 /// A registry module's MODULE.bazel, with the changes a

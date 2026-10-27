@@ -2,6 +2,7 @@
 
 use crate::written::Written;
 use bazel_analysis::workspace_status::{BuildStatus, StatusValues, WorkspaceStatusKey};
+use bazel_bzlmod::registry::{CommandRegistries, Registries, RegistriesKey};
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
 use bazel_execution::{Jobs, SourceDigestKey, TestKey};
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
@@ -36,6 +37,8 @@ pub struct Workspace {
     pub client_env: Arc<ClientEnv>,
     /// What the status files of builds hold.
     pub status: Arc<BuildStatus>,
+    /// The registries modules are resolved from.
+    pub registries: Arc<CommandRegistries>,
     /// What builds wrote to the output tree.
     pub written: Arc<Written>,
     /// What the graph's evaluations are doing, for progress output.
@@ -104,6 +107,14 @@ impl Workspace {
         changed.len()
     }
 
+    /// Resolve modules from these registries, or the default if there are
+    /// none, with these mirrors.
+    pub async fn set_registries(&self, registries: Registries) {
+        if self.registries.set(registries) {
+            self.graph.invalidate(&[RegistriesKey]).await;
+        }
+    }
+
     /// Give builds' status files these values.
     pub async fn set_status(&self, values: StatusValues) {
         if self.status.set(values) {
@@ -144,6 +155,7 @@ impl Workspaces {
         let changes = FileChanges::new();
         let client_env = ClientEnv::new();
         let status = BuildStatus::new();
+        let registries = CommandRegistries::new();
         let progress = Progress::new();
         let jobs = Arc::new(Jobs::default());
         let globals = self
@@ -153,6 +165,7 @@ impl Workspaces {
             .with(changes.clone())
             .with(client_env.clone())
             .with(status.clone())
+            .with(registries.clone())
             .with(progress.clone())
             .with(jobs.clone());
         let workspace = Arc::new(Workspace {
@@ -161,6 +174,7 @@ impl Workspaces {
             changes,
             client_env,
             status,
+            registries,
             written: Arc::default(),
             progress,
             jobs,

@@ -198,7 +198,11 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
 - **Stamping:** builds run `--workspace_status_command`, but the status
   files' host, user and time are fixed, and a change to the volatile
   status reruns the actions that read it, which Bazel doesn't.
-- **Registries:** `--registry` isn't implemented.
+- **Registries:** `--registry`, `--module_mirrors` and registries'
+  `bazel_registry.json` work, but yanked versions aren't checked, and
+  `source.json`'s `git_repository` type isn't supported.
+- **Errors:** a `MODULE.bazel` that fails to evaluate is reported in
+  starlark-rust's words rather than Bazel's.
 
 ## 10. Checking dependencies and visibility
 

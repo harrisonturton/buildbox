@@ -40,7 +40,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     };
     let epoch = bazel_execution::next_epoch();
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    workspace.refresh(crate::command::repo_environment(context, &options)).await;
+    crate::command::refresh(context, &workspace, &options).await;
     if let Err(code) = build::update_status(context, &workspace, &options, out).await {
         return build::failed(code, started, out).await;
     }

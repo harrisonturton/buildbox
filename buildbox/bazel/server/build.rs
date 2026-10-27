@@ -59,6 +59,8 @@ pub fn build_spec() -> OptionSpec {
         ("ui_actions_shown", Int),
         ("show_progress", Bool),
         ("enable_platform_specific_config", Bool),
+        ("registry", Multi),
+        ("module_mirrors", Multi),
         ("workspace_status_command", Value),
         ("embed_label", Value),
     ];
@@ -158,7 +160,7 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
         Err(code) => return code,
     };
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    workspace.refresh(crate::command::repo_environment(context, &options)).await;
+    crate::command::refresh(context, &workspace, &options).await;
     if let Err(code) = update_status(context, &workspace, &options, out).await {
         return failed(code, started, out).await;
     }
@@ -365,8 +367,8 @@ async fn analyze_and_build(
     let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
         Ok(mapping) => Arc::new(mapping.0.clone()),
         Err(error) => {
-            out.error(error.message()).await;
-            return Err(exit::BUILD_FAILURE);
+            out.error(&crate::command::main_mapping_error(&error)).await;
+            return Err(exit::EXTERNAL_DEPS_ERROR);
         }
     };
     let keep_going = options.flag("keep_going", false);

@@ -31,6 +31,8 @@ const COMMON_OPTIONS: &[(&str, OptionKind)] = &[
     ("repo_contents_cache", OptionKind::Value),
     ("repository_cache", OptionKind::Value),
     ("enable_platform_specific_config", OptionKind::Bool),
+    ("registry", OptionKind::Multi),
+    ("module_mirrors", OptionKind::Multi),
     ("repo_env", OptionKind::Multi),
     ("color", OptionKind::Value),
     ("curses", OptionKind::Value),
@@ -81,14 +83,14 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
     }
     let workspace = context.server.workspaces().get(&context.workspace_root);
     out.track(workspace.progress.track()).await;
-    workspace.refresh(crate::command::repo_environment(context, &options)).await;
+    crate::command::refresh(context, &workspace, &options).await;
     let session = workspace.graph.session().await;
     out.phase(Phase::RepoMapping).await;
     let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
         Ok(mapping) => Arc::new(mapping.0.clone()),
         Err(error) => {
-            out.error(error.message()).await;
-            return exit::ANALYSIS_FAILURE;
+            out.error(&crate::command::main_mapping_error(&error)).await;
+            return exit::EXTERNAL_DEPS_ERROR;
         }
     };
     let request = QueryRequest {
@@ -278,7 +280,7 @@ async fn configured_query(context: &CommandContext<'_>, args: &[String], languag
         }
     };
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    workspace.refresh(crate::command::repo_environment(context, &options)).await;
+    crate::command::refresh(context, &workspace, &options).await;
     let session = workspace.graph.session().await;
     let purpose = match language {
         Language::Cquery => Purpose::Query,

@@ -23,7 +23,7 @@ pub async fn run(context: &CommandContext<'_>, args: &[String], out: &Output) ->
     };
     let program_args = options.residue.split_off(1);
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    workspace.refresh(crate::command::repo_environment(context, &options)).await;
+    crate::command::refresh(context, &workspace, &options).await;
     if let Err(code) = build::update_status(context, &workspace, &options, out).await {
         return build::failed(code, started, out).await;
     }
