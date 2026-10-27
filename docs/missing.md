@@ -83,15 +83,24 @@ the aspects that made them, as Bazel's do with `--include_aspects`.
 Together with section 1, this means remote execution on a platform other
 than the host doesn't work.
 
-## 4. Builtin APIs for rule sets other than C++
+## 4. Builtin APIs for rule sets other than C++, Java and Python
 
-Only C++ has a real implementation. `java_common`,
-`proto_common_do_not_use`, `apple_common`, `testing` and `config` are opaque
-values (`buildbox/bazel/starlark/opaque.rs`), and there's no `py_internal` or
-`JavaInfo`. This leaves out Java and Kotlin, Python, proto, Apple, Android,
-and analysis tests (`testing.analysis_test`, which rules_testing and
-skylib's `unittest` use). `coverage_common` is real, but only as Bazel
-behaves with coverage off (section 6).
+C++, Java and Python have real implementations of the native APIs their
+rule sets are written against: `cc_common` and `cc_internal`,
+`java_common_internal_do_not_use` (`buildbox/bazel/analysis/java`), which
+compiles with the toolchain's JavaBuilder and Turbine as Bazel does, and
+`py_builtins` (`buildbox/bazel/analysis/python.rs`). rules_java,
+rules_python and protobuf's `proto_library`, `java_proto_library` and
+prebuilt `protoc` build, and their actions match Bazel 9.3.1's. So do
+analysis tests: the `testing` module, `rule(analysis_test = True)`,
+`analysis_test_transition` and `Target.actions`, which rules_testing and
+skylib's `unittest` use. Bazel reduces the classpath of `Javac` to what
+the dependencies' `.jdeps` say is used; bb runs it with the full one.
+
+`apple_common` and `config` are still opaque values
+(`buildbox/bazel/starlark/opaque.rs`), which leaves out Apple and Android.
+Kotlin and Scala aren't tested. `coverage_common` is real, but only as
+Bazel behaves with coverage off (section 6).
 
 A rule implementation fails if it calls, iterates or searches an opaque
 value, or returns one as a provider, so a missing API is an error rather
@@ -133,6 +142,8 @@ actions of executables included. Still missing:
 - `cquery` analyzes `_license_kind` targets in an exec configuration,
   where Bazel uses the one without options.
 - Error messages for invalid regular expressions are Rust's, not Java's.
+- `aquery` doesn't list tests' `TestRunner` actions, since bb runs tests
+  outside the action graph.
 - Where Bazel's own order varies from run to run, as for graphs, ranks and
   `cquery`'s results, bb prints results in one of the orders Bazel may:
   `--order_output=full`'s, or by label and configuration.
@@ -148,7 +159,8 @@ merging.
 
 There are no persistent or multiplex workers (`supports-workers`). Java,
 Kotlin, Scala and TypeScript builds still build, but their compile actions
-are much slower.
+are much slower, and each prints the JVM's startup warnings, which a
+worker would print once to its log.
 
 ## 8. Build reporting
 
