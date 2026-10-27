@@ -118,6 +118,14 @@ impl Key for TestKey {
         let backend = ctx.global::<Backend>()?;
         let test = TestSpec::of(ctx, self.target, &self.settings).await?;
         let request = test.request(ctx).await?;
+        let _shared = match test.exclusive {
+            true => None,
+            false => Some(EXCLUSIVE.read().await),
+        };
+        let _alone = match test.exclusive {
+            true => Some(EXCLUSIVE.write().await),
+            false => None,
+        };
         let _turn = crate::jobs::job_turn(ctx).await?;
         let shown = progress(ctx).map(|progress| progress.action_started(test_progress_id(self), Vec::new(), format!("Testing {}", self.target.label)));
         if let Some(shown) = &shown {
@@ -162,6 +170,10 @@ impl Key for TestKey {
         })
     }
 }
+
+/// Held while a test runs: shared by tests that may run alongside others,
+/// and held alone by those tagged `exclusive`.
+static EXCLUSIVE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 /// A number identifying a test run in progress reports.
 fn test_progress_id(key: &TestKey) -> u64 {
@@ -216,6 +228,8 @@ struct TestSpec {
     filter: Option<String>,
     /// Whether its result may come from the action cache.
     cacheable: bool,
+    /// Whether it must run while no other test does.
+    exclusive: bool,
 }
 
 impl TestSpec {
@@ -243,7 +257,14 @@ impl TestSpec {
             _ => Vec::new(),
         };
         args.extend(settings.args.iter().cloned());
-        let external = matches!(rule.attr(Symbol::intern("tags")), Some(AttrValue::StringList(tags)) if tags.iter().any(|tag| tag == "external"));
+        let tags = match rule.attr(Symbol::intern("tags")) {
+            Some(AttrValue::StringList(tags)) => tags.clone(),
+            _ => Vec::new(),
+        };
+        let tagged = |wanted: &[&str]| tags.iter().any(|tag| wanted.contains(&tag.as_str()));
+        if tagged(&["block-network"]) {
+            return Err(SkyError::new(format!("{} is tagged 'block-network', but bb can't block tests' network yet", key.label)));
+        }
         if let Some(AttrValue::StringDict(entries)) = rule.attr(Symbol::intern("env")) {
             env.extend(entries.iter().cloned());
         }
@@ -267,7 +288,8 @@ impl TestSpec {
             action_env: config.options.action_env.clone(),
             test_env: settings.env.clone(),
             filter: settings.filter.clone(),
-            cacheable: !external && settings.cached,
+            cacheable: !tagged(&["external"]) && settings.cached,
+            exclusive: tagged(&["exclusive", "exclusive-if-local"]),
         })
     }
 

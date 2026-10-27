@@ -208,11 +208,6 @@ fn string_dict(value: Option<Value<'_>>, what: &str) -> anyhow::Result<Vec<(Stri
     Ok(entries)
 }
 
-fn sorted(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
-    entries.sort();
-    entries
-}
-
 /// The text of a progress message, with `%{label}`, and `%{input}` and
 /// `%{output}` substituted by the paths, relative to their roots, of the
 /// primary input and the first output.
@@ -289,7 +284,7 @@ impl<'v> SpawnArgs<'v> {
             kind: ActionKind::Spawn(Spawn {
                 arguments,
                 env,
-                execution_info: sorted(string_dict(self.execution_requirements, "execution_requirements")?),
+                execution_info: crate::state::action_execution_info(string_dict(self.execution_requirements, "execution_requirements")?, &state.tag_execution_info),
                 param_files,
             }),
         };

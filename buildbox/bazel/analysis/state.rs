@@ -270,14 +270,29 @@ pub fn runfiles_tree(executable: Artifact, runfiles: &Runfiles<'_>) -> Arc<Runfi
 /// `block-`, `requires-`, `no-`, `supports-`, `disable-`, `cpu:` or
 /// `resources:`, and `local` and `worker-key-mnemonic`, sorted.
 pub fn tag_execution_info(tags: &[String]) -> Vec<(String, String)> {
-    let prefixes = ["block-", "requires-", "no-", "supports-", "disable-", "cpu:", "resources:"];
-    let mut info: Vec<(String, String)> = tags
-        .iter()
-        .filter(|tag| prefixes.iter().any(|prefix| tag.starts_with(prefix)) || *tag == "local" || *tag == "worker-key-mnemonic")
-        .map(|tag| (tag.clone(), String::new()))
-        .collect();
+    let mut info: Vec<(String, String)> = tags.iter().filter(|tag| is_execution_info_key(tag)).map(|tag| (tag.clone(), String::new())).collect();
     info.sort();
     info.dedup();
+    info
+}
+
+/// Whether Bazel takes `key` as an execution requirement.
+fn is_execution_info_key(key: &str) -> bool {
+    let prefixes = ["block-", "requires-", "no-", "supports-", "disable-", "cpu:", "resources:"];
+    prefixes.iter().any(|prefix| key.starts_with(prefix)) || key == "local" || key == "worker-key-mnemonic"
+}
+
+/// The execution info of a Starlark action, as Bazel gives it: the
+/// `execution_requirements` it takes, then those the rule's tags give that
+/// they don't, sorted.
+pub fn action_execution_info(requirements: Vec<(String, String)>, tags: &[(String, String)]) -> Vec<(String, String)> {
+    let mut info: Vec<(String, String)> = requirements.into_iter().filter(|(key, _)| is_execution_info_key(key)).collect();
+    for (tag, value) in tags {
+        if !info.iter().any(|(key, _)| key == tag) {
+            info.push((tag.clone(), value.clone()));
+        }
+    }
+    info.sort();
     info
 }
 

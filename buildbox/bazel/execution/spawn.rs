@@ -155,6 +155,9 @@ async fn prepare(backend: &Backend, inputs: BTreeMap<TreePath, Input>, request: 
 /// Run a spawn action, or reuse its cached result.
 pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, action: &Action, spawn: &Spawn) -> Result<ActionOutputs, SkyError> {
     let owner = action_key.owner;
+    if blocks_network(spawn) {
+        return Err(SkyError::new(format!("{} failed: it's tagged 'block-network', but bb can't block actions' network yet", description(action, owner))));
+    }
     let span = tracing::info_span!("action_inputs", runfiles = action.runfiles.len());
     let generated_by = ready(ctx, action).instrument(span).await?;
     let shown = progress(ctx).map(|progress| progress.action_started(action_key.progress_id(), generated_by, description(action, owner)));
@@ -204,6 +207,7 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
             code: result.exit_code,
             command,
             sandboxed: backend.runners == Runners::LOCAL,
+            unsandboxed: unsandboxed_requirement(spawn),
         };
         return Err(report_failure(ctx, backend, action_key, action, reason, result).await);
     }
@@ -215,6 +219,23 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
         report_output(ctx, backend, action_key, action, result).await;
     }
     checked_outputs(ctx, backend, action_key, action, result).await
+}
+
+/// The execution requirements that would have Bazel run an action outside
+/// a sandbox, which bb doesn't support: it runs every action in one.
+const UNSANDBOXED_REQUIREMENTS: [&str; 5] = ["no-sandbox", "local", "no-remote", "no-remote-exec", "sandbox-unsupported"];
+
+/// The first requirement the spawn is tagged with that would have it run
+/// outside a sandbox.
+fn unsandboxed_requirement(spawn: &Spawn) -> Option<String> {
+    let tagged = spawn.execution_info.iter().find(|(key, _)| UNSANDBOXED_REQUIREMENTS.contains(&key.as_str()));
+    tagged.map(|(key, _)| key.clone())
+}
+
+/// Whether the spawn asks not to reach the network, which bb can't stop
+/// it doing.
+fn blocks_network(spawn: &Spawn) -> bool {
+    spawn.execution_info.iter().any(|(key, _)| key == "block-network")
 }
 
 /// The outputs of a result, or if it lacks any, the error the action fails

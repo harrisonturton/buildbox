@@ -46,11 +46,16 @@ pub fn action_failure(failure: &ActionFailure, format: &FailureFormat) -> Shown 
     };
     let failed = format!("{prefix}{} failed: ", failure.description);
     let messages = match &failure.reason {
-        FailureReason::Exit { code, command, sandboxed } => {
+        FailureReason::Exit { code, command, sandboxed, unsandboxed } => {
             let mut message = format!("{failed}(Exit {code}): {}", describe_command_failure(failure, command, format));
             if *sandboxed {
                 message.push_str("\n\n");
                 message.push_str(SANDBOX_DEBUG_HINT);
+            }
+            if let Some(requirement) = unsandboxed {
+                message.push_str(&format!(
+                    "\n\nbb ran this action in a sandbox although it's tagged '{requirement}', which bb doesn't support yet, so it may lack files it reads but doesn't declare."
+                ));
             }
             vec![message]
         }
@@ -172,6 +177,7 @@ mod tests {
                 execution_platform: "@@platforms//host:host".to_string(),
             },
             sandboxed: true,
+            unsandboxed: None,
         }
     }
 

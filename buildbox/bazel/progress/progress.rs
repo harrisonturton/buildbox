@@ -249,6 +249,9 @@ pub enum FailureReason {
         command: Command,
         /// Whether it ran in a sandbox on this machine.
         sandboxed: bool,
+        /// The execution requirement it's tagged with that would have it
+        /// run outside a sandbox, which bb doesn't support.
+        unsandboxed: Option<String>,
     },
     /// Its command didn't create these outputs, by path from their root.
     MissingOutputs(Vec<String>),

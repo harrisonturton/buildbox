@@ -76,9 +76,14 @@ the aspects that made them, as Bazel's do with `--include_aspects`.
 - **Remote platform:** the REAPI `Platform` of every action is empty
   (`buildbox/bazel/execution/spawn.rs`), so `exec_properties` never reach a
   remote executor.
-- **Execution requirements:** they're recorded on actions, but nothing acts
-  on `no-sandbox`, `local`, `requires-network`, `no-remote` and the like.
-  There are no spawn strategies.
+- **Execution requirements:** actions take them from
+  `execution_requirements` and their rules' tags, as Bazel gives them.
+  bb runs every action in a sandbox with the host's network, so
+  `requires-network` holds and `no-cache` is honoured, but actions and
+  tests tagged `block-network` fail, and those tagged `no-sandbox`,
+  `local`, `no-remote` or `no-remote-exec` still run sandboxed, which
+  their failures point out. Tests tagged `exclusive` run alone. There are
+  no spawn strategies.
 
 Together with section 1, this means remote execution on a platform other
 than the host doesn't work.
@@ -244,8 +249,8 @@ errors unless left at their defaults
 ## Suggested order
 
 1. Execution platforms and exec groups (section 3).
-2. Execution requirements (section 3), and the test options left
-   (section 6).
+2. The test options left (section 6), and running actions outside the
+   sandbox and without the network (section 3).
 
 ## Not yet audited
 
