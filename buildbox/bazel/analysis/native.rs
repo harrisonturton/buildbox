@@ -238,7 +238,9 @@ fn genrule_stamps(input: &RuleInput) -> bool {
 
 /// `genrule`: run a shell command.
 fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
-    let srcs = prepared.files(input, "srcs")?;
+    let mut srcs = prepared.files(input, "srcs")?;
+    let mut seen = std::collections::HashSet::new();
+    srcs.retain(|src| seen.insert(*src));
     let outs = prepared.outputs.attr("outs");
     let (tools, runfiles) = genrule_tools(input, prepared)?;
     let command = match input.string("cmd_bash") {
