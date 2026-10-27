@@ -1,5 +1,6 @@
 //! How each repository is made.
 
+use crate::module_file::GitSource;
 use crate::star_value::StarValue;
 use bazel_label::{Label, RepoName};
 use skycodec::{Decode, Encode};
@@ -10,6 +11,8 @@ use skyframe::encoded_value;
 pub enum RepoSpec {
     /// An archive, as registries give modules, with patches and overlays.
     Archive(ArchiveSpec),
+    /// A Git repository, as `git_repository` fetches it.
+    Git(GitSpec),
     /// A directory on this machine, used as it is.
     Local { path: String },
     /// A directory of Bazel's own, such as `@bazel_tools`.
@@ -35,11 +38,32 @@ pub struct ArchiveSpec {
     pub integrity: String,
     pub strip_prefix: String,
     pub archive_type: String,
+    /// The registry's patches, applied with `patch_strip`.
     pub patches: Vec<RemoteFile>,
     pub patch_strip: i64,
+    /// Patches the root module's override gives, as labels of the main
+    /// repository, applied with `local_patch_strip`.
+    pub local_patches: Vec<String>,
+    pub local_patch_strip: i64,
+    /// Commands the override runs after patching, each with `bash -c`.
+    pub patch_cmds: Vec<String>,
     /// Files added on top of the archive, by path.
     pub overlay: Vec<(String, RemoteFile)>,
     /// The registry's MODULE.bazel, which replaces the archive's.
+    pub module_file: Option<String>,
+}
+
+/// A Git repository: its source, with the patches the root module's
+/// override gives, and the registry's patches and MODULE.bazel if it's a
+/// registry's module.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct GitSpec {
+    pub source: GitSource,
+    /// The registry's patches, applied with `registry_patch_strip` before
+    /// the source's.
+    pub registry_patches: Vec<RemoteFile>,
+    pub registry_patch_strip: i64,
+    /// The registry's MODULE.bazel, which replaces the repository's.
     pub module_file: Option<String>,
 }
 

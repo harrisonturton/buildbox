@@ -10,6 +10,7 @@ rust_library(
         "config.rs",
         "extension.rs",
         "fetch_repo.rs",
+        "git.rs",
         "graph_access.rs",
         "io.rs",
         "module_ctx.rs",

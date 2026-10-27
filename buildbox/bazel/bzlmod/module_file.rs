@@ -104,24 +104,19 @@ pub enum Override {
         versions: Vec<String>,
         registry: String,
     },
+    /// An archive, as `http_archive` fetches it.
     Archive {
         urls: Vec<String>,
+        /// A subresource integrity, or a SHA-256 in hex.
         integrity: String,
         strip_prefix: String,
+        archive_type: String,
         patches: Vec<String>,
         patch_cmds: Vec<String>,
         patch_strip: i64,
     },
-    Git {
-        remote: String,
-        commit: String,
-        tag: String,
-        branch: String,
-        patches: Vec<String>,
-        patch_strip: i64,
-        strip_prefix: String,
-        init_submodules: bool,
-    },
+    /// A commit of a Git repository, as `git_repository` fetches it.
+    Git(GitSource),
     LocalPath {
         path: String,
     },
@@ -131,6 +126,187 @@ impl Override {
     /// Whether the module comes from somewhere other than a registry.
     pub fn is_non_registry(&self) -> bool {
         matches!(self, Override::Archive { .. } | Override::Git { .. } | Override::LocalPath { .. })
+    }
+}
+
+/// What to fetch of a Git repository, and how to patch it, as
+/// `git_repository`'s attributes say.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct GitSource {
+    pub remote: String,
+    pub commit: String,
+    pub tag: String,
+    pub branch: String,
+    pub shallow_since: String,
+    pub init_submodules: bool,
+    pub recursive_init_submodules: bool,
+    pub strip_prefix: String,
+    /// Patches, as labels of the main repository.
+    pub patches: Vec<String>,
+    pub patch_cmds: Vec<String>,
+    pub patch_strip: i64,
+}
+
+/// The attributes `git_repository` has.
+const GIT_REPOSITORY_ATTRS: &[&str] = &[
+    "branch",
+    "build_file",
+    "build_file_content",
+    "canonical_id",
+    "commit",
+    "init_submodules",
+    "patch_args",
+    "patch_cmds",
+    "patch_cmds_win",
+    "patch_strip",
+    "patch_tool",
+    "patches",
+    "recursive_init_submodules",
+    "remote",
+    "remote_module_file_integrity",
+    "remote_module_file_urls",
+    "remote_patch_strip",
+    "remote_patches",
+    "shallow_since",
+    "sparse_checkout_file",
+    "sparse_checkout_patterns",
+    "strip_prefix",
+    "tag",
+    "verbose",
+    "workspace_file",
+    "workspace_file_content",
+];
+
+/// The attributes of `git_repository` bb implements for `git_override`.
+/// `patch_cmds_win` and `verbose` change nothing here, as in Bazel off
+/// Windows.
+const GIT_OVERRIDE_ATTRS: &[&str] = &[
+    "branch",
+    "canonical_id",
+    "commit",
+    "init_submodules",
+    "patch_args",
+    "patch_cmds",
+    "patch_cmds_win",
+    "patch_strip",
+    "patches",
+    "recursive_init_submodules",
+    "remote",
+    "shallow_since",
+    "strip_prefix",
+    "tag",
+    "verbose",
+];
+
+/// The attributes `http_archive` has.
+const HTTP_ARCHIVE_ATTRS: &[&str] = &[
+    "add_prefix",
+    "auth_patterns",
+    "build_file",
+    "build_file_content",
+    "canonical_id",
+    "files",
+    "integrity",
+    "netrc",
+    "patch_args",
+    "patch_cmds",
+    "patch_cmds_win",
+    "patch_strip",
+    "patch_tool",
+    "patches",
+    "remote_file_integrity",
+    "remote_file_urls",
+    "remote_module_file_integrity",
+    "remote_module_file_urls",
+    "remote_patch_strip",
+    "remote_patches",
+    "sha256",
+    "strip_components",
+    "strip_prefix",
+    "type",
+    "url",
+    "urls",
+    "workspace_file",
+    "workspace_file_content",
+];
+
+/// The attributes of `http_archive` bb implements for `archive_override`.
+const ARCHIVE_OVERRIDE_ATTRS: &[&str] = &[
+    "canonical_id",
+    "integrity",
+    "patch_args",
+    "patch_cmds",
+    "patch_cmds_win",
+    "patch_strip",
+    "patches",
+    "sha256",
+    "strip_prefix",
+    "type",
+    "url",
+    "urls",
+];
+
+/// The attributes an override forwards to its repository rule, checked
+/// against those the rule has and those bb implements.
+struct Forwarded<'v> {
+    attrs: SmallMap<StringValue<'v>, Value<'v>>,
+}
+
+impl<'v> Forwarded<'v> {
+    fn check(attrs: SmallMap<StringValue<'v>, Value<'v>>, function: &str, rule: &str, known: &[&str], supported: &[&str]) -> anyhow::Result<Forwarded<'v>> {
+        for name in attrs.keys() {
+            let name = name.as_str();
+            if !known.contains(&name) {
+                anyhow::bail!("in call to '{rule}' repo rule, unknown attribute '{name}' provided");
+            }
+            if !supported.contains(&name) {
+                anyhow::bail!("{function}: bb doesn't support {rule}'s '{name}' yet");
+            }
+        }
+        Ok(Forwarded { attrs })
+    }
+
+    fn get(&self, name: &str) -> Option<Value<'v>> {
+        self.attrs.iter().find(|(key, _)| key.as_str() == name).map(|(_, value)| *value)
+    }
+
+    fn string(&self, name: &str) -> anyhow::Result<String> {
+        match self.get(name) {
+            None => Ok(String::new()),
+            Some(value) => value.unpack_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("'{name}' must be a string")),
+        }
+    }
+
+    fn strings(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        match self.get(name) {
+            None => Ok(Vec::new()),
+            Some(value) => bazel_starlark::convert::strings(value).ok_or_else(|| anyhow::anyhow!("'{name}' must be a list of strings")),
+        }
+    }
+
+    fn bool(&self, name: &str) -> anyhow::Result<bool> {
+        match self.get(name) {
+            None => Ok(false),
+            Some(value) => value.unpack_bool().ok_or_else(|| anyhow::anyhow!("'{name}' must be a bool")),
+        }
+    }
+
+    /// The strip of the patches: `patch_strip`, or `patch_args` if it's
+    /// just `-pN`, as Bazel applies patches itself only then.
+    fn patch_strip(&self) -> anyhow::Result<i64> {
+        let strip = match self.get("patch_strip") {
+            None => 0,
+            Some(value) => value.unpack_i32().ok_or_else(|| anyhow::anyhow!("'patch_strip' must be an int"))? as i64,
+        };
+        let args = self.strings("patch_args")?;
+        match args.as_slice() {
+            [] => Ok(strip),
+            [arg] => match arg.strip_prefix("-p").and_then(|count| count.parse().ok()) {
+                Some(count) => Ok(count),
+                None => anyhow::bail!("bb doesn't support patch_args other than -pN yet"),
+            },
+            _ => anyhow::bail!("bb doesn't support patch_args other than -pN yet"),
+        }
     }
 }
 
@@ -544,56 +720,59 @@ fn module_functions(builder: &mut GlobalsBuilder) {
         add_override(eval, module_name, override_)
     }
 
+    /// Fetch a module from an archive, with `http_archive`'s attributes.
     fn archive_override<'v>(
         #[starlark(require = named)] module_name: &str,
-        #[starlark(require = named)] urls: Value<'v>,
-        #[starlark(require = named, default = "")] integrity: &str,
-        #[starlark(require = named, default = "")] strip_prefix: &str,
-        #[starlark(require = named)] patches: Option<Value<'v>>,
-        #[starlark(require = named)] patch_cmds: Option<Value<'v>>,
-        #[starlark(require = named, default = 0)] patch_strip: i32,
+        #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let urls = match urls.unpack_str() {
-            Some(url) => vec![url.to_string()],
-            None => strings(urls),
+        let attrs = Forwarded::check(kwargs, "archive_override", "http_archive", HTTP_ARCHIVE_ATTRS, ARCHIVE_OVERRIDE_ATTRS)?;
+        let mut urls = attrs.strings("urls")?;
+        let url = attrs.string("url")?;
+        if !url.is_empty() {
+            urls.insert(0, url);
+        }
+        let integrity = match attrs.string("integrity")? {
+            integrity if integrity.is_empty() => attrs.string("sha256")?,
+            integrity => integrity,
         };
         let override_ = Override::Archive {
             urls,
-            integrity: integrity.to_string(),
-            strip_prefix: strip_prefix.to_string(),
-            patches: patches.map(strings).unwrap_or_default(),
-            patch_cmds: patch_cmds.map(strings).unwrap_or_default(),
-            patch_strip: patch_strip as i64,
+            integrity,
+            strip_prefix: attrs.string("strip_prefix")?,
+            archive_type: attrs.string("type")?,
+            patches: attrs.strings("patches")?,
+            patch_cmds: attrs.strings("patch_cmds")?,
+            patch_strip: attrs.patch_strip()?,
         };
         add_override(eval, module_name, override_)
     }
 
+    /// Fetch a module from a Git repository, with `git_repository`'s
+    /// attributes.
     fn git_override<'v>(
         #[starlark(require = named)] module_name: &str,
-        #[starlark(require = named)] remote: &str,
-        #[starlark(require = named, default = "")] commit: &str,
-        #[starlark(require = named, default = "")] tag: &str,
-        #[starlark(require = named, default = "")] branch: &str,
-        #[starlark(require = named)] patches: Option<Value<'v>>,
-        #[starlark(require = named, default = 0)] patch_strip: i32,
-        #[starlark(require = named, default = "")] strip_prefix: &str,
-        #[starlark(require = named, default = false)] init_submodules: bool,
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let _ = kwargs;
-        let override_ = Override::Git {
-            remote: remote.to_string(),
-            commit: commit.to_string(),
-            tag: tag.to_string(),
-            branch: branch.to_string(),
-            patches: patches.map(strings).unwrap_or_default(),
-            patch_strip: patch_strip as i64,
-            strip_prefix: strip_prefix.to_string(),
-            init_submodules,
+        let attrs = Forwarded::check(kwargs, "git_override", "git_repository", GIT_REPOSITORY_ATTRS, GIT_OVERRIDE_ATTRS)?;
+        let source = GitSource {
+            remote: attrs.string("remote")?,
+            commit: attrs.string("commit")?,
+            tag: attrs.string("tag")?,
+            branch: attrs.string("branch")?,
+            shallow_since: attrs.string("shallow_since")?,
+            init_submodules: attrs.bool("init_submodules")?,
+            recursive_init_submodules: attrs.bool("recursive_init_submodules")?,
+            strip_prefix: attrs.string("strip_prefix")?,
+            patches: attrs.strings("patches")?,
+            patch_cmds: attrs.strings("patch_cmds")?,
+            patch_strip: attrs.patch_strip()?,
         };
-        add_override(eval, module_name, override_)
+        if source.remote.is_empty() {
+            anyhow::bail!("git_override: missing value for mandatory attribute 'remote' in 'git_repository' rule");
+        }
+        add_override(eval, module_name, Override::Git(source))
     }
 
     fn local_path_override<'v>(

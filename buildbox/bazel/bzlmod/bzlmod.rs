@@ -11,6 +11,7 @@ pub mod attrs;
 pub mod config;
 pub mod extension;
 pub mod fetch_repo;
+pub mod git;
 pub mod graph_access;
 pub mod io;
 pub mod module_ctx;

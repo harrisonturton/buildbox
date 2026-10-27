@@ -6,7 +6,7 @@ use crate::fetch_repo::FetchSpecKey;
 use crate::module_file::{self, BazelDep, IncludeReader, ModuleFile, Override};
 use crate::fetch_repo::read_label_patch;
 use crate::registry::{self, Registries, RegistriesKey, RegistryFileKey, RegistryModule, RegistryModuleKey};
-use crate::repo_spec::{ArchiveSpec, RepoSpec};
+use crate::repo_spec::{ArchiveSpec, GitSpec, RepoSpec};
 use crate::version::Version;
 use bazel_fs::{Root, RootedPath, Workspace};
 use bazel_label::{Label, LabelContext, PackageId, RepoMappingTable, RepoName};
@@ -352,19 +352,24 @@ fn in_main_repo(label: &str) -> bool {
     label.starts_with("//") || label.starts_with("@//") || label.starts_with("@@//")
 }
 
-/// A single_version_override's patches apply on top of the registry's.
+/// A single_version_override's patches and commands apply on top of the
+/// registry's patches.
 fn add_override_patches(spec: &mut RepoSpec, override_: Option<&Override>) {
-    let (Some(Override::SingleVersion { patches, patch_strip, .. }), RepoSpec::Archive(archive)) = (override_, spec) else {
+    let Some(Override::SingleVersion { patches, patch_cmds, patch_strip, .. }) = override_ else {
         return;
     };
-    for patch in patches {
-        archive.patches.push(crate::repo_spec::RemoteFile {
-            url: format!("label:{patch}"),
-            integrity: String::new(),
-        });
-    }
-    if !patches.is_empty() {
-        archive.patch_strip = *patch_strip;
+    match spec {
+        RepoSpec::Archive(archive) => {
+            archive.local_patches = patches.clone();
+            archive.local_patch_strip = *patch_strip;
+            archive.patch_cmds = patch_cmds.clone();
+        }
+        RepoSpec::Git(git) => {
+            git.source.patches = patches.clone();
+            git.source.patch_strip = *patch_strip;
+            git.source.patch_cmds = patch_cmds.clone();
+        }
+        _ => {}
     }
 }
 
@@ -399,30 +404,34 @@ async fn special_module(
             urls,
             integrity,
             strip_prefix,
+            archive_type,
             patches,
+            patch_cmds,
             patch_strip,
-            ..
         } => RepoSpec::Archive(ArchiveSpec {
             urls: urls.clone(),
             integrity: integrity.clone(),
             strip_prefix: strip_prefix.clone(),
-            archive_type: String::new(),
-            patches: patches
-                .iter()
-                .map(|patch| crate::repo_spec::RemoteFile {
-                    url: format!("label:{patch}"),
-                    integrity: String::new(),
-                })
-                .collect(),
-            patch_strip: *patch_strip,
+            archive_type: archive_type.clone(),
+            patches: Vec::new(),
+            patch_strip: 0,
+            local_patches: patches.clone(),
+            local_patch_strip: *patch_strip,
+            patch_cmds: patch_cmds.clone(),
             overlay: Vec::new(),
             module_file: None,
         }),
-        Override::Git { remote, .. } => return Err(SkyError::new(format!("git_override of {name} ({remote}) isn't supported yet"))),
+        Override::Git(source) => RepoSpec::Git(GitSpec {
+            source: source.clone(),
+            registry_patches: Vec::new(),
+            registry_patch_strip: 0,
+            module_file: None,
+        }),
         Override::SingleVersion { .. } | Override::MultipleVersion { .. } => return Ok(None),
     };
     let repo = canonical_name(name, "", false);
-    let fetched = ctx.compute(&FetchSpecKey { repo, spec: spec.clone() }).await?;
+    let fetched = ctx.compute(&FetchSpecKey { repo, spec: spec.clone() }).await;
+    let fetched = fetched.map_err(|error| error.context("error during computation of main repo mapping"))?;
     let file = read_module_file(ctx, Root::Dir(fetched.dir), name).await?;
     Ok(Some(Discovered { file, spec: Some(spec) }))
 }

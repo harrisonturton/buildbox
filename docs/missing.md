@@ -188,10 +188,13 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
 
 - **Lockfile:** `MODULE.bazel.lock` is neither read nor written, and
   `--lockfile_mode` isn't implemented.
-- **Overrides:** `git_override` and `multiple_version_override` fail
-  (`buildbox/bazel/bzlmod/resolve.rs`). A `single_version_override` with
-  patches replaces the registry's `patch_strip` with its own, so the
-  registry's patches apply with the wrong strip when the two differ.
+- **Overrides:** `multiple_version_override` fails
+  (`buildbox/bazel/bzlmod/resolve.rs`). `git_override` and
+  `archive_override` take the attributes of `git_repository` and
+  `http_archive` that modules use, and fail on those bb doesn't
+  implement, such as `build_file` and `sparse_checkout_patterns`. A
+  `git_override` of a branch or tag is fetched once and kept, where Bazel
+  would fetch it again.
 - **Commands:** there's no `mod`, `fetch`, `vendor` or `sync`.
 - **Authentication:** downloads support neither `.netrc` nor credential
   helpers, so private registries and authenticated `http_archive`s fail.
@@ -199,8 +202,7 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
   files' host, user and time are fixed, and a change to the volatile
   status reruns the actions that read it, which Bazel doesn't.
 - **Registries:** `--registry`, `--module_mirrors` and registries'
-  `bazel_registry.json` work, but yanked versions aren't checked, and
-  `source.json`'s `git_repository` type isn't supported.
+  `bazel_registry.json` work, but yanked versions aren't checked.
 - **Errors:** a `MODULE.bazel` that fails to evaluate is reported in
   starlark-rust's words rather than Bazel's.
 

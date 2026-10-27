@@ -1,8 +1,8 @@
 //! Reading modules from registries.
 
 use crate::config::BzlmodConfig;
-use crate::module_file::{self, ModuleFile};
-use crate::repo_spec::{ArchiveSpec, RemoteFile, RepoSpec};
+use crate::module_file::{self, GitSource, ModuleFile};
+use crate::repo_spec::{ArchiveSpec, GitSpec, RemoteFile, RepoSpec};
 use skycodec::{Decode, Encode, Fingerprint};
 use skyframe::{encoded_value, Ctx, Key, SkyError};
 use std::path::Path;
@@ -282,6 +282,9 @@ fn parse_source(found: &Found<'_>, json: &[u8]) -> Result<RepoSpec, SkyError> {
                 archive_type: string("archive_type"),
                 patches: entries("patches", "patches").into_iter().map(|(_, file)| file).collect(),
                 patch_strip: source.get("patch_strip").and_then(|value| value.as_i64()).unwrap_or(0),
+                local_patches: Vec::new(),
+                local_patch_strip: 0,
+                patch_cmds: Vec::new(),
                 overlay: entries("overlay", "overlay"),
                 module_file: Some(module_file.to_string()),
             }))
@@ -289,6 +292,34 @@ fn parse_source(found: &Found<'_>, json: &[u8]) -> Result<RepoSpec, SkyError> {
         "local_path" => {
             let path = local_path(found, &string("path")).map_err(SkyError::new)?;
             Ok(RepoSpec::Local { path })
+        }
+        "git_repository" => {
+            let flag = |field: &str| source.get(field).and_then(|value| value.as_bool()).unwrap_or(false);
+            let git = GitSource {
+                remote: string("remote"),
+                commit: string("commit"),
+                tag: string("tag"),
+                shallow_since: string("shallow_since"),
+                init_submodules: flag("init_submodules"),
+                strip_prefix: string("strip_prefix"),
+                ..GitSource::default()
+            };
+            let patches = match source.get("patches").and_then(|value| value.as_object()) {
+                Some(patches) => patches
+                    .iter()
+                    .map(|(file, integrity)| RemoteFile {
+                        url: format!("{base}/patches/{file}"),
+                        integrity: integrity.as_str().unwrap_or("").to_string(),
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            Ok(RepoSpec::Git(GitSpec {
+                source: git,
+                registry_patches: patches,
+                registry_patch_strip: source.get("patch_strip").and_then(|value| value.as_i64()).unwrap_or(0),
+                module_file: Some(module_file.to_string()),
+            }))
         }
         other => Err(invalid(&format!("unsupported source type '{other}'"))),
     }
