@@ -10,7 +10,7 @@ use bazel_analysis::{Action, ActionKind, Artifact, ConfiguredTarget, KnownSets};
 use bazel_config::{AspectDescriptor, ConfigId};
 use bazel_label::{Label, RepoMappingTable};
 use bazel_loading::SourceTextKey;
-use bazel_query::{Arg, Expr, NodeSet, QueryError, display_label};
+use bazel_query::{Arg, Expr, Node, NodeSet, QueryError, display_label};
 use bazel_ui::shell_escape;
 use intern::PathId;
 use regex::Regex;
@@ -95,31 +95,21 @@ impl ActionFilters {
     /// `mnemonic()` give, wherever they are in it.
     pub fn of(expr: &Expr) -> Result<ActionFilters, QueryError> {
         let mut filters = ActionFilters::default();
-        filters.collect(expr)?;
+        for id in expr.preorder() {
+            if let Node::Function { name, args } = expr.node(id) {
+                filters.collect(name, args)?;
+            }
+        }
         Ok(filters)
     }
 
-    fn collect(&mut self, expr: &Expr) -> Result<(), QueryError> {
-        match expr {
-            Expr::Target(_) | Expr::Set(_) => Ok(()),
-            Expr::Let { value, body, .. } => {
-                self.collect(value)?;
-                self.collect(body)
-            }
-            Expr::Binary { operands, .. } => operands.iter().try_for_each(|operand| self.collect(operand)),
-            Expr::Function { name, args } => {
-                if let (Some(filters), Some(Arg::Word(pattern))) = (self.filters_for(name), args.first()) {
-                    let anchored = Regex::new(&format!("^(?:{pattern})$")).map_err(|error| QueryError::in_evaluation(format!("illegal '{name}' pattern regexp '{pattern}': {error}")))?;
-                    filters.push(anchored);
-                }
-                for arg in args {
-                    if let Arg::Expr(expr) = arg {
-                        self.collect(expr)?;
-                    }
-                }
-                Ok(())
-            }
+    /// The filter a call gives, if it's a call of a filter.
+    fn collect(&mut self, name: &str, args: &[Arg]) -> Result<(), QueryError> {
+        if let (Some(filters), Some(Arg::Word(pattern))) = (self.filters_for(name), args.first()) {
+            let anchored = Regex::new(&format!("^(?:{pattern})$")).map_err(|error| QueryError::in_evaluation(format!("illegal '{name}' pattern regexp '{pattern}': {error}")))?;
+            filters.push(anchored);
         }
+        Ok(())
     }
 
     fn filters_for(&mut self, function: &str) -> Option<&mut Vec<Regex>> {

@@ -1,18 +1,34 @@
 //! Parsing query expressions, as Bazel's query parser does.
+//!
+//! An expression is kept as a list of its parts, each referring to the
+//! parts it's made of by their index, and is parsed, walked and printed
+//! with stacks of its own rather than by recursion, so that expressions
+//! nested arbitrarily deeply work as shallow ones do.
 
 use crate::lexer::{Token, TokenKind, is_reserved_word, scan};
 use std::fmt;
 
-/// A parsed query expression.
+/// A parsed query expression: its parts, the last being the whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Expr {
+pub struct Expr {
+    nodes: Vec<Node>,
+    root: ExprId,
+}
+
+/// A part of an expression, by its index among the expression's parts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExprId(u32);
+
+/// A part of a query expression.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Node {
     /// A target pattern, such as `//foo/...`, or a reference to a variable,
     /// such as `$x`.
     Target(String),
-    Let { name: String, value: Box<Expr>, body: Box<Expr> },
+    Let { name: String, value: ExprId, body: ExprId },
     Set(Vec<String>),
     /// Operands joined by one operator, which applies left to right.
-    Binary { op: SetOp, operands: Vec<Expr> },
+    Binary { op: SetOp, operands: Vec<ExprId> },
     Function { name: String, args: Vec<Arg> },
 }
 
@@ -26,7 +42,7 @@ pub enum SetOp {
 /// A function argument.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Arg {
-    Expr(Expr),
+    Expr(ExprId),
     Word(String),
     Int(i32),
 }
@@ -114,24 +130,21 @@ pub const AQUERY_FUNCTIONS: &[Function] = &[Function::new("inputs", &[W, E]), Fu
 #[error("{0}")]
 pub struct ParseError(pub String);
 
-/// How deeply expressions may nest. Parsing, evaluating, printing and
-/// dropping an expression each take stack in proportion to its depth, so
-/// deeper ones are refused rather than exhausting it.
-pub const MAX_DEPTH: usize = 500;
-
 /// Parse a query expression whose functions are among `functions`.
 pub fn parse(input: &str, functions: &[Function]) -> Result<Expr, ParseError> {
     let mut parser = Parser {
         tokens: scan(input)?,
         position: 0,
         functions,
-        depth: 0,
+        nodes: Vec::new(),
+        frames: Vec::new(),
     };
-    let expr = parser.expression()?;
-    if parser.token().kind != TokenKind::Eof {
+    let root = parser.expression()?;
+    let expr = Expr { nodes: parser.nodes, root };
+    if parser.tokens[parser.position].kind != TokenKind::Eof {
         return Err(ParseError(format!(
             "unexpected token '{}' after query expression '{}'",
-            parser.token(),
+            parser.tokens[parser.position],
             truncate(&expr.to_string())
         )));
     }
@@ -149,12 +162,44 @@ pub fn truncate(text: &str) -> String {
     format!("{kept}{MARKER}")
 }
 
+
+/// A parser: the tokens, the parts parsed so far, and the constructs
+/// whose parts are being parsed, innermost last.
 struct Parser<'a> {
     tokens: Vec<Token>,
     position: usize,
     functions: &'a [Function],
-    /// How deeply the expression being parsed is nested.
-    depth: usize,
+    nodes: Vec<Node>,
+    frames: Vec<Frame>,
+}
+
+/// A construct whose parts are being parsed.
+enum Frame {
+    /// An expression: its operands so far, and their operator once one is
+    /// met. Operators apply left to right, so a different one makes what
+    /// came before its first operand.
+    Expr { operands: Vec<ExprId>, op: Option<SetOp> },
+    /// `( expression )`, awaiting its `)`.
+    Paren,
+    /// `let name = value in body`, awaiting its value.
+    LetValue { name: String },
+    /// `let name = value in body`, awaiting its body.
+    LetBody { name: String, value: ExprId },
+    /// A function's call, awaiting its arguments.
+    Call { name: String, function: Function, args: Vec<Arg> },
+}
+
+/// What the parser does next.
+enum Step {
+    /// Parse a primary expression: a pattern, call, `let`, parenthesized
+    /// expression or `set`.
+    Primary,
+    /// A primary expression was parsed.
+    Parsed(ExprId),
+    /// An expression was parsed: give it to the construct it's part of.
+    Completed(ExprId),
+    /// Parse the next argument of the call being parsed.
+    Argument,
 }
 
 impl Parser<'_> {
@@ -175,6 +220,11 @@ impl Parser<'_> {
         let word = self.token().word.clone();
         self.advance();
         Ok(word)
+    }
+
+    fn add(&mut self, node: Node) -> ExprId {
+        self.nodes.push(node);
+        ExprId(self.nodes.len() as u32 - 1)
     }
 
     /// Up to three tokens from `position`, for an error's context.
@@ -206,131 +256,65 @@ impl Parser<'_> {
         ParseError(format!("{description} arguments to function '{}' at '{}'", function.name, self.context(self.position)))
     }
 
-    fn expression(&mut self) -> Result<Expr, ParseError> {
-        let first = self.primary()?;
-        self.binary_operator_tail(first)
-    }
-
-    fn binary_operator_tail(&mut self, first: Expr) -> Result<Expr, ParseError> {
-        let Some(mut op) = set_op(self.token().kind) else {
-            return Ok(first);
-        };
-        let mut operands = vec![first];
-        let mut depth = self.depth;
-        while let Some(next) = set_op(self.token().kind) {
-            self.advance();
-            if next != op {
-                depth += 1;
-                self.check_depth(depth)?;
-                let joined = Expr::Binary { op, operands };
-                operands = vec![joined];
-                op = next;
-            }
-            operands.push(self.primary()?);
-        }
-        Ok(Expr::Binary { op, operands })
-    }
-
-    fn primary(&mut self) -> Result<Expr, ParseError> {
-        self.depth += 1;
-        let primary = self.check_depth(self.depth).and_then(|_| self.nested_primary());
-        self.depth -= 1;
-        primary
-    }
-
-    fn check_depth(&self, depth: usize) -> Result<(), ParseError> {
-        match depth > MAX_DEPTH {
-            true => Err(ParseError(format!("query expression is nested more than {MAX_DEPTH} levels deep"))),
-            false => Ok(()),
+    /// Parse a whole expression, the constructs it's made of kept on the
+    /// parser's own stack.
+    fn expression(&mut self) -> Result<ExprId, ParseError> {
+        self.frames.push(Frame::Expr { operands: Vec::new(), op: None });
+        let mut step = Step::Primary;
+        loop {
+            step = match step {
+                Step::Primary => self.primary()?,
+                Step::Parsed(id) => self.operand(id)?,
+                Step::Argument => self.argument()?,
+                Step::Completed(id) => match self.frames.pop() {
+                    None => return Ok(id),
+                    Some(frame) => self.completed(frame, id)?,
+                },
+            };
         }
     }
 
-    fn nested_primary(&mut self) -> Result<Expr, ParseError> {
+    /// Begin an expression inside the construct being parsed.
+    fn nested_expression(&mut self) -> Step {
+        self.frames.push(Frame::Expr { operands: Vec::new(), op: None });
+        Step::Primary
+    }
+
+    fn primary(&mut self) -> Result<Step, ParseError> {
         match self.token().kind {
-            TokenKind::Word => self.word_or_function(),
-            TokenKind::Let => self.let_expression(),
+            TokenKind::Word => self.word_or_call(),
+            TokenKind::Let => {
+                self.advance();
+                let name = self.consume(TokenKind::Word)?;
+                self.consume(TokenKind::Equals)?;
+                self.frames.push(Frame::LetValue { name });
+                Ok(self.nested_expression())
+            }
             TokenKind::LParen => {
                 self.advance();
-                let expr = self.expression()?;
-                self.consume(TokenKind::RParen)?;
-                Ok(expr)
+                self.frames.push(Frame::Paren);
+                Ok(self.nested_expression())
             }
             TokenKind::Set => self.set_expression(),
             _ => Err(self.syntax_error()),
         }
     }
 
-    fn word_or_function(&mut self) -> Result<Expr, ParseError> {
+    fn word_or_call(&mut self) -> Result<Step, ParseError> {
         let position = self.position;
         let word = self.consume(TokenKind::Word)?;
         if self.token().kind != TokenKind::LParen {
-            return target_literal(word);
+            let node = target_literal(word)?;
+            return Ok(Step::Parsed(self.add(node)));
         }
         let Some(function) = self.functions.iter().find(|function| function.name == word).copied() else {
             return Err(self.unknown_function(position));
         };
-        let args = self.arguments(&function)?;
-        Ok(Expr::Function { name: word, args })
+        self.frames.push(Frame::Call { name: word, function, args: Vec::new() });
+        Ok(Step::Argument)
     }
 
-    fn arguments(&mut self, function: &Function) -> Result<Vec<Arg>, ParseError> {
-        let mut args = Vec::new();
-        let mut separator = TokenKind::LParen;
-        let repeated = match function.repeats {
-            true => usize::MAX,
-            false => 0,
-        };
-        let kinds = function.args.iter().copied().chain(std::iter::repeat_n(*function.args.last().unwrap_or(&ArgKind::Word), repeated));
-        for kind in kinds {
-            if self.token().kind == TokenKind::RParen {
-                if args.len() >= function.mandatory {
-                    break;
-                }
-                return Err(self.argument_count_error(function, "too few"));
-            }
-            self.consume(separator)?;
-            separator = TokenKind::Comma;
-            if args.is_empty() && self.token().kind == TokenKind::RParen {
-                return Err(self.argument_count_error(function, "too few"));
-            }
-            args.push(self.argument(kind)?);
-        }
-        if self.token().kind == TokenKind::Comma && !args.is_empty() {
-            return Err(self.argument_count_error(function, "too many"));
-        }
-        self.consume(TokenKind::RParen)?;
-        Ok(args)
-    }
-
-    fn argument(&mut self, kind: ArgKind) -> Result<Arg, ParseError> {
-        match kind {
-            ArgKind::Expr => Ok(Arg::Expr(self.expression()?)),
-            ArgKind::Word => Ok(Arg::Word(self.consume(TokenKind::Word)?)),
-            ArgKind::Int => {
-                let word = self.consume(TokenKind::Word)?;
-                match word.parse() {
-                    Ok(value) => Ok(Arg::Int(value)),
-                    Err(_) => Err(ParseError(format!("expected an integer literal: '{word}'"))),
-                }
-            }
-        }
-    }
-
-    fn let_expression(&mut self) -> Result<Expr, ParseError> {
-        self.consume(TokenKind::Let)?;
-        let name = self.consume(TokenKind::Word)?;
-        self.consume(TokenKind::Equals)?;
-        let value = self.expression()?;
-        self.consume(TokenKind::In)?;
-        let body = self.expression()?;
-        Ok(Expr::Let {
-            name,
-            value: Box::new(value),
-            body: Box::new(body),
-        })
-    }
-
-    fn set_expression(&mut self) -> Result<Expr, ParseError> {
+    fn set_expression(&mut self) -> Result<Step, ParseError> {
         self.advance();
         self.consume(TokenKind::LParen)?;
         let mut words = Vec::new();
@@ -340,7 +324,118 @@ impl Parser<'_> {
             words.push(word);
         }
         self.consume(TokenKind::RParen)?;
-        Ok(Expr::Set(words))
+        Ok(Step::Parsed(self.add(Node::Set(words))))
+    }
+
+    /// Add a primary expression to the expression being parsed, and go on
+    /// to the next operand if an operator follows.
+    fn operand(&mut self, id: ExprId) -> Result<Step, ParseError> {
+        let next = set_op(self.token().kind);
+        let Some(Frame::Expr { operands, op }) = self.frames.last_mut() else {
+            return Err(ParseError("an operand outside an expression".to_string()));
+        };
+        operands.push(id);
+        let Some(next) = next else {
+            let (operands, op) = (std::mem::take(operands), op.take());
+            self.frames.pop();
+            let id = match op {
+                None => operands.first().copied().ok_or_else(|| ParseError("an expression without operands".to_string()))?,
+                Some(op) => self.add(Node::Binary { op, operands }),
+            };
+            return Ok(Step::Completed(id));
+        };
+        if let Some(current) = *op {
+            if current != next {
+                let joined = Node::Binary { op: current, operands: std::mem::take(operands) };
+                self.nodes.push(joined);
+                let joined = ExprId(self.nodes.len() as u32 - 1);
+                if let Some(Frame::Expr { operands, .. }) = self.frames.last_mut() {
+                    operands.push(joined);
+                }
+            }
+        }
+        if let Some(Frame::Expr { op, .. }) = self.frames.last_mut() {
+            *op = Some(next);
+        }
+        self.advance();
+        Ok(Step::Primary)
+    }
+
+    /// Give a parsed expression to the construct it's part of.
+    fn completed(&mut self, frame: Frame, id: ExprId) -> Result<Step, ParseError> {
+        match frame {
+            Frame::Expr { .. } => Err(ParseError("an expression completed inside another".to_string())),
+            Frame::Paren => {
+                self.consume(TokenKind::RParen)?;
+                Ok(Step::Parsed(id))
+            }
+            Frame::LetValue { name } => {
+                self.consume(TokenKind::In)?;
+                self.frames.push(Frame::LetBody { name, value: id });
+                Ok(self.nested_expression())
+            }
+            Frame::LetBody { name, value } => Ok(Step::Parsed(self.add(Node::Let { name, value, body: id }))),
+            Frame::Call { name, function, mut args } => {
+                args.push(Arg::Expr(id));
+                self.frames.push(Frame::Call { name, function, args });
+                Ok(Step::Argument)
+            }
+        }
+    }
+
+    /// Parse the next argument of the call being parsed, or its end. A
+    /// function's last kind of argument may repeat.
+    fn argument(&mut self) -> Result<Step, ParseError> {
+        let Some(Frame::Call { function, args, .. }) = self.frames.last() else {
+            return Err(ParseError("an argument outside a call".to_string()));
+        };
+        let function = *function;
+        let index = args.len();
+        let kind = match (function.args.get(index), function.repeats) {
+            (Some(kind), _) => Some(*kind),
+            (None, true) => function.args.last().copied(),
+            (None, false) => None,
+        };
+        let Some(kind) = kind else {
+            return self.end_of_call(&function, index);
+        };
+        if self.token().kind == TokenKind::RParen {
+            if index >= function.mandatory {
+                return self.end_of_call(&function, index);
+            }
+            return Err(self.argument_count_error(&function, "too few"));
+        }
+        let separator = if index == 0 { TokenKind::LParen } else { TokenKind::Comma };
+        self.consume(separator)?;
+        if index == 0 && self.token().kind == TokenKind::RParen {
+            return Err(self.argument_count_error(&function, "too few"));
+        }
+        let arg = match kind {
+            ArgKind::Expr => return Ok(self.nested_expression()),
+            ArgKind::Word => Arg::Word(self.consume(TokenKind::Word)?),
+            ArgKind::Int => {
+                let word = self.consume(TokenKind::Word)?;
+                match word.parse() {
+                    Ok(value) => Arg::Int(value),
+                    Err(_) => return Err(ParseError(format!("expected an integer literal: '{word}'"))),
+                }
+            }
+        };
+        if let Some(Frame::Call { args, .. }) = self.frames.last_mut() {
+            args.push(arg);
+        }
+        Ok(Step::Argument)
+    }
+
+    fn end_of_call(&mut self, function: &Function, count: usize) -> Result<Step, ParseError> {
+        if self.token().kind == TokenKind::Comma && count > 0 {
+            return Err(self.argument_count_error(function, "too many"));
+        }
+        self.consume(TokenKind::RParen)?;
+        let Some(Frame::Call { name, args, .. }) = self.frames.pop() else {
+            return Err(ParseError("the end of a call outside one".to_string()));
+        };
+        Ok(Step::Parsed(self.add(Node::Function { name, args })))
     }
 }
 
@@ -355,41 +450,131 @@ fn set_op(kind: TokenKind) -> Option<SetOp> {
     }
 }
 
-fn target_literal(word: String) -> Result<Expr, ParseError> {
+fn target_literal(word: String) -> Result<Node, ParseError> {
     match word.chars().next() {
         Some(first @ ('-' | '*')) => Err(ParseError(format!("target literal must not begin with ({first}): {word}"))),
-        _ => Ok(Expr::Target(word)),
+        _ => Ok(Node::Target(word)),
     }
 }
 
 impl Expr {
+    /// The whole expression.
+    pub fn root(&self) -> ExprId {
+        self.root
+    }
+
+    /// A part of the expression.
+    pub fn node(&self, id: ExprId) -> &Node {
+        &self.nodes[id.0 as usize]
+    }
+
+    /// The expression's parts, each before those it's made of, left to
+    /// right.
+    pub fn preorder(&self) -> Vec<ExprId> {
+        let mut order = Vec::with_capacity(self.nodes.len());
+        let mut pending = vec![self.root];
+        while let Some(id) = pending.pop() {
+            order.push(id);
+            let start = pending.len();
+            pending.extend(self.children(id));
+            pending[start..].reverse();
+        }
+        order
+    }
+
+    /// The parts a part is made of, left to right.
+    fn children(&self, id: ExprId) -> Vec<ExprId> {
+        match self.node(id) {
+            Node::Target(_) | Node::Set(_) => Vec::new(),
+            Node::Let { value, body, .. } => vec![*value, *body],
+            Node::Binary { operands, .. } => operands.clone(),
+            Node::Function { args, .. } => args.iter().filter_map(|arg| match arg {
+                Arg::Expr(id) => Some(*id),
+                _ => None,
+            }).collect(),
+        }
+    }
+
     /// Whether the expression is a call of `somepath`, whose result
     /// queries print in the path's order.
     pub fn is_top_level_somepath(&self) -> bool {
-        matches!(self, Expr::Function { name, .. } if name == "somepath")
+        matches!(self.node(self.root), Node::Function { name, .. } if name == "somepath")
     }
 
     /// The target patterns the expression names, other than variables, as
     /// a universe inferred from it has them.
     pub fn target_patterns(&self, patterns: &mut Vec<String>) {
-        match self {
-            Expr::Target(pattern) if !pattern.starts_with('$') => patterns.push(pattern.clone()),
-            Expr::Target(_) => {}
-            Expr::Let { value, body, .. } => {
-                value.target_patterns(patterns);
-                body.target_patterns(patterns);
-            }
-            Expr::Set(words) => patterns.extend(words.iter().cloned()),
-            Expr::Binary { operands, .. } => operands.iter().for_each(|operand| operand.target_patterns(patterns)),
-            Expr::Function { args, .. } => {
-                for arg in args {
-                    if let Arg::Expr(expr) = arg {
-                        expr.target_patterns(patterns);
-                    }
-                }
+        for id in self.preorder() {
+            match self.node(id) {
+                Node::Target(pattern) if !pattern.starts_with('$') => patterns.push(pattern.clone()),
+                Node::Set(words) => patterns.extend(words.iter().cloned()),
+                _ => {}
             }
         }
     }
+
+    /// A part of the expression as Bazel prints it in messages.
+    pub fn text(&self, id: ExprId) -> String {
+        let mut out = String::new();
+        let mut pending = vec![Piece::Part(id)];
+        while let Some(piece) = pending.pop() {
+            match piece {
+                Piece::Text(text) => out.push_str(&text),
+                Piece::Part(id) => {
+                    let start = pending.len();
+                    pending.extend(self.pieces(id));
+                    pending[start..].reverse();
+                }
+            }
+        }
+        out
+    }
+
+    /// What a part prints as, its own parts left to be printed.
+    fn pieces(&self, id: ExprId) -> Vec<Piece> {
+        match self.node(id) {
+            Node::Target(pattern) => vec![Piece::Text(quoted_pattern(pattern))],
+            Node::Let { name, value, body } => vec![
+                Piece::Text(format!("let {name} = ")),
+                Piece::Part(*value),
+                Piece::Text(" in ".to_string()),
+                Piece::Part(*body),
+            ],
+            Node::Set(words) => vec![Piece::Text(format!("set({})", words.join(" ")))],
+            Node::Binary { op, operands } => {
+                let mut pieces = vec![Piece::Text("(".to_string())];
+                for (index, operand) in operands.iter().enumerate() {
+                    if index > 0 {
+                        pieces.push(Piece::Text(format!(" {op} ")));
+                    }
+                    pieces.push(Piece::Part(*operand));
+                }
+                pieces.push(Piece::Text(")".to_string()));
+                pieces
+            }
+            Node::Function { name, args } => {
+                let mut pieces = vec![Piece::Text(format!("{name}("))];
+                for (index, arg) in args.iter().enumerate() {
+                    if index > 0 {
+                        pieces.push(Piece::Text(", ".to_string()));
+                    }
+                    pieces.push(match arg {
+                        Arg::Expr(id) => Piece::Part(*id),
+                        Arg::Word(word) => Piece::Text(format!("'{word}'")),
+                        Arg::Int(value) => Piece::Text(value.to_string()),
+                    });
+                }
+                pieces.push(Piece::Text(")".to_string()));
+                pieces
+            }
+        }
+    }
+}
+
+/// A piece of an expression being printed: text, or a part still to print.
+enum Piece {
+    Text(String),
+    Part(ExprId),
 }
 
 impl fmt::Display for SetOp {
@@ -405,29 +590,7 @@ impl fmt::Display for SetOp {
 /// Expressions as Bazel prints them in messages.
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Expr::Target(pattern) => f.write_str(&quoted_pattern(pattern)),
-            Expr::Let { name, value, body } => write!(f, "let {name} = {value} in {body}"),
-            Expr::Set(words) => write!(f, "set({})", words.join(" ")),
-            Expr::Binary { op, operands } => {
-                let operands: Vec<String> = operands.iter().map(Expr::to_string).collect();
-                write!(f, "({})", operands.join(&format!(" {op} ")))
-            }
-            Expr::Function { name, args } => {
-                let args: Vec<String> = args.iter().map(Arg::to_string).collect();
-                write!(f, "{name}({})", args.join(", "))
-            }
-        }
-    }
-}
-
-impl fmt::Display for Arg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Arg::Expr(expr) => write!(f, "{expr}"),
-            Arg::Word(word) => write!(f, "'{word}'"),
-            Arg::Int(value) => write!(f, "{value}"),
-        }
+        f.write_str(&self.text(self.root))
     }
 }
 
@@ -459,16 +622,27 @@ mod tests {
         let expr = query("//a/... - //a/b:all + //c").unwrap();
         assert_eq!(expr.to_string(), "((//a/... - //a/b:all) + //c)");
         assert_eq!(query("//a + //b + //c").unwrap().to_string(), "(//a + //b + //c)");
-        assert_eq!(query("//my-target").unwrap(), Expr::Target("//my-target".into()));
+        let target = query("//my-target").unwrap();
+        assert_eq!(target.node(target.root()), &Node::Target("//my-target".into()));
     }
 
     #[test]
-    fn refuses_expressions_nested_too_deeply() {
-        let deep = |depth: usize| format!("{}//a{}", "deps(".repeat(depth), ")".repeat(depth));
-        assert!(query(&deep(MAX_DEPTH - 1)).is_ok());
-        assert!(query(&deep(MAX_DEPTH + 1)).unwrap_err().0.contains("nested more than"));
-        let alternating: String = (0..MAX_DEPTH + 1).map(|_| " + //b - //c").collect();
-        assert!(query(&format!("//a{alternating}")).unwrap_err().0.contains("nested more than"));
+    fn parses_prints_and_drops_expressions_nested_arbitrarily_deeply() {
+        const DEPTH: usize = 200_000;
+        let calls = format!("{}//a{}", "deps(".repeat(DEPTH), ")".repeat(DEPTH));
+        let expr = query(&calls).unwrap();
+        assert_eq!(expr.to_string(), calls);
+        let mut patterns = Vec::new();
+        expr.target_patterns(&mut patterns);
+        assert_eq!(patterns, ["//a"]);
+
+        let parens = format!("{}//a + //b{}", "(".repeat(DEPTH), ")".repeat(DEPTH));
+        assert_eq!(query(&parens).unwrap().to_string(), "(//a + //b)");
+        let lets: String = (0..DEPTH).map(|_| "let x = //a in ").collect();
+        assert!(query(&format!("{lets}$x")).is_ok());
+        let alternating: String = (0..DEPTH).map(|_| " + //b - //c").collect();
+        let expr = query(&format!("//a{alternating}")).unwrap();
+        assert!(expr.to_string().starts_with(&"(".repeat(100)));
     }
 
     #[test]

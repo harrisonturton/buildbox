@@ -21,12 +21,12 @@ mod universe;
 mod xml_output;
 
 pub use build_output::{AttrValues, build_value, write_rule_with};
-pub use engine::{Context, QueryEnvironment, QueryError, Vars, evaluate};
+pub use engine::{Context, QueryEnvironment, QueryError, evaluate};
 pub use functions::{breadth_first, closure_edges, expr_arg, is_test_rule, is_test_suite, kind_of, regex_arg, word_arg};
 pub use graph::{Digraph, DotStyle};
 pub use nodes::NodeSet;
 pub use output::{OrderOutput, OutputFormat, OutputOptions, RepoPaths, display_label, display_package, format};
-pub use parse::{AQUERY_FUNCTIONS, Arg, ArgKind, CQUERY_FUNCTIONS, DEFAULT_FUNCTIONS, Expr, Function, ParseError, SetOp, UNIVERSE_FUNCTIONS, parse, truncate};
+pub use parse::{AQUERY_FUNCTIONS, Arg, ArgKind, CQUERY_FUNCTIONS, DEFAULT_FUNCTIONS, Expr, ExprId, Function, Node, ParseError, SetOp, UNIVERSE_FUNCTIONS, parse, truncate};
 pub use target_graph::{attr_string, possible_values};
 pub use target_proto::target_message;
 pub use universe::{QueryOptions, TargetRef, TargetSet, Universe, attr_value};

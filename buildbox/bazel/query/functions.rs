@@ -1,6 +1,6 @@
 //! The functions every query language has, over any environment.
 
-use crate::engine::{Context, QueryEnvironment, QueryError};
+use crate::engine::{Budget, Context, QueryEnvironment, QueryError};
 use crate::nodes::NodeSet;
 use crate::parse::Arg;
 use crate::universe::TargetRef;
@@ -48,7 +48,7 @@ pub(crate) async fn call<E: QueryEnvironment>(cx: &Context<'_, E>, name: &str, a
 /// The value of the expression that's argument `index`.
 pub async fn expr_arg<E: QueryEnvironment>(cx: &Context<'_, E>, args: &[Arg], index: usize) -> Result<NodeSet<E::Node>, QueryError> {
     match args.get(index) {
-        Some(Arg::Expr(expr)) => cx.eval(expr).await,
+        Some(Arg::Expr(_)) => cx.take(index),
         _ => Err(QueryError::in_expression(format!("expected an expression as argument {}", index + 1))),
     }
 }
@@ -82,9 +82,11 @@ pub async fn breadth_first<E: QueryEnvironment>(env: &E, roots: NodeSet<E::Node>
     let mut result = roots.clone();
     let mut frontier = roots.into_vec();
     let mut level = 0;
+    let mut budget = Budget::default();
     while !frontier.is_empty() && depth.is_none_or(|depth| level < depth) {
         let mut next = Vec::new();
         for node in &frontier {
+            budget.step().await;
             for dep in env.fwd_deps(node).await? {
                 if result.insert(dep.clone()) {
                     next.push(dep);
@@ -102,7 +104,9 @@ pub async fn breadth_first<E: QueryEnvironment>(env: &E, roots: NodeSet<E::Node>
 pub async fn closure_edges<E: QueryEnvironment>(env: &E, roots: NodeSet<E::Node>) -> Result<HashMap<E::Node, Vec<E::Node>>, QueryError> {
     let closure = env.transitive_closure(roots, None).await?;
     let mut edges = HashMap::with_capacity(closure.len());
+    let mut budget = Budget::default();
     for node in &closure {
+        budget.step().await;
         let deps: Vec<E::Node> = env.fwd_deps(node).await?.into_iter().filter(|dep| closure.contains(dep)).collect();
         edges.insert(node.clone(), deps);
     }
