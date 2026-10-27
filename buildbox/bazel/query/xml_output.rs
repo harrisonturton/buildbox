@@ -120,7 +120,7 @@ async fn target_element<C: Compute>(universe: &Universe<C>, target: &TargetRef, 
 
 async fn rule_element<C: Compute>(universe: &Universe<C>, target: &TargetRef, options: &OutputOptions) -> Result<Element, QueryError> {
     let Target::Rule(rule) = target.target() else {
-        unreachable!("rule_element is given rules");
+        return Err(QueryError::in_evaluation(format!("{} isn't a rule", target.label())));
     };
     let mapping = &universe.main_mapping;
     let package = target.package();

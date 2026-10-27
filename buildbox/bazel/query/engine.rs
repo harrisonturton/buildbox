@@ -208,8 +208,11 @@ impl<'a, E: QueryEnvironment> Context<'a, E> {
     }
 
     async fn binary(&self, op: SetOp, operands: &[Expr]) -> Result<NodeSet<E::Node>, QueryError> {
-        let mut result = self.eval(&operands[0]).await?;
-        for operand in &operands[1..] {
+        let Some((first, rest)) = operands.split_first() else {
+            return Err(QueryError::in_evaluation("a set operation needs operands".to_string()));
+        };
+        let mut result = self.eval(first).await?;
+        for operand in rest {
             let value = self.eval(operand).await?;
             result = match op {
                 SetOp::Union => result.union(value),

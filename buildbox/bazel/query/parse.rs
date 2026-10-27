@@ -114,12 +114,18 @@ pub const AQUERY_FUNCTIONS: &[Function] = &[Function::new("inputs", &[W, E]), Fu
 #[error("{0}")]
 pub struct ParseError(pub String);
 
+/// How deeply expressions may nest. Parsing, evaluating, printing and
+/// dropping an expression each take stack in proportion to its depth, so
+/// deeper ones are refused rather than exhausting it.
+pub const MAX_DEPTH: usize = 500;
+
 /// Parse a query expression whose functions are among `functions`.
 pub fn parse(input: &str, functions: &[Function]) -> Result<Expr, ParseError> {
     let mut parser = Parser {
         tokens: scan(input)?,
         position: 0,
         functions,
+        depth: 0,
     };
     let expr = parser.expression()?;
     if parser.token().kind != TokenKind::Eof {
@@ -147,6 +153,8 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     position: usize,
     functions: &'a [Function],
+    /// How deeply the expression being parsed is nested.
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -208,9 +216,12 @@ impl Parser<'_> {
             return Ok(first);
         };
         let mut operands = vec![first];
+        let mut depth = self.depth;
         while let Some(next) = set_op(self.token().kind) {
             self.advance();
             if next != op {
+                depth += 1;
+                self.check_depth(depth)?;
                 let joined = Expr::Binary { op, operands };
                 operands = vec![joined];
                 op = next;
@@ -221,6 +232,20 @@ impl Parser<'_> {
     }
 
     fn primary(&mut self) -> Result<Expr, ParseError> {
+        self.depth += 1;
+        let primary = self.check_depth(self.depth).and_then(|_| self.nested_primary());
+        self.depth -= 1;
+        primary
+    }
+
+    fn check_depth(&self, depth: usize) -> Result<(), ParseError> {
+        match depth > MAX_DEPTH {
+            true => Err(ParseError(format!("query expression is nested more than {MAX_DEPTH} levels deep"))),
+            false => Ok(()),
+        }
+    }
+
+    fn nested_primary(&mut self) -> Result<Expr, ParseError> {
         match self.token().kind {
             TokenKind::Word => self.word_or_function(),
             TokenKind::Let => self.let_expression(),
@@ -435,6 +460,15 @@ mod tests {
         assert_eq!(expr.to_string(), "((//a/... - //a/b:all) + //c)");
         assert_eq!(query("//a + //b + //c").unwrap().to_string(), "(//a + //b + //c)");
         assert_eq!(query("//my-target").unwrap(), Expr::Target("//my-target".into()));
+    }
+
+    #[test]
+    fn refuses_expressions_nested_too_deeply() {
+        let deep = |depth: usize| format!("{}//a{}", "deps(".repeat(depth), ")".repeat(depth));
+        assert!(query(&deep(MAX_DEPTH - 1)).is_ok());
+        assert!(query(&deep(MAX_DEPTH + 1)).unwrap_err().0.contains("nested more than"));
+        let alternating: String = (0..MAX_DEPTH + 1).map(|_| " + //b - //c").collect();
+        assert!(query(&format!("//a{alternating}")).unwrap_err().0.contains("nested more than"));
     }
 
     #[test]
