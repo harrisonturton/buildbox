@@ -91,8 +91,11 @@ fn complete_marker(dest: &Path) -> PathBuf {
 /// was fetched before. Repositories are fetched in place, as in Bazel,
 /// since repository rules may record the paths of the files they create; the
 /// marker beside the directory says the fetch finished. A fetch that fails
-/// is tried again by the next command, as Bazel's are. Blocks.
+/// is tried again by the next command, as Bazel's are. A lock beside the
+/// directory keeps two fetches of it, such as one a cancelled command left
+/// running and a later command's, from working in it at once. Blocks.
 pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), SkyError> {
+    let _lock = lock_beside(dest)?;
     let marker = complete_marker(dest);
     if marker.exists() {
         link_external(dest);
@@ -112,6 +115,23 @@ pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) 
     std::fs::write(&marker, b"").map_err(|error| SkyError::transient(format!("failed to write {}: {error}", marker.display())))?;
     link_external(dest);
     Ok(())
+}
+
+/// Hold the lock of a repository's directory, waiting for another fetch
+/// of it to finish.
+fn lock_beside(dest: &Path) -> Result<std::fs::File, SkyError> {
+    let path = PathBuf::from(format!("{}.lock", dest.display()));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| SkyError::transient(format!("failed to create {}: {error}", parent.display())))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|error| SkyError::transient(format!("failed to open {}: {error}", path.display())))?;
+    file.lock().map_err(|error| SkyError::transient(format!("failed to lock {}: {error}", path.display())))?;
+    Ok(file)
 }
 
 /// Link a fetched repository as `external/<canonical name>` beside the
