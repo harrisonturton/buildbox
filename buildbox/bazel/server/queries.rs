@@ -23,12 +23,14 @@ const COMMON_OPTIONS: &[(&str, OptionKind)] = &[
     ("tool_deps", OptionKind::Bool),
     ("host_deps", OptionKind::Bool),
     ("universe_scope", OptionKind::Value),
-    ("infer_universe_scope", OptionKind::Bool),
     ("query_file", OptionKind::Value),
     ("line_terminator_null", OptionKind::Bool),
-    ("null", OptionKind::Bool),
     ("output_file", OptionKind::Value),
     ("loading_phase_threads", OptionKind::Value),
+    ("experimental_repository_cache_hardlinks", OptionKind::Bool),
+    ("repo_contents_cache", OptionKind::Value),
+    ("repository_cache", OptionKind::Value),
+    ("enable_platform_specific_config", OptionKind::Bool),
     ("repo_env", OptionKind::Multi),
     ("color", OptionKind::Value),
     ("curses", OptionKind::Value),
@@ -40,17 +42,14 @@ pub(crate) fn query_spec() -> OptionSpec {
     use OptionKind::*;
     let mut options = COMMON_OPTIONS.to_vec();
     options.extend_from_slice(&[
+        ("null", Bool),
         ("order_output", Value),
         ("order_results", Bool),
         ("relative_locations", Bool),
-        ("proto:default_values", Bool),
         ("xml:default_values", Bool),
-        ("xml:line_numbers", Bool),
         ("graph:factored", Bool),
         ("graph:node_limit", Int),
         ("graph:conditional_edges_limit", Int),
-        ("strict_test_suite", Bool),
-        ("experimental_graphless_query", Value),
     ]);
     OptionSpec::new(&options)
 }
@@ -227,13 +226,9 @@ pub(crate) fn cquery_spec() -> OptionSpec {
         ("starlark:expr", Value),
         ("starlark:file", Value),
         ("include_aspects", Bool),
-        ("show_config_fragments", Value),
         ("transitions", Value),
-        ("proto:default_values", Bool),
-        ("proto:include_configurations", Bool),
         ("graph:factored", Bool),
         ("graph:node_limit", Int),
-        ("graph:conditional_edges_limit", Int),
     ]);
     OptionSpec::new(&options)
 }
@@ -368,12 +363,8 @@ pub(crate) fn aquery_spec() -> OptionSpec {
     options.extend_from_slice(&[
         ("include_commandline", Bool),
         ("include_artifacts", Bool),
-        ("include_param_files", Bool),
         ("include_file_write_contents", Bool),
         ("include_aspects", Bool),
-        ("include_pruned_inputs", Bool),
-        ("skyframe_state", Bool),
-        ("proto:include_configurations", Bool),
     ]);
     OptionSpec::new(&options)
 }
@@ -425,4 +416,33 @@ fn cquery_output(options: &ParsedOptions) -> Result<CqueryOutput, String> {
         starlark,
         null_terminated: null_terminated(options),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every option bb takes is one Bazel takes for the same command, so
+    /// that the checks of what Bazel takes come first.
+    #[test]
+    fn commands_take_only_bazels_options() {
+        let commands = [
+            ("build", build::build_spec()),
+            ("test", build::build_spec()),
+            ("run", build::build_spec()),
+            ("info", build::build_spec()),
+            ("query", query_spec()),
+            ("cquery", cquery_spec()),
+            ("aquery", aquery_spec()),
+        ];
+        let mut missing = Vec::new();
+        for (command, spec) in commands {
+            for (name, _) in spec.options() {
+                if !bazel_options::bazel_option(name).is_some_and(|option| option.takes(command)) {
+                    missing.push(format!("{command} --{name}"));
+                }
+            }
+        }
+        assert_eq!(missing, Vec::<String>::new());
+    }
 }

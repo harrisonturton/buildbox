@@ -2,9 +2,11 @@
 //! `.bazelrc` files and the command line, and the residue (target patterns
 //! or a query).
 
+mod bazel;
 mod jobs;
 mod rc;
 
+pub use bazel::{BazelKind, BazelOption, bazel_option};
 pub use jobs::{MAX_JOBS, convert_jobs};
 pub use rc::{RcFile, RcError, parse_rc_files};
 
@@ -51,14 +53,49 @@ impl OptionSpec {
     }
 }
 
+/// An argument to parse, and whether a `common` line of a `.bazelrc` file
+/// gave it: such options apply to the commands that take them, and other
+/// commands ignore them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Arg {
+    pub text: String,
+    pub common: bool,
+}
+
+impl Arg {
+    /// An argument given for the command itself.
+    pub fn given(text: &str) -> Arg {
+        Arg { text: text.to_string(), common: false }
+    }
+
+    /// An argument from a `common` line of a `.bazelrc` file.
+    pub fn common(text: &str) -> Arg {
+        Arg { text: text.to_string(), common: true }
+    }
+}
+
+/// Arguments given for the command itself.
+pub fn given_args(args: &[String]) -> Vec<Arg> {
+    args.iter().map(|arg| Arg::given(arg)).collect()
+}
+
 /// Options after parsing: each option's values in the order given, and the
 /// arguments that weren't options.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ParsedOptions {
     values: Vec<(String, String)>,
     pub residue: Vec<String>,
-    /// Options this command doesn't know, which were ignored.
-    pub unknown: Vec<String>,
+    /// Each use of an option bb doesn't implement, which is an error unless
+    /// it leaves the option as it is by default.
+    unsupported: Vec<UnsupportedUse>,
+}
+
+/// A use of an option bb doesn't implement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnsupportedUse {
+    option: &'static BazelOption,
+    spelled: String,
+    is_default: bool,
 }
 
 impl ParsedOptions {
@@ -113,6 +150,12 @@ pub enum OptionsError {
 
     #[error("config expansion of '{0}' is recursive")]
     RecursiveConfig(String),
+
+    #[error("{0} :: Unrecognized option: {0}")]
+    Unrecognized(String),
+
+    #[error("{spelled} :: bb doesn't support --{name} yet")]
+    Unsupported { spelled: String, name: String },
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -123,18 +166,40 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-/// Parse `args` against `spec`. `--config=name` is expanded with `rc`'s
-/// definitions for `command`. Unknown options are recorded and skipped, so
-/// tools that pass options this implementation lacks still work.
-pub fn parse(args: &[String], spec: &OptionSpec, rc: &RcFile, command: &str) -> Result<ParsedOptions, OptionsError> {
+/// Parse `args` against `spec`, the options bb implements for `command`.
+/// `--config=name` is expanded with `rc`'s definitions for `command`.
+///
+/// Options Bazel doesn't take for `command` are errors, unless a `common`
+/// line gave them. Options Bazel takes that `spec` lacks are errors unless
+/// they're given their default values, so that nothing bb can't do is
+/// silently skipped.
+pub fn parse(args: &[Arg], spec: &OptionSpec, rc: &RcFile, command: &str) -> Result<ParsedOptions, OptionsError> {
     let mut parsed = ParsedOptions::default();
     let mut expanding = Vec::new();
     parse_into(args, spec, rc, command, &mut parsed, &mut expanding)?;
+    if let Some(error) = unsupported_error(&parsed.unsupported) {
+        return Err(error);
+    }
     Ok(parsed)
 }
 
+/// The error for the first use of an option bb doesn't implement that
+/// changes it: for an option given many times, any use with a value; for
+/// others, the last use, which is the one that counts.
+fn unsupported_error(uses: &[UnsupportedUse]) -> Option<OptionsError> {
+    let changing = uses.iter().find(|used| {
+        let last = uses.iter().rev().find(|other| other.option.name == used.option.name);
+        let counts = used.option.kind == BazelKind::Multi || last.is_some_and(|last| std::ptr::eq(last, *used));
+        counts && !used.is_default
+    })?;
+    Some(OptionsError::Unsupported {
+        spelled: changing.spelled.clone(),
+        name: changing.option.name.to_string(),
+    })
+}
+
 fn parse_into(
-    args: &[String],
+    args: &[Arg],
     spec: &OptionSpec,
     rc: &RcFile,
     command: &str,
@@ -143,10 +208,10 @@ fn parse_into(
 ) -> Result<(), OptionsError> {
     let mut index = 0;
     while index < args.len() {
-        let arg = &args[index];
+        let Arg { text: arg, common } = &args[index];
         index += 1;
         if arg == "--" {
-            parsed.residue.extend(args[index..].iter().cloned());
+            parsed.residue.extend(args[index..].iter().map(|arg| arg.text.clone()));
             return Ok(());
         }
         let Some(option) = arg.strip_prefix("--") else {
@@ -184,6 +249,13 @@ fn parse_into(
             expand_config(&config, spec, rc, command, parsed, expanding)?;
             continue;
         }
+        if !bazel_takes(name, command) {
+            if !common || bazel_option_named(name).is_none() {
+                return Err(OptionsError::Unrecognized(arg.clone()));
+            }
+            skip_value(name, inline.is_some(), &mut index);
+            continue;
+        }
         match option_kind(spec, name) {
             Some((name, OptionKind::Bool, negated)) => {
                 let value = match inline {
@@ -217,10 +289,8 @@ fn parse_into(
                 parsed.values.push((name.to_string(), value));
             }
             None => {
-                parsed.unknown.push(arg.clone());
-                if inline.is_none() && args.get(index).is_some_and(|next| !next.starts_with('-') && looks_like_value(next)) {
-                    index += 1;
-                }
+                let used = unsupported_use(arg, name, inline, args, &mut index)?;
+                parsed.unsupported.push(used);
             }
         }
     }
@@ -245,10 +315,63 @@ fn starlark_flag(option: &str) -> Option<String> {
     Some(format!("{negated}=false"))
 }
 
-/// Whether an argument after an unknown `--option` is probably its value
-/// rather than a target pattern or query.
-fn looks_like_value(next: &str) -> bool {
-    !next.contains("//") && !next.contains(':') && !next.contains('(')
+/// Bazel's option `name` names, as `--name` or `--noname`, and whether
+/// it's negated.
+fn bazel_option_named(name: &str) -> Option<(&'static BazelOption, bool)> {
+    if let Some(option) = bazel_option(name) {
+        return Some((option, false));
+    }
+    let option = bazel_option(name.strip_prefix("no")?)?;
+    match option.kind {
+        BazelKind::Bool | BazelKind::TriState => Some((option, true)),
+        _ => None,
+    }
+}
+
+/// Whether Bazel takes the option `name` names for `command`.
+fn bazel_takes(name: &str, command: &str) -> bool {
+    bazel_option_named(name).is_some_and(|(option, _)| option.takes(command))
+}
+
+/// Step past the value of the option `name` names, if it takes one and it
+/// wasn't given inline.
+fn skip_value(name: &str, inline: bool, index: &mut usize) {
+    let takes_value = bazel_option_named(name).is_some_and(|(option, _)| matches!(option.kind, BazelKind::Value | BazelKind::Multi));
+    if takes_value && !inline {
+        *index += 1;
+    }
+}
+
+/// A use of an option bb doesn't implement, which is only accepted if it
+/// leaves the option at its default, where Bazel behaves as bb does.
+fn unsupported_use(arg: &str, name: &str, inline: Option<String>, args: &[Arg], index: &mut usize) -> Result<UnsupportedUse, OptionsError> {
+    let Some((option, negated)) = bazel_option_named(name) else {
+        return Err(OptionsError::Unrecognized(arg.to_string()));
+    };
+    let (value, spelled) = match (option.kind, inline) {
+        (BazelKind::Value | BazelKind::Multi, Some(value)) => (Some(value), arg.to_string()),
+        (BazelKind::Value | BazelKind::Multi, None) => {
+            let value = next_value(args, index, name)?;
+            let spelled = format!("{arg} {value}");
+            (Some(value), spelled)
+        }
+        (BazelKind::Bool | BazelKind::TriState, inline) => (Some(flag_value(inline, negated)), arg.to_string()),
+        (BazelKind::Expansion, _) => (None, arg.to_string()),
+    };
+    let is_default = value.is_some_and(|value| option.is_default(&value));
+    Ok(UnsupportedUse { option, spelled, is_default })
+}
+
+/// A boolean or tristate option's value, as `true`, `false` or as given.
+fn flag_value(inline: Option<String>, negated: bool) -> String {
+    let value = match inline {
+        Some(value) => value,
+        None => "true".to_string(),
+    };
+    match parse_bool(&value) {
+        Some(value) => (value != negated).to_string(),
+        None => value,
+    }
 }
 
 /// Find an option's kind, allowing `--noname` for boolean options.
@@ -272,12 +395,12 @@ fn jobs_value(spelled: String, value: &str) -> Result<String, OptionsError> {
     }
 }
 
-fn next_value(args: &[String], index: &mut usize, name: &str) -> Result<String, OptionsError> {
+fn next_value(args: &[Arg], index: &mut usize, name: &str) -> Result<String, OptionsError> {
     let Some(value) = args.get(*index) else {
         return Err(OptionsError::MissingValue(name.to_string()));
     };
     *index += 1;
-    Ok(value.clone())
+    Ok(value.text.clone())
 }
 
 fn expand_config(
@@ -299,7 +422,7 @@ fn expand_config(
     parse_into(&args, spec, rc, command, &mut expanded, expanding)?;
     expanding.pop();
     parsed.values.extend(expanded.values);
-    parsed.unknown.extend(expanded.unknown);
+    parsed.unsupported.extend(expanded.unsupported);
     parsed.residue.extend(expanded.residue);
     Ok(())
 }
@@ -331,17 +454,18 @@ pub fn inherited_commands(command: &str) -> Vec<&'static str> {
 /// commands it inherits from, the host platform's config if
 /// `--enable_platform_specific_config` asks for it, then the command
 /// line's.
-pub fn command_args(rc: &RcFile, command: &str, command_line: &[String]) -> Vec<String> {
-    let mut args = rc.command_args("always");
-    args.extend(rc.command_args("common"));
+pub fn command_args(rc: &RcFile, command: &str, command_line: &[String]) -> Vec<Arg> {
+    let mut args = given_args(&rc.command_args("always"));
+    args.extend(rc.command_args("common").iter().map(|arg| Arg::common(arg)));
     for inherited in inherited_commands(command) {
-        args.extend(rc.command_args(inherited));
+        args.extend(given_args(&rc.command_args(inherited)));
     }
     let platform = host_platform_config();
-    if platform_specific_config_enabled(args.iter().chain(command_line)) && rc.config_args(command, platform).is_some() {
-        args.push(format!("--config={platform}"));
+    let texts = args.iter().map(|arg| &arg.text).chain(command_line);
+    if platform_specific_config_enabled(texts) && rc.config_args(command, platform).is_some() {
+        args.push(Arg::given(&format!("--config={platform}")));
     }
-    args.extend(command_line.iter().cloned());
+    args.extend(given_args(command_line));
     args
 }
 

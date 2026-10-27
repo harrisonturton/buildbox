@@ -150,8 +150,11 @@ actions of executables included. Still missing:
 
 ## 6. The test runner
 
-`--runs_per_test`, `--flaky_test_attempts` and the `shard_count` attribute
-are accepted but have no effect: nothing sets `TEST_TOTAL_SHARDS`. There's
+The `shard_count` attribute has no effect: nothing sets
+`TEST_TOTAL_SHARDS`. `--runs_per_test`, `--flaky_test_attempts`,
+`--test_filter`, `--test_arg`, `--test_env`, `--test_timeout`,
+`--test_tag_filters`, `--build_tests_only` and `--cache_test_results`
+aren't implemented (section 11). There's
 no `coverage` command, no `coverage_common`, and no LCOV collection or
 merging.
 
@@ -175,8 +178,8 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
 
 ## 9. Bzlmod and fetching
 
-- **Lockfile:** `MODULE.bazel.lock` is neither read nor written;
-  `--lockfile_mode` is accepted and ignored.
+- **Lockfile:** `MODULE.bazel.lock` is neither read nor written, and
+  `--lockfile_mode` isn't implemented.
 - **Overrides:** `git_override` and `multiple_version_override` fail
   (`buildbox/bazel/bzlmod/resolve.rs`). A `single_version_override` with
   patches replaces the registry's `patch_strip` with its own, so the
@@ -205,10 +208,38 @@ and `select()`s' `config_setting`s. Still unchecked:
 - Bazel's checks of output files of testonly rules, which
   `--experimental_check_testonly_for_output_files` turns on.
 
+## 11. Options
+
+bb checks every option against a table of Bazel 9.3.1's options and the
+commands that take each (`buildbox/bazel/options/bazel_options.txt`,
+generated from Bazel's source). An option Bazel doesn't take for the
+command is an error, as in Bazel, unless a `common` line of a `.bazelrc`
+gives it. An option Bazel takes but bb doesn't implement is an error
+unless its last use leaves it at its default, so `--disk_cache=` on the
+command line undoes a `.bazelrc`'s `--disk_cache`. bb implements few
+options outside configurations and the output it prints; among those it
+doesn't are:
+
+- caches and remote execution: `--disk_cache`, `--remote_cache`,
+  `--remote_executor` and the other `--remote_*` options (bb keeps its own
+  action cache, shared by every workspace);
+- `--announce_rc`, `--explain`, `--profile` and the Build Event Protocol;
+- most test options (section 6), `--run_under` and `--script_path`;
+- `--build_tag_filters`, `--infer_universe_scope`, and query output
+  options such as `--proto:default_values`.
+
+Native options that only change how Bazel runs, such as
+`--local_resources`, and the locations of the repository caches, since
+bb's server keeps one for all workspaces, are accepted and ignored. Of
+the native options configurations carry, those whose effect bb doesn't
+implement, such as `--noenable_runfiles` and `--shell_executable`, are
+errors unless left at their defaults
+(`UNSUPPORTED_NATIVE_OPTIONS` in `buildbox/bazel/server/build.rs`).
+
 ## Suggested order
 
 1. Execution platforms and exec groups (section 3).
-2. Options bb accepts but ignores, and execution requirements (section 3).
+2. Test options (section 6) and execution requirements (section 3).
 
 ## Not yet audited
 

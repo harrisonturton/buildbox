@@ -2,6 +2,7 @@
 
 use crate::command::{CommandContext, PRODUCT, VERSION, exit};
 use crate::output::Output;
+use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
 use std::path::PathBuf;
 
 pub async fn version(args: &[String], out: &Output) -> i32 {
@@ -48,41 +49,69 @@ pub const INFO_KEYS: &[(&str, &str)] = &[
     ("workspace", "The working directory of the server."),
 ];
 
+/// `bb info`: the values of the keys the command line names, or of all of
+/// them, for the configuration its options give.
 pub async fn info(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {
-    let entries = info_values(context);
-    let keys: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
-    if keys.is_empty() {
-        let text: String = entries.iter().map(|(key, value)| format!("{key}: {value}\n")).collect();
-        out.stdout(&text).await;
-        return exit::SUCCESS;
+    let options = match crate::build::parse(context, "info", args, out).await {
+        Ok(options) => options,
+        Err(code) => return code,
+    };
+    let keys = &options.residue;
+    if let Some(key) = keys.iter().find(|key| !INFO_KEYS.iter().any(|(name, _)| name == key)) {
+        out.error(&format!("unknown key: '{key}'")).await;
+        return exit::COMMAND_LINE_ERROR;
     }
-    let mut text = String::new();
-    for key in &keys {
-        let Some((_, value)) = entries.iter().find(|(name, _)| name == key) else {
-            out.error(&format!("unknown key: '{key}'")).await;
+    let output_directory = match info_output_directory(context, &options, keys).await {
+        Ok(directory) => directory,
+        Err(message) => {
+            out.error(&message).await;
             return exit::COMMAND_LINE_ERROR;
-        };
-        if keys.len() == 1 {
-            text.push_str(&format!("{value}\n"));
-        } else {
-            text.push_str(&format!("{key}: {value}\n"));
         }
-    }
+    };
+    let entries = info_values(context, &output_directory);
+    let text = match keys.as_slice() {
+        [] => entries.iter().map(|(key, value)| format!("{key}: {value}\n")).collect(),
+        [key] => format!("{}\n", info_value(&entries, key)),
+        keys => keys.iter().map(|key| format!("{key}: {}\n", info_value(&entries, key))).collect(),
+    };
     out.stdout(&text).await;
     exit::SUCCESS
 }
 
-/// The value of each of [`INFO_KEYS`], in order.
-fn info_values(context: &CommandContext<'_>) -> Vec<(&'static str, String)> {
+/// The keys whose values depend on the configuration.
+const CONFIGURED_INFO_KEYS: &[&str] = &["bazel-bin", "bazel-genfiles", "bazel-testlogs"];
+
+/// The output directory of the options' configuration, if any of `keys`
+/// needs it; it's only worked out then, since that loads the workspace's
+/// modules.
+async fn info_output_directory(context: &CommandContext<'_>, options: &ParsedOptions, keys: &[String]) -> Result<String, String> {
+    let needed = keys.is_empty() || keys.iter().any(|key| CONFIGURED_INFO_KEYS.contains(&key.as_str()));
+    if !needed {
+        return Ok(String::new());
+    }
+    let workspace = context.server.workspaces().get(&context.workspace_root);
+    workspace.refresh(crate::command::repo_environment(context, options)).await;
+    let session = workspace.graph.session().await;
+    crate::build::output_directory(context, &session, options).await
+}
+
+fn info_value<'a>(entries: &'a [(&'static str, String)], key: &str) -> &'a str {
+    let entry = entries.iter().find(|(name, _)| *name == key);
+    entry.map(|(_, value)| value.as_str()).unwrap_or_default()
+}
+
+/// The value of each of [`INFO_KEYS`], in order, with configured outputs
+/// in `output_directory`.
+fn info_values(context: &CommandContext<'_>, output_directory: &str) -> Vec<(&'static str, String)> {
     let output_base = output_base(context);
     let execution_root = output_base.join("execroot/_main");
     let output_path = execution_root.join("bazel-out");
-    let bin = output_path.join("k8-fastbuild/bin");
+    let configured = output_path.join(output_directory);
     let bazel_dir = &context.server.config().bazel_dir;
     let engine = context.server.workspaces().engine().stats();
     let value = |key: &str| match key {
-        "bazel-bin" | "bazel-genfiles" => bin.display().to_string(),
-        "bazel-testlogs" => output_path.join("k8-fastbuild/testlogs").display().to_string(),
+        "bazel-bin" | "bazel-genfiles" => configured.join("bin").display().to_string(),
+        "bazel-testlogs" => configured.join("testlogs").display().to_string(),
         "execution_root" => execution_root.display().to_string(),
         "install_base" => bazel_dir.join("install").display().to_string(),
         "output_base" => output_base.display().to_string(),
@@ -105,8 +134,14 @@ pub async fn shutdown(context: &CommandContext<'_>, out: &Output) -> i32 {
 }
 
 pub async fn clean(context: &CommandContext<'_>, args: &[String], out: &Output) -> i32 {
+    let mut spec = crate::build::build_spec().options();
+    spec.extend([("expunge", OptionKind::Bool), ("expunge_async", OptionKind::Bool), ("async", OptionKind::Bool)]);
+    let options = match crate::queries::parse_options(context, "clean", args, &OptionSpec::new(&spec), out).await {
+        Ok(options) => options,
+        Err(code) => return code,
+    };
     let output_base = output_base(context);
-    let expunge = args.iter().any(|arg| arg == "--expunge" || arg == "--expunge_async");
+    let expunge = options.flag("expunge", false) || options.flag("expunge_async", false);
     let target = if expunge { output_base.clone() } else { output_base.join("execroot") };
     let removed = tokio::task::spawn_blocking(move || match std::fs::remove_dir_all(&target) {
         Ok(()) => Ok(()),

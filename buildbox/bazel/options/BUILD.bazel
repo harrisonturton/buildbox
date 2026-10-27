@@ -5,11 +5,13 @@ package(default_visibility = ["//visibility:private"])
 rust_library(
     name = "options",
     srcs = [
+        "bazel.rs",
         "jobs.rs",
         "options.rs",
         "rc.rs",
         "tests.rs",
     ],
+    compile_data = ["bazel_options.txt"],
     crate_name = "bazel_options",
     crate_root = "options.rs",
     visibility = ["//buildbox:__subpackages__"],

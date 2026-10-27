@@ -1,5 +1,6 @@
 //! `.bazelrc` files.
 
+use crate::Arg;
 use std::path::{Path, PathBuf};
 
 /// Options from `.bazelrc` files, by command and config: `build` lines are
@@ -31,7 +32,7 @@ impl RcFile {
     /// The options `--config=config` expands to for `command`: those under
     /// `common:config` and the configs of the commands it inherits from.
     /// `None` if no file defines the config at all.
-    pub fn config_args(&self, command: &str, config: &str) -> Option<Vec<String>> {
+    pub fn config_args(&self, command: &str, config: &str) -> Option<Vec<Arg>> {
         let mut commands = vec!["always", "common"];
         commands.extend(crate::inherited_commands(command));
         let defined = self.entries.iter().any(|(_, entry_config, _)| entry_config.as_deref() == Some(config));
@@ -42,7 +43,7 @@ impl RcFile {
         for inherited in commands {
             for (entry, entry_config, entry_args) in &self.entries {
                 if entry == inherited && entry_config.as_deref() == Some(config) {
-                    args.extend(entry_args.iter().cloned());
+                    args.extend(entry_args.iter().map(|arg| Arg { text: arg.clone(), common: inherited == "common" }));
                 }
             }
         }

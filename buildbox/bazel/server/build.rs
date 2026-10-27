@@ -41,37 +41,51 @@ pub fn build_spec() -> OptionSpec {
         ("output_groups", Multi),
         ("aspects", Multi),
         ("aspects_parameters", Multi),
-        ("build_tests_only", Bool),
         ("verbose_failures", Bool),
         ("jobs", Jobs),
         ("test_output", Value),
-        ("test_filter", Value),
-        ("test_arg", Multi),
-        ("test_env", Multi),
-        ("test_timeout", Value),
-        ("test_tag_filters", Value),
-        ("build_tag_filters", Value),
-        ("run_under", Value),
-        ("script_path", Value),
-        ("nocache_test_results", Bool),
-        ("cache_test_results", Bool),
-        ("runs_per_test", Value),
-        ("flaky_test_attempts", Value),
-        ("remote_executor", Value),
-        ("remote_cache", Value),
-        ("disk_cache", Value),
         ("color", Value),
         ("curses", Value),
         ("ui_actions_shown", Int),
         ("show_progress", Bool),
-        ("announce_rc", Bool),
-        ("enable_bzlmod", Bool),
-        ("registry", Multi),
-        ("lockfile_mode", Value),
+        ("enable_platform_specific_config", Bool),
     ];
-    options.extend(bazel_config::command_line_options().map(|option| (option.name, option_kind(option))));
+    options.extend_from_slice(NO_OP_OPTIONS);
+    let native = bazel_config::command_line_options().filter(|option| !UNSUPPORTED_NATIVE_OPTIONS.contains(&option.name));
+    options.extend(native.map(|option| (option.name, option_kind(option))));
     OptionSpec::new(&options)
 }
+
+/// Options bb takes and ignores, since they only tune how Bazel itself
+/// runs, which bb does its own way. bb's server keeps downloads and fetched
+/// repositories in its root, shared by every workspace, as Bazel's
+/// repository caches do.
+pub const NO_OP_OPTIONS: &[(&str, OptionKind)] = &[
+    ("experimental_repository_cache_hardlinks", OptionKind::Bool),
+    ("loading_phase_threads", OptionKind::Value),
+    ("local_resources", OptionKind::Multi),
+    ("progress_report_interval", OptionKind::Value),
+    ("repo_contents_cache", OptionKind::Value),
+    ("repository_cache", OptionKind::Value),
+    ("show_progress_rate_limit", OptionKind::Value),
+];
+
+/// Native options configurations have that bb doesn't act on yet, so
+/// they may only be given their defaults.
+const UNSUPPORTED_NATIVE_OPTIONS: &[&str] = &[
+    "build_runfile_links",
+    "build_runfile_manifests",
+    "check_licenses",
+    "enable_runfiles",
+    "enforce_constraints",
+    "experimental_debug_selects_always_succeed",
+    "experimental_output_paths",
+    "experimental_strict_fileset_output",
+    "experimental_writable_outputs",
+    "platform_mappings",
+    "shell_executable",
+    "strict_filesets",
+];
 
 /// How the command line gives a native option.
 fn option_kind(option: &NativeOption) -> OptionKind {
@@ -949,6 +963,14 @@ async fn expand_test_suites(universe: &Universe<&Session>, labels: TargetSet) ->
         pending.extend(tests);
     }
     Ok(expanded)
+}
+
+/// The directory, such as `k8-fastbuild`, that the options' top-level
+/// configuration puts its outputs in under `bazel-out`.
+pub async fn output_directory(context: &CommandContext<'_>, session: &Session, options: &ParsedOptions) -> Result<String, String> {
+    let main_mapping = session.evaluate(&RepoMappingKey(RepoName::MAIN)).await.map_err(|error| error.message().to_string())?;
+    let config = configuration(context, session, options, &main_mapping.0).await?;
+    Ok(config.get().output_directory.clone())
 }
 
 /// The configuration targets are built in, from the options. As in Bazel,
