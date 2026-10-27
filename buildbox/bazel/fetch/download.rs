@@ -184,10 +184,27 @@ impl DownloadCache {
         if std::fs::create_dir_all(parent).is_err() {
             return;
         }
-        let temporary = parent.join(format!("file.{}.tmp", std::process::id()));
-        if std::fs::copy(file, &temporary).is_ok() {
+        static STORES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let store = STORES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = parent.join(format!("file.{}.{store}.tmp", std::process::id()));
+        if std::fs::copy(file, &temporary).is_ok() && sha256_of(&temporary).as_ref() == Some(sha256) {
             let _ = std::fs::rename(&temporary, &entry);
         }
+        let _ = std::fs::remove_file(&temporary);
+    }
+}
+
+/// A file's SHA-256, if it can be read.
+fn sha256_of(path: &Path) -> Option<Integrity> {
+    let mut file = File::open(path).ok()?;
+    let mut hasher = Hasher::new(HashAlgorithm::Sha256);
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            return Some(hasher.finish());
+        }
+        hasher.update(&buffer[..read]);
     }
 }
 
