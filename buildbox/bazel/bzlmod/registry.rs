@@ -81,6 +81,51 @@ impl Key for RegistryFileKey {
     }
 }
 
+/// The versions of a module a registry has yanked, with why, from its
+/// `metadata.json`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct YankedVersions(pub Vec<(String, String)>);
+
+encoded_value!(YankedVersions);
+
+/// Reads the versions of a module a registry has yanked. Unlike the
+/// registry's other files, `metadata.json` changes, so it isn't cached on
+/// disk.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct YankedVersionsKey {
+    pub registry: String,
+    pub name: String,
+}
+
+impl Key for YankedVersionsKey {
+    type Value = YankedVersions;
+    const KIND: &'static str = "YANKED_VERSIONS";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<YankedVersions, SkyError> {
+        let config = ctx.global::<BzlmodConfig>()?;
+        let url = format!("{}/modules/{}/metadata.json", self.registry.trim_end_matches('/'), self.name);
+        let downloads = config.downloads_for(ctx)?;
+        let partial = config.registry_cache.join(format!("metadata.{}.{}.download", Fingerprint::of(url.as_bytes()), std::process::id()));
+        let fetch_url = url.clone();
+        let fetched = tokio::task::spawn_blocking(move || {
+            let read = read_registry_file(&downloads, &fetch_url, &partial);
+            let _ = std::fs::remove_file(&partial);
+            read
+        })
+        .await;
+        let file = fetched.map_err(|error| SkyError::transient(error.to_string()))??;
+        let Some(bytes) = file.0 else {
+            return Ok(YankedVersions::default());
+        };
+        let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| SkyError::new(format!("invalid {url}: {error}")))?;
+        let Some(yanked) = json.get("yanked_versions").and_then(|yanked| yanked.as_object()) else {
+            return Ok(YankedVersions::default());
+        };
+        let versions = yanked.iter().map(|(version, reason)| (version.clone(), reason.as_str().unwrap_or_default().to_string())).collect();
+        Ok(YankedVersions(versions))
+    }
+}
+
 /// A registry file, from the disk cache unless it's in a local registry,
 /// whose files may change.
 fn read_registry_file(downloads: &bazel_fetch::DownloadCache, url: &str, cache_path: &Path) -> Result<RegistryFile, SkyError> {

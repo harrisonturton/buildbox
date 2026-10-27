@@ -23,6 +23,7 @@ pub mod repo_env;
 pub mod repo_spec;
 pub mod resolve;
 pub mod resolver;
+pub mod selection;
 pub mod spec;
 pub mod star_value;
 pub mod version;

@@ -22,6 +22,7 @@ rust_library(
         "repo_spec.rs",
         "resolve.rs",
         "resolver.rs",
+        "selection.rs",
         "spec.rs",
         "star_value.rs",
         "version.rs",

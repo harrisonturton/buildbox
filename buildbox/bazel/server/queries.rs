@@ -6,13 +6,10 @@ use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
 use bazel_cquery::{AqueryFormat, AqueryOutput, ConfiguredGraph, ConfiguredNode, ConfiguredOptions, CqueryFormat, CqueryOutput, Formatter, Language, Printed};
 use bazel_analysis::ConfiguredTargetKey;
-use bazel_label::RepoName;
-use bazel_loading::RepoMappingKey;
 use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
 use bazel_query::{DotStyle, Expr, OrderOutput, OutputFormat, OutputOptions, QueryOptions, QueryRequest, Universe};
 use skyframe::Session;
 use bazel_ui::Phase;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// The options every query command takes.
@@ -33,6 +30,9 @@ const COMMON_OPTIONS: &[(&str, OptionKind)] = &[
     ("enable_platform_specific_config", OptionKind::Bool),
     ("registry", OptionKind::Multi),
     ("module_mirrors", OptionKind::Multi),
+    ("check_direct_dependencies", OptionKind::Value),
+    ("check_bazel_compatibility", OptionKind::Value),
+    ("allow_yanked_versions", OptionKind::Multi),
     ("repo_env", OptionKind::Multi),
     ("color", OptionKind::Value),
     ("curses", OptionKind::Value),
@@ -86,12 +86,9 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
     crate::command::refresh(context, &workspace, &options).await;
     let session = workspace.graph.session().await;
     out.phase(Phase::RepoMapping).await;
-    let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
-        Ok(mapping) => Arc::new(mapping.0.clone()),
-        Err(error) => {
-            out.error(&crate::command::main_mapping_error(&error)).await;
-            return exit::EXTERNAL_DEPS_ERROR;
-        }
+    let main_mapping = match crate::command::main_mapping(context, &session, &options, out).await {
+        Ok(mapping) => mapping,
+        Err(code) => return code,
     };
     let request = QueryRequest {
         expression,

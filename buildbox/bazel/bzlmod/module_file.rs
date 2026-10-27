@@ -12,6 +12,7 @@ use starlark::syntax::AstModule;
 use starlark::values::none::NoneType;
 use starlark::values::tuple::UnpackTuple;
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, StringValue, Value, ValueLike, starlark_value};
+use bazel_packages::PackageError;
 use std::cell::RefCell;
 use std::fmt;
 use std::sync::LazyLock;
@@ -31,6 +32,12 @@ pub struct ModuleFile {
     pub toolchains: Vec<String>,
     pub execution_platforms: Vec<String>,
     pub overrides: Vec<(String, Override)>,
+    /// The versions of Bazel the module works with, as `module()`'s
+    /// `bazel_compatibility` gives them, such as `>=7.0.0`.
+    pub bazel_compatibility: Vec<String>,
+    /// Warnings about the root module's file: the line and column of the
+    /// call each is about, and what it says.
+    pub warnings: Vec<(u32, u32, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -310,6 +317,35 @@ impl<'v> Forwarded<'v> {
     }
 }
 
+/// Whether a `bazel_compatibility` entry is a comparison and a version of
+/// three numbers, such as `>=7.0.0`.
+fn valid_bazel_compatibility(text: &str) -> bool {
+    let version = ["<=", ">=", "<", ">", "-"].iter().find_map(|sign| text.strip_prefix(sign));
+    let Some(version) = version else {
+        return false;
+    };
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether Bazel `version` satisfies a `bazel_compatibility` entry, as
+/// Bazel compares them: by release numbers, a prerelease below its
+/// release.
+pub fn satisfies_bazel_compatibility(version: &str, entry: &str) -> bool {
+    let cut = if entry.contains('=') { 2 } else { 1 };
+    let (sign, wanted) = entry.split_at(cut.min(entry.len()));
+    let numbers = |text: &str| -> Vec<u64> { text.split('.').map_while(|part| part.parse().ok()).collect() };
+    let release_end = version.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(version.len());
+    let (release, suffix) = version.split_at(release_end);
+    let mut ordering = numbers(release).cmp(&numbers(wanted));
+    if ordering.is_eq() && suffix.starts_with("-pre") {
+        ordering = std::cmp::Ordering::Less;
+    }
+    (ordering.is_eq() && sign.contains('='))
+        || (ordering.is_gt() && (sign.contains('>') || sign.contains('-')))
+        || (ordering.is_lt() && (sign.contains('<') || sign.contains('-')))
+}
+
 /// Reads files that MODULE.bazel `include()`s, by label.
 pub trait IncludeReader {
     fn read(&self, label: &str) -> anyhow::Result<String>;
@@ -325,6 +361,16 @@ struct ModuleContext<'a> {
 }
 
 impl ModuleContext<'_> {
+    /// Warn of the call being evaluated, if this is the root module, as
+    /// Bazel only warns of the root module's file.
+    fn warn(&self, eval: &Evaluator<'_, '_, '_>, message: &str) {
+        let Some(span) = eval.call_stack_top_location().filter(|_| self.is_root) else {
+            return;
+        };
+        let position = bazel_starlark::reported::call_position(&span);
+        self.file.borrow_mut().warnings.push((position.line, position.column, message.to_string()));
+    }
+
     fn get<'b>(eval: &Evaluator<'_, 'b, '_>) -> anyhow::Result<&'b ModuleContext<'b>> {
         let extra = eval.extra.ok_or_else(|| anyhow::anyhow!("not evaluating a MODULE.bazel file"))?;
         extra
@@ -357,13 +403,48 @@ pub fn evaluate(file_name: &str, source: &str, is_root: bool, includes: Option<&
 }
 
 fn evaluate_into(file_name: &str, source: &str, context: &ModuleContext<'_>) -> anyhow::Result<()> {
-    let ast = AstModule::parse(file_name, source.to_string(), &bazel_starlark::dialect()).map_err(|error| anyhow::anyhow!("{error}"))?;
+    evaluate_reporting(file_name, source, context).map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+fn evaluate_reporting(file_name: &str, source: &str, context: &ModuleContext<'_>) -> Result<(), starlark::Error> {
+    let ast = AstModule::parse(file_name, source.to_string(), &bazel_starlark::dialect())?;
     Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
         eval.extra = Some(context);
-        eval.eval_module(ast, &MODULE_GLOBALS).map_err(|error| anyhow::anyhow!("{error}"))?;
+        eval.eval_module(ast, &MODULE_GLOBALS)?;
         Ok(())
     })
+}
+
+/// A root MODULE.bazel file that couldn't be evaluated: the error, as
+/// Bazel reports it, and Bazel's summary of what failed.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct ModuleFileError {
+    pub error: PackageError,
+    pub summary: String,
+}
+
+/// Evaluate the root module's MODULE.bazel, reporting an error as Bazel
+/// does.
+pub fn evaluate_root(source: &str, includes: Option<&dyn IncludeReader>) -> Result<ModuleFile, ModuleFileError> {
+    let context = ModuleContext {
+        file: RefCell::new(ModuleFile::default()),
+        is_root: true,
+        includes,
+        module_called: RefCell::new(false),
+    };
+    if let Err(error) = evaluate_reporting("MODULE.bazel", source, &context) {
+        let what = match error.kind() {
+            starlark::ErrorKind::Parser(_) => "error parsing",
+            starlark::ErrorKind::Scope(_) => "syntax error in",
+            _ => "error executing",
+        };
+        return Err(ModuleFileError {
+            error: bazel_starlark::reported::package_error(&error, &[]),
+            summary: format!("{what} MODULE.bazel file for <root>"),
+        });
+    }
+    Ok(context.file.into_inner())
 }
 
 static MODULE_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
@@ -501,21 +582,35 @@ fn module_functions(builder: &mut GlobalsBuilder) {
     fn module<'v>(
         #[starlark(require = named, default = "")] name: &str,
         #[starlark(require = named, default = "")] version: &str,
-        #[starlark(require = named, default = 0)] compatibility_level: i32,
+        #[starlark(require = named, default = -1)] compatibility_level: i32,
         #[starlark(require = named, default = "")] repo_name: &str,
         #[starlark(require = named)] bazel_compatibility: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let _ = bazel_compatibility;
         let context = ModuleContext::get(eval)?;
         if context.module_called.replace(true) {
             anyhow::bail!("the module() directive can only be called once");
         }
+        if compatibility_level != -1 {
+            context.warn(eval, "The attribute 'compatibility_level' in module() is a no-op and will be removed in a future Bazel release. Please remove it from your MODULE.bazel file.");
+        }
+        let earlier = ModuleFile {
+            warnings: context.file.borrow().warnings.clone(),
+            ..ModuleFile::default()
+        };
+        if *context.file.borrow() != earlier {
+            anyhow::bail!("if module() is called, it must be called before any other functions");
+        }
         let mut file = context.file.borrow_mut();
         file.name = name.to_string();
         file.version = version.to_string();
-        file.compatibility_level = compatibility_level as i64;
         file.repo_name = (!repo_name.is_empty()).then(|| repo_name.to_string());
+        file.bazel_compatibility = bazel_compatibility.map(strings).unwrap_or_default();
+        if let Some(invalid) = file.bazel_compatibility.iter().find(|version| !valid_bazel_compatibility(version)) {
+            anyhow::bail!(
+                "invalid version argument '{invalid}': valid argument must 1) start with (<,<=,>,>=,-); 2) contain a version number in form of X.X.X where X is a number"
+            );
+        }
         Ok(NoneType)
     }
 
@@ -531,6 +626,9 @@ fn module_functions(builder: &mut GlobalsBuilder) {
         if context.ignores(dev_dependency) {
             return Ok(NoneType);
         }
+        if max_compatibility_level != -1 {
+            context.warn(eval, "The attribute 'max_compatibility_level' in bazel_dep() is a no-op and will be removed in a future Bazel release. Please remove it from your MODULE.bazel file.");
+        }
         let repo_name = match repo_name {
             None => Some(name.to_string()),
             Some(value) if value.is_none() => None,
@@ -539,7 +637,7 @@ fn module_functions(builder: &mut GlobalsBuilder) {
         context.file.borrow_mut().deps.push(BazelDep {
             name: name.to_string(),
             version: version.to_string(),
-            max_compatibility_level: max_compatibility_level as i64,
+            max_compatibility_level: -1,
             repo_name,
             dev: dev_dependency,
         });
@@ -713,8 +811,17 @@ fn module_functions(builder: &mut GlobalsBuilder) {
         #[starlark(require = named, default = "")] registry: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        let versions = strings(versions);
+        for version in &versions {
+            if crate::version::Version::parse(version).is_err() {
+                anyhow::bail!("Invalid version in multiple_version_override()");
+            }
+        }
+        if versions.len() < 2 {
+            anyhow::bail!("multiple_version_override() must specify at least 2 versions");
+        }
         let override_ = Override::MultipleVersion {
-            versions: strings(versions),
+            versions,
             registry: registry.to_string(),
         };
         add_override(eval, module_name, override_)
@@ -883,5 +990,16 @@ include("//third_party:deps.MODULE.bazel")
         let file = evaluate("MODULE.bazel", &module, false, None).unwrap();
         assert!(file.deps.iter().all(|dep| dep.name != "devonly"));
         assert!(file.overrides.is_empty());
+    }
+
+    #[test]
+    fn bazel_compatibility_compares_as_bazel_does() {
+        assert!(satisfies_bazel_compatibility("9.3.1", ">=7.0.0"));
+        assert!(satisfies_bazel_compatibility("9.3.1", "<=9.3.1"));
+        assert!(!satisfies_bazel_compatibility("9.3.1", "<9.0.0"));
+        assert!(!satisfies_bazel_compatibility("9.3.1", "-9.3.1"));
+        assert!(satisfies_bazel_compatibility("9.3.1", "-8.0.0"));
+        assert!(!satisfies_bazel_compatibility("9.3.1-pre.1", ">=9.3.1"));
+        assert!(valid_bazel_compatibility(">=7.0.0") && !valid_bazel_compatibility("7.0.0") && !valid_bazel_compatibility(">=7.0"));
     }
 }

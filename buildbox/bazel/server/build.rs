@@ -63,6 +63,9 @@ pub fn build_spec() -> OptionSpec {
         ("module_mirrors", Multi),
         ("workspace_status_command", Value),
         ("embed_label", Value),
+        ("check_direct_dependencies", Value),
+        ("check_bazel_compatibility", Value),
+        ("allow_yanked_versions", Multi),
     ];
     options.extend_from_slice(NO_OP_OPTIONS);
     let native = bazel_config::command_line_options().filter(|option| !UNSUPPORTED_NATIVE_OPTIONS.contains(&option.name));
@@ -364,13 +367,7 @@ async fn analyze_and_build(
     out: &Output,
 ) -> Result<Built, i32> {
     out.phase(Phase::RepoMapping).await;
-    let main_mapping = match session.evaluate(&RepoMappingKey(RepoName::MAIN)).await {
-        Ok(mapping) => Arc::new(mapping.0.clone()),
-        Err(error) => {
-            out.error(&crate::command::main_mapping_error(&error)).await;
-            return Err(exit::EXTERNAL_DEPS_ERROR);
-        }
-    };
+    let main_mapping = crate::command::main_mapping(context, session, options, out).await?;
     let keep_going = options.flag("keep_going", false);
     out.phase(Phase::Loading).await;
     let Requested { labels, explicit, patterns_failed } = match targets(context, session, options, &main_mapping, purpose, out).await {

@@ -47,8 +47,121 @@ pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Worksp
 
 /// The error for a main repository mapping that couldn't be computed, as
 /// Bazel words it.
-pub fn main_mapping_error(error: &skyframe::SkyError) -> String {
-    format!("Error computing the main repository mapping: {}", error.message())
+pub fn main_mapping_error(message: &str) -> String {
+    format!("Error computing the main repository mapping: {message}")
+}
+
+/// The main repository's mapping, once the modules are resolved and what
+/// Bazel reports of the resolution is reported: direct dependencies that
+/// resolved to other versions, as `--check_direct_dependencies` says, and
+/// yanked versions `--allow_yanked_versions` doesn't allow, which are
+/// errors.
+pub async fn main_mapping(context: &CommandContext<'_>, session: &skyframe::Session, options: &ParsedOptions, out: &Output) -> Result<std::sync::Arc<bazel_label::RepoMappingTable>, i32> {
+    let mapping = match session.evaluate(&bazel_loading::RepoMappingKey(bazel_label::RepoName::MAIN)).await {
+        Ok(mapping) => std::sync::Arc::new(mapping.0.clone()),
+        Err(error) => {
+            report_module_file_error(context, session, out).await;
+            out.error(&main_mapping_error(error.message())).await;
+            return Err(exit::EXTERNAL_DEPS_ERROR);
+        }
+    };
+    let Ok(graph) = session.evaluate(&bazel_bzlmod::resolve::DepGraphKey).await else {
+        return Ok(mapping);
+    };
+    for (line, column, message) in graph.modules.first().map(|root| root.file.warnings.as_slice()).unwrap_or_default() {
+        out.warning(&format!("{}/MODULE.bazel:{line}:{column}: {message}", context.workspace_root.display())).await;
+    }
+    check_direct_deps(&graph, options, out).await?;
+    check_bazel_compatibility(&graph, options, out).await?;
+    check_yanked(context, &graph, options, out).await?;
+    Ok(mapping)
+}
+
+/// Report why the root MODULE.bazel couldn't be evaluated, if it
+/// couldn't, at the call that failed, as Bazel does before summarizing.
+async fn report_module_file_error(context: &CommandContext<'_>, session: &skyframe::Session, out: &Output) {
+    let Ok(root) = session.evaluate(&bazel_bzlmod::resolve::RootModuleKey).await else {
+        return;
+    };
+    let Some(error) = &root.error else {
+        return;
+    };
+    let path_of = |file: &str| context.workspace_root.join(file.trim_start_matches("//").replace(':', "/")).display().to_string();
+    let located = match (&error.error.position, error.error.traceback.last()) {
+        (None, Some(frame)) => format!("{}:{}:{}: {}", path_of(&frame.position.file), frame.position.line, frame.position.column, error.error.describe(&path_of)),
+        _ => error.error.report(&path_of),
+    };
+    out.error(&located).await;
+}
+
+async fn check_direct_deps(graph: &bazel_bzlmod::resolve::DepGraph, options: &ParsedOptions, out: &Output) -> Result<(), i32> {
+    let mode = options.get("check_direct_dependencies").unwrap_or("warning");
+    if mode == "off" || graph.direct_dep_mismatches.is_empty() {
+        return Ok(());
+    }
+    for (repo, wanted, got) in &graph.direct_dep_mismatches {
+        let message = format!(
+            "For repository '{repo}', the root module requires module version {wanted}, but got {got} in the resolved dependency graph. Please update the version in your MODULE.bazel or set --check_direct_dependencies=off"
+        );
+        match mode {
+            "error" => out.error(&message).await,
+            _ => out.warning(&message).await,
+        }
+    }
+    if mode != "error" {
+        return Ok(());
+    }
+    out.error(&main_mapping_error("Direct dependency check failed.")).await;
+    Err(exit::EXTERNAL_DEPS_ERROR)
+}
+
+/// Whether every module works with the version of Bazel bb is, as their
+/// `bazel_compatibility` says, which `--check_bazel_compatibility` makes
+/// an error, a warning, or nothing.
+async fn check_bazel_compatibility(graph: &bazel_bzlmod::resolve::DepGraph, options: &ParsedOptions, out: &Output) -> Result<(), i32> {
+    let mode = options.get("check_bazel_compatibility").unwrap_or("error");
+    if mode == "off" {
+        return Ok(());
+    }
+    let version = bazel_starlark::BAZEL_VERSION;
+    for (index, module) in graph.modules.iter().enumerate() {
+        let compatible = module.file.bazel_compatibility.iter().all(|entry| bazel_bzlmod::module_file::satisfies_bazel_compatibility(version, entry));
+        if compatible {
+            continue;
+        }
+        let key = match index {
+            0 => "<root>".to_string(),
+            _ => format!("{}@{}", module.name, if module.version.is_empty() { "_" } else { &module.version }),
+        };
+        let message = format!("Bazel version {version} is not compatible with module \"{key}\" (bazel_compatibility: [{}])", module.file.bazel_compatibility.join(", "));
+        if mode == "warning" {
+            out.warning(&message).await;
+            continue;
+        }
+        out.error(&message).await;
+        out.error(&main_mapping_error("Bazel compatibility check failed")).await;
+        return Err(exit::EXTERNAL_DEPS_ERROR);
+    }
+    Ok(())
+}
+
+async fn check_yanked(context: &CommandContext<'_>, graph: &bazel_bzlmod::resolve::DepGraph, options: &ParsedOptions, out: &Output) -> Result<(), i32> {
+    let mut allowed: Vec<&str> = options.all("allow_yanked_versions");
+    if let Some(from_env) = context.env.get("BZLMOD_ALLOW_YANKED_VERSIONS") {
+        allowed.push(from_env);
+    }
+    let allowed: Vec<&str> = allowed.iter().flat_map(|list| list.split(',')).filter(|entry| !entry.is_empty()).collect();
+    if allowed.contains(&"all") {
+        return Ok(());
+    }
+    let Some((key, reason)) = graph.yanked.iter().find(|(key, _)| !allowed.contains(&key.as_str())) else {
+        return Ok(());
+    };
+    let message = format!(
+        "Yanked version detected in your resolved dependency graph: {key}, for the reason: {reason}.\nYanked versions may contain serious vulnerabilities and should not be used. To fix this, use a bazel_dep on a newer version of this module. To continue using this version, allow it using the --allow_yanked_versions flag or the BZLMOD_ALLOW_YANKED_VERSIONS env variable."
+    );
+    out.error(&main_mapping_error(&message)).await;
+    Err(exit::EXTERNAL_DEPS_ERROR)
 }
 
 /// Bazel's exit codes.

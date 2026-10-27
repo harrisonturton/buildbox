@@ -53,6 +53,15 @@ impl Version {
         })
     }
 
+    /// The empty version, higher than any other.
+    pub fn empty() -> Version {
+        Version {
+            text: String::new(),
+            release: Vec::new(),
+            prerelease: Vec::new(),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }

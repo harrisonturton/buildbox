@@ -188,8 +188,14 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
 
 - **Lockfile:** `MODULE.bazel.lock` is neither read nor written, and
   `--lockfile_mode` isn't implemented.
-- **Overrides:** `multiple_version_override` fails
-  (`buildbox/bazel/bzlmod/resolve.rs`). `git_override` and
+- **Resolution** follows Bazel 9's discovery and selection
+  (`buildbox/bazel/bzlmod/selection.rs`), with `multiple_version_override`,
+  dependencies that only constrain selection, yanked versions,
+  `bazel_compatibility`, and the root module's direct dependencies checked
+  as `--check_direct_dependencies` says. `--override_module`,
+  `--override_repository` and `--ignore_dev_dependency` aren't
+  implemented.
+- **Overrides:** `git_override` and
   `archive_override` take the attributes of `git_repository` and
   `http_archive` that modules use, and fail on those bb doesn't
   implement, such as `build_file` and `sparse_checkout_patterns`. A
@@ -204,9 +210,9 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
   files' host, user and time are fixed, and a change to the volatile
   status reruns the actions that read it, which Bazel doesn't.
 - **Registries:** `--registry`, `--module_mirrors` and registries'
-  `bazel_registry.json` work, but yanked versions aren't checked.
-- **Errors:** a `MODULE.bazel` that fails to evaluate is reported in
-  starlark-rust's words rather than Bazel's.
+  `bazel_registry.json` work.
+- **`flag_alias`** in MODULE.bazel has no effect, so the options it
+  defines are unrecognized.
 
 ## 10. Checking dependencies and visibility
 

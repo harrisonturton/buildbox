@@ -3,25 +3,29 @@
 
 use crate::config::BzlmodConfig;
 use crate::fetch_repo::FetchSpecKey;
-use crate::module_file::{self, BazelDep, IncludeReader, ModuleFile, Override};
+use crate::module_file::{self, BazelDep, IncludeReader, ModuleFile, ModuleFileError, Override};
 use crate::fetch_repo::read_label_patch;
 use crate::registry::{self, Registries, RegistriesKey, RegistryFileKey, RegistryLookup, RegistryModule, RegistryModuleKey};
+use crate::selection::{self, DepSpec, Interim, ModuleKey, MultipleVersions, Selection};
 use crate::repo_spec::{ArchiveSpec, GitSpec, RepoSpec};
-use crate::version::Version;
 use bazel_fs::{Root, RootedPath, Workspace};
 use bazel_label::{Label, LabelContext, PackageId, RepoMappingTable, RepoName};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
 use skyframe::{encoded_value, Ctx, Key, SkyError};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 /// Modules whose repositories keep their module name as their canonical
 /// name, as Bazel's do.
 pub const WELL_KNOWN_MODULES: [&str; 3] = ["bazel_tools", "platforms", "local_config_platform"];
 
-/// The root module's MODULE.bazel, with the files it includes.
+/// The root module's MODULE.bazel, with the files it includes, or why it
+/// couldn't be evaluated.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
-pub struct ModuleFileValue(pub ModuleFile);
+pub struct ModuleFileValue {
+    pub file: ModuleFile,
+    pub error: Option<ModuleFileError>,
+}
 
 encoded_value!(ModuleFileValue);
 
@@ -35,17 +39,20 @@ impl Key for RootModuleKey {
     async fn compute(&self, ctx: &Ctx) -> Result<ModuleFileValue, SkyError> {
         let path = RootedPath::new(Root::Workspace, PathId::parse("MODULE.bazel").expect("a valid path"));
         let Some(bytes) = bazel_fs::read_file(ctx, path).await? else {
-            return Ok(ModuleFileValue(ModuleFile::default()));
+            return Ok(ModuleFileValue { file: ModuleFile::default(), error: None });
         };
         let source = String::from_utf8_lossy(&bytes).into_owned();
         let reader = Includes {
             ctx: ctx.clone(),
             runtime: tokio::runtime::Handle::current(),
         };
-        let file = tokio::task::spawn_blocking(move || module_file::evaluate("MODULE.bazel", &source, true, Some(&reader)))
+        let file = tokio::task::spawn_blocking(move || module_file::evaluate_root(&source, Some(&reader)))
             .await
             .map_err(|error| SkyError::transient(error.to_string()))?;
-        file.map(ModuleFileValue).map_err(|error| SkyError::new(error.to_string()))
+        match file {
+            Ok(file) => Ok(ModuleFileValue { file, error: None }),
+            Err(error) => Ok(ModuleFileValue { file: ModuleFile::default(), error: Some(error) }),
+        }
     }
 }
 
@@ -110,6 +117,14 @@ pub struct ExtensionInfo {
 pub struct DepGraph {
     pub modules: Vec<ResolvedModule>,
     pub extensions: Vec<ExtensionInfo>,
+    /// The root module's dependencies that resolved to other versions
+    /// than it asks for: each repository's name, the version asked for
+    /// and the version resolved, which `--check_direct_dependencies`
+    /// reports.
+    pub direct_dep_mismatches: Vec<(String, String, String)>,
+    /// The selected versions their registries have yanked, with why,
+    /// which are errors unless `--allow_yanked_versions` allows them.
+    pub yanked: Vec<(String, String)>,
 }
 
 encoded_value!(DepGraph);
@@ -217,14 +232,27 @@ impl Key for DepGraphKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<DepGraph, SkyError> {
         let config = ctx.global::<BzlmodConfig>()?;
-        let root = ctx.compute(&RootModuleKey).await?.0.clone();
+        let root = ctx.compute(&RootModuleKey).await?;
+        if let Some(error) = &root.error {
+            return Err(SkyError::new(error.summary.clone()));
+        }
+        let root = root.file.clone();
         let registries = (*ctx.compute(&RegistriesKey).await?).clone();
         let overrides: HashMap<String, Override> = root.overrides.iter().cloned().collect();
-        let discovered = discover(ctx, &config, &registries, &root, &overrides).await?;
-        let selected = select(&discovered, &overrides)?;
-        let modules = reachable(&root, &discovered, &selected)?;
+        let discovery = discover(ctx, &config, &registries, &root, &overrides).await?;
+        check_overrides_exist(&root, &discovery)?;
+        let graph = interim_graph(&root, &discovery, &overrides);
+        let selection = selection::select(&graph, &discovery.order, &multiple_versions(&overrides)).map_err(SkyError::new)?;
+        let modules = resolved_modules(&root, &discovery, &selection);
+        let direct_dep_mismatches = direct_dep_mismatches(&graph, &selection);
+        let yanked = yanked_versions(ctx, &discovery, &selection).await?;
         let extensions = extensions(&modules)?;
-        Ok(DepGraph { modules, extensions })
+        Ok(DepGraph {
+            modules,
+            extensions,
+            direct_dep_mismatches,
+            yanked,
+        })
     }
 }
 
@@ -232,98 +260,297 @@ impl Key for DepGraphKey {
 struct Discovered {
     file: ModuleFile,
     spec: Option<RepoSpec>,
+    /// The registry it came from, if it came from one.
+    registry: Option<String>,
 }
 
-/// The module version a dependency asks for, after the root's overrides.
-fn requested_version(dep: &BazelDep, overrides: &HashMap<String, Override>) -> String {
-    match overrides.get(&dep.name) {
+/// The module versions reachable from the root, before selection, in the
+/// order they were found, the root first.
+struct Discovery {
+    modules: HashMap<ModuleKey, Discovered>,
+    order: Vec<ModuleKey>,
+}
+
+/// The module version a dependency asks for, after the root's overrides:
+/// the root itself, an overridden version, or no version for a module
+/// that doesn't come from a registry.
+fn requested(dep: &BazelDep, root: &ModuleFile, overrides: &HashMap<String, Override>) -> ModuleKey {
+    if dep.name == root.name {
+        return ModuleKey::root();
+    }
+    let version = match overrides.get(&dep.name) {
         Some(Override::SingleVersion { version, .. }) if !version.is_empty() => version.clone(),
         Some(o) if o.is_non_registry() => String::new(),
         _ => dep.version.clone(),
-    }
+    };
+    ModuleKey { name: dep.name.clone(), version }
 }
 
-/// Every module version reachable from the root, before selection.
+/// A module's dependencies, with the `bazel_tools` every module but it
+/// depends on.
+fn deps_of(file: &ModuleFile) -> Vec<BazelDep> {
+    let mut deps: Vec<BazelDep> = file.deps.iter().filter(|dep| dep.repo_name.as_deref() != Some("bazel_tools")).cloned().collect();
+    if file.name != "bazel_tools" {
+        deps.push(BazelDep {
+            name: "bazel_tools".to_string(),
+            version: String::new(),
+            max_compatibility_level: -1,
+            repo_name: Some("bazel_tools".to_string()),
+            dev: false,
+        });
+    }
+    deps
+}
+
+/// Every module version reachable from the root, as Bazel discovers them:
+/// in rounds, each following the dependencies that only constrain
+/// selection to modules the round before found, until a round finds no
+/// more of those.
 async fn discover(
     ctx: &Ctx,
     config: &BzlmodConfig,
     registries: &Registries,
     root: &ModuleFile,
     overrides: &HashMap<String, Override>,
-) -> Result<HashMap<(String, String), Discovered>, SkyError> {
-    let mut discovered = HashMap::new();
-    let mut frontier: Vec<(String, String)> = root
-        .deps
-        .iter()
-        .filter(|dep| dep.name != root.name)
-        .map(|dep| (dep.name.clone(), requested_version(dep, overrides)))
-        .collect();
-    frontier.push(("bazel_tools".to_string(), String::new()));
-    let mut seen: HashSet<(String, String)> = frontier.iter().cloned().collect();
-    let mut parents: HashMap<(String, String), (String, String)> = HashMap::new();
+) -> Result<Discovery, SkyError> {
+    let mut known_names: HashSet<String> = HashSet::from([root.name.clone()]);
+    loop {
+        let (discovery, unfulfilled) = discovery_round(ctx, config, registries, root, overrides, &known_names).await?;
+        let names: HashSet<String> = discovery.order.iter().map(|key| key.name.clone()).collect();
+        if !unfulfilled.iter().any(|name| names.contains(name)) {
+            return Ok(discovery);
+        }
+        known_names = names;
+    }
+}
 
-    while !frontier.is_empty() {
-        let mut registry_keys = Vec::new();
-        let mut registry_ids = Vec::new();
-        for (name, version) in std::mem::take(&mut frontier) {
-            if let Some(found) = special_module(ctx, config, &name, overrides).await? {
-                discovered.insert((name, version), found);
-                continue;
+/// One round of discovery, which follows dependencies that only constrain
+/// selection to the `known` modules, returning the names of those it
+/// didn't follow.
+async fn discovery_round(
+    ctx: &Ctx,
+    config: &BzlmodConfig,
+    registries: &Registries,
+    root: &ModuleFile,
+    overrides: &HashMap<String, Override>,
+    known: &HashSet<String>,
+) -> Result<(Discovery, HashSet<String>), SkyError> {
+    let mut modules = HashMap::from([(ModuleKey::root(), Discovered { file: root.clone(), spec: None, registry: None })]);
+    let mut order = vec![ModuleKey::root()];
+    let mut parents: HashMap<ModuleKey, ModuleKey> = HashMap::new();
+    let mut unfulfilled = HashSet::new();
+    let mut horizon = vec![ModuleKey::root()];
+    while !horizon.is_empty() {
+        let mut next = Vec::new();
+        for key in &horizon {
+            for dep in deps_of(&modules[key].file) {
+                let dep_key = requested(&dep, root, overrides);
+                if dep.repo_name.is_none() && !known.contains(&dep.name) {
+                    unfulfilled.insert(dep.name.clone());
+                    continue;
+                }
+                if modules.contains_key(&dep_key) || next.contains(&dep_key) {
+                    continue;
+                }
+                parents.entry(dep_key.clone()).or_insert_with(|| key.clone());
+                next.push(dep_key);
             }
-            let selected_registries = match overrides.get(&name) {
+        }
+        for (key, found) in next.iter().zip(fetch_modules(ctx, config, registries, overrides, &next, &parents).await?) {
+            modules.insert(key.clone(), found);
+            order.push(key.clone());
+        }
+        horizon = next;
+    }
+    Ok((Discovery { modules, order }, unfulfilled))
+}
+
+/// The MODULE.bazel files and specs of module versions, from overrides or
+/// the registries.
+async fn fetch_modules(
+    ctx: &Ctx,
+    config: &BzlmodConfig,
+    registries: &Registries,
+    overrides: &HashMap<String, Override>,
+    keys: &[ModuleKey],
+    parents: &HashMap<ModuleKey, ModuleKey>,
+) -> Result<Vec<Discovered>, SkyError> {
+    let mut found: Vec<Option<Discovered>> = Vec::with_capacity(keys.len());
+    let mut registry_keys = Vec::new();
+    for key in keys {
+        let special = special_module(ctx, config, &key.name, overrides).await?;
+        if special.is_none() {
+            let selected_registries = match overrides.get(&key.name) {
                 Some(Override::SingleVersion { registry, .. }) if !registry.is_empty() => vec![registry.clone()],
                 _ => registries.registries.clone(),
             };
             registry_keys.push(RegistryModuleKey {
                 registries: selected_registries,
                 mirrors: registries.mirrors.clone(),
-                name: name.clone(),
-                version: version.clone(),
+                name: key.name.clone(),
+                version: key.version.clone(),
             });
-            registry_ids.push((name, version));
         }
-        for (id, module) in registry_ids.into_iter().zip(ctx.compute_many(&registry_keys).await) {
-            let module = match &*module? {
-                RegistryLookup::Found(module) => module.clone(),
-                RegistryLookup::Missing(missing) => {
-                    let chain = dependency_chain(&parents, &id);
-                    return Err(SkyError::new(format!("in module dependency chain {chain}: module {}@{} not found in registries:{missing}", id.0, id.1)));
-                }
-            };
-            let mut spec = module.spec.clone();
-            add_override_patches(&mut spec, overrides.get(&id.0));
-            let file = patched_module_file(ctx, &module, &id, overrides.get(&id.0)).await?;
-            discovered.insert(id, Discovered { file, spec: Some(spec) });
-        }
-        for (parent, found) in &discovered {
-            for dep in &found.file.deps {
-                let id = (dep.name.clone(), requested_version(dep, overrides));
-                if id.0 != root.name && seen.insert(id.clone()) {
-                    parents.insert(id.clone(), parent.clone());
-                    frontier.push(id);
-                }
-            }
-        }
+        found.push(special);
     }
-    Ok(discovered)
+    let mut looked_up = ctx.compute_many(&registry_keys).await.into_iter();
+    let mut modules = Vec::with_capacity(keys.len());
+    for (key, special) in keys.iter().zip(found) {
+        if let Some(special) = special {
+            modules.push(special);
+            continue;
+        }
+        let lookup = looked_up.next().expect("a lookup for each registry module")?;
+        let module = match &*lookup {
+            RegistryLookup::Found(module) => module.clone(),
+            RegistryLookup::Missing(missing) => {
+                let chain = dependency_chain(parents, key);
+                return Err(SkyError::new(format!("in module dependency chain {chain}: module {key} not found in registries:{missing}")));
+            }
+        };
+        let mut spec = module.spec.clone();
+        add_override_patches(&mut spec, overrides.get(&key.name));
+        let id = (key.name.clone(), key.version.clone());
+        let file = patched_module_file(ctx, &module, &id, overrides.get(&key.name)).await?;
+        modules.push(Discovered {
+            file,
+            spec: Some(spec),
+            registry: Some(module.registry.clone()),
+        });
+    }
+    Ok(modules)
 }
 
 /// How the root module comes to depend on a module, as Bazel shows it:
 /// `<root> -> a@1.0 -> b@2.0`.
-fn dependency_chain(parents: &HashMap<(String, String), (String, String)>, id: &(String, String)) -> String {
-    let shown = |(name, version): &(String, String)| match version.is_empty() {
-        true => format!("{name}@_"),
-        false => format!("{name}@{version}"),
-    };
-    let mut chain = vec![shown(id)];
-    let mut current = id;
+fn dependency_chain(parents: &HashMap<ModuleKey, ModuleKey>, key: &ModuleKey) -> String {
+    let mut chain = vec![key.to_string()];
+    let mut current = key;
     while let Some(parent) = parents.get(current) {
-        chain.push(shown(parent));
+        chain.push(parent.to_string());
         current = parent;
     }
-    chain.push("<root>".to_string());
     chain.reverse();
     chain.join(" -> ")
+}
+
+/// An error if the root module overrides a module the graph doesn't have.
+fn check_overrides_exist(root: &ModuleFile, discovery: &Discovery) -> Result<(), SkyError> {
+    let names: HashSet<&str> = discovery.order.iter().map(|key| key.name.as_str()).collect();
+    let missing: Vec<&str> = root.overrides.iter().map(|(name, _)| name.as_str()).filter(|name| !names.contains(name)).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(SkyError::new(format!("the root module specifies overrides on nonexistent module(s): {}", missing.join(", "))))
+}
+
+/// The graph selection works on: each module version's compatibility
+/// level and dependencies, those that only constrain selection kept only
+/// if discovery found them.
+fn interim_graph(root: &ModuleFile, discovery: &Discovery, overrides: &HashMap<String, Override>) -> HashMap<ModuleKey, Interim> {
+    let mut graph = HashMap::new();
+    for key in &discovery.order {
+        let file = &discovery.modules[key].file;
+        let mut interim = Interim {
+            compatibility_level: file.compatibility_level,
+            deps: Vec::new(),
+            nodep_deps: Vec::new(),
+        };
+        for dep in deps_of(file) {
+            let requested = requested(&dep, root, overrides);
+            let spec = DepSpec {
+                name: requested.name.clone(),
+                version: requested.version.clone(),
+                max_compatibility_level: dep.max_compatibility_level,
+            };
+            match &dep.repo_name {
+                Some(repo_name) => interim.deps.push((repo_name.clone(), spec)),
+                None if discovery.modules.contains_key(&requested) => interim.nodep_deps.push(spec),
+                None => {}
+            }
+        }
+        graph.insert(key.clone(), interim);
+    }
+    graph
+}
+
+/// The versions each `multiple_version_override` allows.
+fn multiple_versions(overrides: &HashMap<String, Override>) -> MultipleVersions {
+    let mut multiple = MultipleVersions::new();
+    for (name, override_) in overrides {
+        if let Override::MultipleVersion { versions, .. } = override_ {
+            multiple.insert(name.clone(), versions.clone());
+        }
+    }
+    multiple
+}
+
+/// The selected modules, root first, as the graph's repositories: each
+/// named `name+`, or `name+version` for a module kept at several versions.
+fn resolved_modules(root: &ModuleFile, discovery: &Discovery, selection: &Selection) -> Vec<ResolvedModule> {
+    let mut versions: HashMap<&str, usize> = HashMap::new();
+    for module in &selection.modules {
+        *versions.entry(module.key.name.as_str()).or_default() += 1;
+    }
+    let repo_of = |key: &ModuleKey| match key.name.is_empty() {
+        true => RepoName::MAIN,
+        false => canonical_name(&key.name, &key.version, versions[key.name.as_str()] > 1),
+    };
+    let mut modules = Vec::with_capacity(selection.modules.len());
+    for selected in &selection.modules {
+        let found = &discovery.modules[&selected.key];
+        let name = match selected.key.name.is_empty() {
+            true => root.name.clone(),
+            false => selected.key.name.clone(),
+        };
+        modules.push(ResolvedModule {
+            self_name: found.file.repo_name.clone().unwrap_or_else(|| name.clone()),
+            name,
+            version: match selected.key.name.is_empty() {
+                true => root.version.clone(),
+                false => selected.key.version.clone(),
+            },
+            repo: repo_of(&selected.key),
+            deps: selected.deps.iter().map(|(apparent, dep)| (apparent.clone(), repo_of(dep))).collect(),
+            file: found.file.clone(),
+            spec: found.spec.clone(),
+        });
+    }
+    modules
+}
+
+/// The root module's dependencies that resolved to other versions than it
+/// asks for: each repository's name, the version asked for and the
+/// version resolved, as `name@version`.
+fn direct_dep_mismatches(graph: &HashMap<ModuleKey, Interim>, selection: &Selection) -> Vec<(String, String, String)> {
+    let mut mismatches = Vec::new();
+    for (repo_name, spec) in &graph[&ModuleKey::root()].deps {
+        let Some(resolved) = selection.resolved(spec) else {
+            continue;
+        };
+        if resolved != spec.version {
+            let wanted = ModuleKey { name: spec.name.clone(), version: spec.version.clone() };
+            let got = ModuleKey { name: spec.name.clone(), version: resolved.to_string() };
+            mismatches.push((repo_name.clone(), wanted.to_string(), got.to_string()));
+        }
+    }
+    mismatches
+}
+
+/// The selected versions their registries have yanked, as `name@version`,
+/// with why.
+async fn yanked_versions(ctx: &Ctx, discovery: &Discovery, selection: &Selection) -> Result<Vec<(String, String)>, SkyError> {
+    let mut yanked = Vec::new();
+    for selected in &selection.modules {
+        let Some(registry) = &discovery.modules[&selected.key].registry else {
+            continue;
+        };
+        let reasons = ctx.compute(&registry::YankedVersionsKey { registry: registry.clone(), name: selected.key.name.clone() }).await?;
+        if let Some((_, reason)) = reasons.0.iter().find(|(version, _)| *version == selected.key.version) {
+            yanked.push((selected.key.to_string(), reason.clone()));
+        }
+    }
+    Ok(yanked)
 }
 
 /// A registry module's MODULE.bazel, with the changes a
@@ -394,7 +621,7 @@ async fn special_module(
             dir: dir.display().to_string(),
         };
         let file = read_module_file(ctx, Root::Dir(Symbol::intern(&dir.display().to_string())), "bazel_tools").await?;
-        return Ok(Some(Discovered { file, spec: Some(spec) }));
+        return Ok(Some(Discovered { file, spec: Some(spec), registry: None }));
     }
     let Some(override_) = overrides.get(name) else {
         return Ok(None);
@@ -439,7 +666,7 @@ async fn special_module(
     let fetched = ctx.compute(&FetchSpecKey { repo, spec: spec.clone() }).await;
     let fetched = fetched.map_err(|error| error.context("error during computation of main repo mapping"))?;
     let file = read_module_file(ctx, Root::Dir(fetched.dir), name).await?;
-    Ok(Some(Discovered { file, spec: Some(spec) }))
+    Ok(Some(Discovered { file, spec: Some(spec), registry: None }))
 }
 
 async fn read_module_file(ctx: &Ctx, root: Root, name: &str) -> Result<ModuleFile, SkyError> {
@@ -454,22 +681,6 @@ async fn read_module_file(ctx: &Ctx, root: Root, name: &str) -> Result<ModuleFil
     Ok(file)
 }
 
-/// Choose one version of each module: the highest any dependent asks for.
-fn select(discovered: &HashMap<(String, String), Discovered>, overrides: &HashMap<String, Override>) -> Result<HashMap<String, String>, SkyError> {
-    let mut selected: BTreeMap<String, (Version, String)> = BTreeMap::new();
-    for (name, version) in discovered.keys() {
-        if let Some(Override::MultipleVersion { .. }) = overrides.get(name) {
-            return Err(SkyError::new(format!("multiple_version_override of {name} isn't supported yet")));
-        }
-        let parsed = Version::parse(version).map_err(|error| SkyError::new(format!("{name}: {error}")))?;
-        let replace = selected.get(name).is_none_or(|(current, _)| parsed > *current);
-        if replace {
-            selected.insert(name.clone(), (parsed, version.clone()));
-        }
-    }
-    Ok(selected.into_iter().map(|(name, (_, version))| (name, version)).collect())
-}
-
 pub fn canonical_name(name: &str, version: &str, multiple_versions: bool) -> RepoName {
     if WELL_KNOWN_MODULES.contains(&name) {
         return RepoName::new(name);
@@ -478,63 +689,6 @@ pub fn canonical_name(name: &str, version: &str, multiple_versions: bool) -> Rep
         return RepoName::new(&format!("{name}+{version}"));
     }
     RepoName::new(&format!("{name}+"))
-}
-
-/// The modules reachable from the root through the selected versions, root
-/// first, then in the order they're reached.
-fn reachable(
-    root: &ModuleFile,
-    discovered: &HashMap<(String, String), Discovered>,
-    selected: &HashMap<String, String>,
-) -> Result<Vec<ResolvedModule>, SkyError> {
-    let canonical = |name: &str| canonical_name(name, &selected[name], false);
-    let resolve_deps = |file: &ModuleFile| -> Vec<(String, RepoName)> {
-        let mut deps = Vec::new();
-        for dep in &file.deps {
-            let Some(repo_name) = &dep.repo_name else {
-                continue;
-            };
-            let repo = if dep.name == root.name { RepoName::MAIN } else { canonical(&dep.name) };
-            deps.push((repo_name.clone(), repo));
-        }
-        deps
-    };
-
-    let mut modules = vec![ResolvedModule {
-        name: root.name.clone(),
-        version: root.version.clone(),
-        repo: RepoName::MAIN,
-        self_name: root.repo_name.clone().unwrap_or_else(|| root.name.clone()),
-        deps: resolve_deps(root),
-        file: root.clone(),
-        spec: None,
-    }];
-    let mut queue: Vec<String> = root.deps.iter().map(|dep| dep.name.clone()).collect();
-    queue.push("bazel_tools".to_string());
-    let mut seen: HashSet<String> = HashSet::from([root.name.clone()]);
-    let mut index = 0;
-    while index < queue.len() {
-        let name = queue[index].clone();
-        index += 1;
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        let Some(version) = selected.get(&name) else {
-            return Err(SkyError::new(format!("no version of {name} was found")));
-        };
-        let found = &discovered[&(name.clone(), version.clone())];
-        queue.extend(found.file.deps.iter().map(|dep| dep.name.clone()));
-        modules.push(ResolvedModule {
-            name: name.clone(),
-            version: version.clone(),
-            repo: canonical(&name),
-            self_name: found.file.repo_name.clone().unwrap_or_else(|| name.clone()),
-            deps: resolve_deps(&found.file),
-            file: found.file.clone(),
-            spec: found.spec.clone(),
-        });
-    }
-    Ok(modules)
 }
 
 /// `prefix`, or, if another extension of the same name in the same
