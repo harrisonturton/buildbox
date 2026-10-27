@@ -226,6 +226,16 @@ fn genrule_variables(input: &RuleInput, srcs: &[Artifact], outs: &[Artifact]) ->
     variables
 }
 
+/// Whether a genrule's command reads the status files: as its `stamp`
+/// says, or `--stamp` if it's -1, even when building tools, as in Bazel.
+fn genrule_stamps(input: &RuleInput) -> bool {
+    match input.attr("stamp") {
+        Some(AttrValue::Int(1)) => true,
+        Some(AttrValue::Int(-1)) => input.config.options.bool("stamp"),
+        _ => false,
+    }
+}
+
 /// `genrule`: run a shell command.
 fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
     let srcs = prepared.files(input, "srcs")?;
@@ -248,6 +258,9 @@ fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, he
     let mut inputs = srcs.clone();
     inputs.extend(tools);
     inputs.push(setup);
+    if genrule_stamps(input) {
+        inputs.extend([crate::workspace_status::info_file(), crate::workspace_status::version_file()]);
+    }
     let inputs = InputSet::of(inputs);
     let script = format!("source {}; {expanded}", setup.exec_path);
     let message = match input.string("message") {

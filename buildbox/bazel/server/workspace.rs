@@ -1,6 +1,7 @@
 //! The workspaces the server knows, each with its own graph.
 
 use crate::written::Written;
+use bazel_analysis::workspace_status::{BuildStatus, StatusValues, WorkspaceStatusKey};
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
 use bazel_execution::{Jobs, SourceDigestKey};
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
@@ -33,6 +34,8 @@ pub struct Workspace {
     pub changes: Arc<FileChanges>,
     /// The environment repository rules see.
     pub client_env: Arc<ClientEnv>,
+    /// What the status files of builds hold.
+    pub status: Arc<BuildStatus>,
     /// What builds wrote to the output tree.
     pub written: Arc<Written>,
     /// What the graph's evaluations are doing, for progress output.
@@ -74,6 +77,13 @@ impl Workspace {
         self.graph.invalidate(&digests).await;
         changed.len()
     }
+
+    /// Give builds' status files these values.
+    pub async fn set_status(&self, values: StatusValues) {
+        if self.status.set(values) {
+            self.graph.invalidate(&[WorkspaceStatusKey]).await;
+        }
+    }
 }
 
 /// Every workspace commands have run in, by root. Their graphs share one
@@ -107,6 +117,7 @@ impl Workspaces {
         }
         let changes = FileChanges::new();
         let client_env = ClientEnv::new();
+        let status = BuildStatus::new();
         let progress = Progress::new();
         let jobs = Arc::new(Jobs::default());
         let globals = self
@@ -115,6 +126,7 @@ impl Workspaces {
             .with(bazel_fs::workspace(root))
             .with(changes.clone())
             .with(client_env.clone())
+            .with(status.clone())
             .with(progress.clone())
             .with(jobs.clone());
         let workspace = Arc::new(Workspace {
@@ -122,6 +134,7 @@ impl Workspaces {
             graph: self.engine.graph(globals),
             changes,
             client_env,
+            status,
             written: Arc::default(),
             progress,
             jobs,

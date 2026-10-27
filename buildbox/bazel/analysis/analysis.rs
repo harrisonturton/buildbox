@@ -44,7 +44,7 @@ mod state;
 mod target_value;
 mod toolchains;
 pub mod transition;
-mod workspace_status;
+pub mod workspace_status;
 
 pub use action::{Action, ActionKind, ParamFile, RunfilesTree, Spawn, StoredAction, environment};
 pub use args::param_file_arguments;

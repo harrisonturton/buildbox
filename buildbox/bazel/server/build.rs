@@ -4,9 +4,11 @@
 use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
 use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey, output_groups};
+use crate::workspace::Workspace;
 use crate::written::Written;
 use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, Incompatibility};
 use bazel_analysis::settings::BuildSetting;
+use bazel_analysis::workspace_status::StatusValues;
 use bazel_config::{AspectDescriptor, BuildOptions, ConfigId, FlagValue, LabelParser, NativeOption, OptionType, OptionValue};
 use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
@@ -49,6 +51,8 @@ pub fn build_spec() -> OptionSpec {
         ("ui_actions_shown", Int),
         ("show_progress", Bool),
         ("enable_platform_specific_config", Bool),
+        ("workspace_status_command", Value),
+        ("embed_label", Value),
     ];
     options.extend_from_slice(NO_OP_OPTIONS);
     let native = bazel_config::command_line_options().filter(|option| !UNSUPPORTED_NATIVE_OPTIONS.contains(&option.name));
@@ -147,6 +151,9 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
     };
     let workspace = context.server.workspaces().get(&context.workspace_root);
     workspace.refresh(crate::command::repo_environment(context, &options)).await;
+    if let Err(code) = update_status(context, &workspace, &options, out).await {
+        return failed(code, started, out).await;
+    }
     let session = workspace.graph.session().await;
     let built = match run(context, &session, &options, out).await {
         Ok(built) => built,
@@ -165,6 +172,51 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
     }
     completed(0, out).await;
     exit::SUCCESS
+}
+
+/// Give the workspace's status files the values of this build: what
+/// `--workspace_status_command` prints, if the build runs actions, and
+/// `--embed_label`.
+pub async fn update_status(context: &CommandContext<'_>, workspace: &Workspace, options: &ParsedOptions, out: &Output) -> Result<(), i32> {
+    let command = options.get("workspace_status_command").unwrap_or_default();
+    let output = match command.is_empty() || !options.flag("build", true) {
+        true => String::new(),
+        false => run_status_command(context, command, out).await?,
+    };
+    let values = StatusValues::new(options.get("embed_label").unwrap_or_default(), &output);
+    workspace.set_status(values).await;
+    Ok(())
+}
+
+/// Run `--workspace_status_command` in the workspace, with the client's
+/// environment, as Bazel does, returning what it printed.
+async fn run_status_command(context: &CommandContext<'_>, command: &str, out: &Output) -> Result<String, i32> {
+    let ran = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(&context.workspace_root)
+        .env_clear()
+        .envs(&context.env)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await;
+    let failure = match ran {
+        Ok(output) if output.status.success() => return Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+        Ok(output) => format!("{}\n{}", exit_description(output.status), String::from_utf8_lossy(&output.stderr).trim_end()),
+        Err(error) => error.to_string(),
+    };
+    out.error(&format!("<builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: {failure}")).await;
+    Err(exit::BUILD_FAILURE)
+}
+
+/// How a process ended, as Bazel describes it.
+fn exit_description(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("Process exited with status {code}"),
+        (None, Some(signal)) => format!("Process terminated by signal {signal}"),
+        (None, None) => "Process exited abnormally".to_string(),
+    }
 }
 
 /// End a command whose build failed before it finished, as Bazel does.

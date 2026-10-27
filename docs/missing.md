@@ -187,8 +187,10 @@ small workspace, Bazel reports 5 packages and 13 targets where bb reports
 - **Commands:** there's no `mod`, `fetch`, `vendor` or `sync`.
 - **Authentication:** downloads support neither `.netrc` nor credential
   helpers, so private registries and authenticated `http_archive`s fail.
-- **Stamping:** `--workspace_status_command` isn't run, so the workspace
-  status files hold fixed values.
+- **Stamping:** builds run `--workspace_status_command`, but the status
+  files' host, user and time are fixed, and a change to the volatile
+  status reruns the actions that read it, which Bazel doesn't.
+- **Registries:** `--registry` isn't implemented.
 
 ## 10. Checking dependencies and visibility
 

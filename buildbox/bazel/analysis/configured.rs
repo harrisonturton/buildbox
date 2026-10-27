@@ -178,7 +178,7 @@ fn unsupported_analysis_failure(key: ConfiguredTargetKey, error: SkyError) -> Sk
 /// Analyze the target `key` names, in its configuration.
 async fn configure(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarget, SkyError> {
     if key.label == *crate::workspace_status::OWNER {
-        return workspace_status(ctx, key);
+        return workspace_status(ctx, key).await;
     }
     let package = ctx.compute(&PackageKey(key.label.package)).await?;
     let Some(target) = package.0.target(key.label.name) else {
@@ -1063,9 +1063,10 @@ fn file(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> 
 }
 
 /// The target that writes the status files.
-fn workspace_status(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarget, SkyError> {
-    let fingerprint = Fingerprint::of(b"workspace status");
-    let actions = crate::workspace_status::actions();
+async fn workspace_status(ctx: &Ctx, key: ConfiguredTargetKey) -> Result<ConfiguredTarget, SkyError> {
+    let values = ctx.compute(&crate::workspace_status::WorkspaceStatusKey).await?;
+    let fingerprint = Fingerprint::of(format!("workspace status {values:?}").as_bytes());
+    let actions = crate::workspace_status::actions(&values);
     let mut target = empty_target(ctx, key, "workspace status", false, fingerprint)?;
     target.generating = actions
         .iter()
