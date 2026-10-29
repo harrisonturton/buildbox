@@ -25,6 +25,7 @@ rust_library(
         "cc/solib.rs",
         "cc/values.rs",
         "cc/variables.rs",
+        "command_line.rs",
         "condition.rs",
         "conflicts.rs",
         "configured.rs",

@@ -256,7 +256,7 @@ fn kind_fields(message: &mut Message, owned: &Owned, printer: &Printer) {
                 message.repeated(11, "execution_info", pair(key, value));
             }
         }
-        ActionKind::Write { content, executable, from_args: false } => {
+        ActionKind::Write { content, executable, from_args: false, .. } => {
             message.bool3(19, "is_executable", *executable);
             if printer.output.include_file_write_contents {
                 message.string3(17, "file_contents", content.clone());

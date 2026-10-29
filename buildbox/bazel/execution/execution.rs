@@ -9,6 +9,7 @@
 mod action_key;
 mod backend;
 mod digest;
+mod directories;
 mod inputs;
 mod jobs;
 mod materialize;

@@ -3,6 +3,7 @@
 
 use crate::inputs::InputSet;
 use crate::action::{Action, ActionKind, ParamFile, RunfilesTree, Spawn};
+use crate::command_line::{DirectoryArgs, WrittenArgs};
 use crate::args::{self, Args};
 use crate::artifact::{self, Artifact};
 use crate::file_value::FileValue;
@@ -154,7 +155,8 @@ impl Tools {
 /// `CommandLines.expand`, an `Args` whose params file is used only when
 /// needed stays on the command line while the command line fits in
 /// `--min_param_file_size`. The arguments that name params files are
-/// recorded in `param_files`.
+/// recorded in `param_files`, and those made from directories in
+/// `directory_args`.
 fn arguments(
     value: Option<Value<'_>>,
     state: &RuleState,
@@ -162,6 +164,7 @@ fn arguments(
     inputs: &mut Vec<Artifact>,
     command: &[String],
     param_files: &mut Vec<ParamFile>,
+    directory_args: &mut Vec<DirectoryArgs>,
 ) -> anyhow::Result<Vec<String>> {
     let Some(value) = value.filter(|value| !value.is_none()) else {
         return Ok(Vec::new());
@@ -179,17 +182,20 @@ fn arguments(
             continue;
         };
         let args = args.state();
+        if args.flags_only() && !args.directory_args.is_empty() {
+            anyhow::bail!("bb doesn't support expanding directories in flag_per_line params files yet");
+        }
         let lines = args.lines();
-        let Some(param_file_arg) = &args.param_file else {
+        let inline = match &args.param_file {
+            Some(_) => args.param_file_when_needed && length + total_length(&lines) <= limit,
+            None => true,
+        };
+        let Some(param_file_arg) = args.param_file.as_ref().filter(|_| !inline) else {
             length += total_length(&lines);
+            directory_args.extend(crate::command_line::shifted(&args.directory_args, command.len() + out.len()));
             out.extend(lines);
             continue;
         };
-        if args.param_file_when_needed && length + total_length(&lines) <= limit {
-            length += total_length(&lines);
-            out.extend(lines);
-            continue;
-        }
         let (in_file, kept): (Vec<String>, Vec<String>) = match args.flags_only() {
             true => lines.into_iter().partition(|line| line.starts_with("--")),
             false => (lines, Vec::new()),
@@ -198,7 +204,7 @@ fn arguments(
             true => "multiline",
             false => args.param_file_format.as_str(),
         };
-        let params = write_param_file(state, outputs, &in_file, format)?;
+        let params = write_param_file(state, outputs, &in_file, &args.directory_args, format)?;
         inputs.push(params);
         param_files.push(ParamFile {
             argument: (command.len() + out.len()) as u32,
@@ -232,8 +238,9 @@ fn total_length(arguments: &[String]) -> usize {
     arguments.iter().map(|argument| argument.len() + 1).sum()
 }
 
-/// Write a params file for an action, next to its first output.
-fn write_param_file(state: &RuleState, outputs: &[Artifact], arguments: &[String], format: &str) -> anyhow::Result<Artifact> {
+/// Write a params file for an action, next to its first output, expanding
+/// the directories `directories` names.
+fn write_param_file(state: &RuleState, outputs: &[Artifact], arguments: &[String], directories: &[DirectoryArgs], format: &str) -> anyhow::Result<Artifact> {
     let first = outputs.first().ok_or_else(|| anyhow::anyhow!("an action needs at least one output"))?;
     let package = artifact::package_dir(state.label.package);
     let base = artifact::parse(&state.config.bin_dir()).join_path(package);
@@ -243,16 +250,38 @@ fn write_param_file(state: &RuleState, outputs: &[Artifact], arguments: &[String
     state.register(Action {
         mnemonic: Symbol::intern("ParamFile"),
         progress_message: String::new(),
-        inputs: InputSet::default(),
+        inputs: directory_inputs(directories),
         runfiles: Vec::new(),
         outputs: vec![params],
         kind: ActionKind::Write {
             content: args::param_file_contents(arguments, format),
             executable: false,
             from_args: true,
+            args: written_args(arguments, directories, format),
         },
     })?;
     Ok(params)
+}
+
+/// What a write of `arguments` expands once `directories` have files, if
+/// there are directories to expand.
+fn written_args(arguments: &[String], directories: &[DirectoryArgs], format: &str) -> Option<Box<WrittenArgs>> {
+    if directories.is_empty() {
+        return None;
+    }
+    Some(Box::new(WrittenArgs {
+        arguments: arguments.to_vec(),
+        directories: directories.to_vec(),
+        format: format.to_string(),
+    }))
+}
+
+/// The directories an action writing arguments expands, which it reads.
+fn directory_inputs(directories: &[DirectoryArgs]) -> InputSet {
+    let mut inputs: Vec<Artifact> = directories.iter().flat_map(DirectoryArgs::directories).collect();
+    inputs.sort();
+    inputs.dedup();
+    InputSet::new(inputs, Vec::new())
 }
 
 /// The entries of a dict of strings, in its order.
@@ -325,7 +354,8 @@ impl<'v> SpawnArgs<'v> {
         let mut arguments = command;
         let mut direct = Vec::new();
         let mut param_files = Vec::new();
-        let added = self::arguments(self.arguments, state, &outputs, &mut direct, &arguments, &mut param_files)?;
+        let mut directory_args = Vec::new();
+        let added = self::arguments(self.arguments, state, &outputs, &mut direct, &arguments, &mut param_files, &mut directory_args)?;
         arguments.extend(added);
         direct.extend(tools.inputs);
         let inputs = InputSet::new(direct, std::iter::once(declared).chain(tools.sets).collect());
@@ -348,6 +378,7 @@ impl<'v> SpawnArgs<'v> {
                 env,
                 execution_info: crate::state::action_execution_info(string_dict(self.execution_requirements, "execution_requirements")?, &state.tag_execution_info),
                 param_files,
+                directory_args,
             }),
         };
         state.register(action)?;
@@ -497,24 +528,29 @@ fn actions_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let state = RuleState::get(eval)?;
         let output = FileValue::artifact(output).ok_or_else(|| anyhow::anyhow!("write: output must be a File"))?;
-        let from_args = content.downcast_ref::<Args>().is_some();
-        let content = match content.downcast_ref::<Args>() {
+        let args = content.downcast_ref::<Args>().map(Args::state);
+        if args.as_ref().is_some_and(|args| args.flags_only() && !args.directory_args.is_empty()) {
+            anyhow::bail!("bb doesn't support expanding directories in flag_per_line params files yet");
+        }
+        let (content, written, directories) = match &args {
             Some(args) => {
-                let args = args.state();
-                args::param_file_contents(&args.lines(), &args.param_file_format)
+                let lines = args.lines();
+                let written = written_args(&lines, &args.directory_args, &args.param_file_format);
+                (args::param_file_contents(&lines, &args.param_file_format), written, args.directory_args.as_slice())
             }
-            None => args::stringify_with(content, Some(&state.main_mapping)),
+            None => (args::stringify_with(content, Some(&state.main_mapping)), None, [].as_slice()),
         };
         state.register(Action {
             mnemonic: Symbol::intern(mnemonic.unwrap_or("FileWrite")),
             progress_message: String::new(),
-            inputs: InputSet::default(),
+            inputs: directory_inputs(directories),
             runfiles: Vec::new(),
             outputs: vec![output],
             kind: ActionKind::Write {
                 content,
                 executable: is_executable,
-                from_args,
+                from_args: args.is_some(),
+                args: written,
             },
         })?;
         Ok(NoneType)

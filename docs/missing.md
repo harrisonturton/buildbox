@@ -96,12 +96,13 @@ rather than misbehaving. Still missing:
 
 ## 4. Actions and artifacts
 
-- **Directories on command lines.** Command lines are built in analysis,
-  before declared directories have contents, so `Args.add_all` and
-  `add_joined` ignore `expand_directories`, `map_each` sees the directory
-  rather than its files, and `expand_template`'s `computed_substitutions`
-  can't expand one (`analysis/args.rs`). Rules that pass a tree artifact
-  to `add_all` get its path instead of its files.
+- **Directories on command lines.** `Args.add_all` and `add_joined`
+  expand directories into their files as the action runs, as Bazel does,
+  in params files too (`analysis/command_line.rs`). A `map_each` function
+  given a directory, or its `DirectoryExpander`, fails: bb runs `map_each`
+  in analysis, before directories have files. So do directories in
+  `flag_per_line` params files and in `expand_template`'s
+  `computed_substitutions`.
 - **Unresolved symlinks.** `ctx.actions.symlink(target_path = ...)` fails,
   and `declare_symlink` declares an ordinary file (`analysis/actions.rs`).
 - `starlark_doc_extract` has no implementation, which breaks stardoc.
@@ -240,10 +241,9 @@ like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
 
 ## Suggested order
 
-1. Directories on command lines (section 4): silently wrong results for
-   rules that pass tree artifacts to `Args`.
-2. `--override_repository` and `--override_module`, credential helpers,
+1. `--override_repository` and `--override_module`, credential helpers,
    and repository rules' `getenv` and `watch` (section 8).
-3. The lockfile (section 8).
+2. The lockfile (section 8).
+3. `map_each` over directories (section 4).
 4. The remote platform (section 2).
 5. Apple (section 1).

@@ -150,6 +150,7 @@ fn write(output: Artifact, status: &[(String, String)]) -> Action {
             content,
             executable: false,
             from_args: false,
+            args: None,
         },
     }
 }

@@ -133,6 +133,7 @@ fn py_builtins_functions(builder: &mut GlobalsBuilder) {
             content,
             executable: false,
             from_args: false,
+            args: None,
         };
         state.register(single_output_action("PackagingSourcesManifest", output, kind)?)?;
         Ok(NoneType)

@@ -179,9 +179,10 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
         Err(NotReady::Failed(error)) => return Err(error),
     };
     let (output_files, output_directories) = output_paths(action);
+    let arguments = arguments(backend, spawn, &inputs).await?;
     let request = SpawnRequest {
         inputs,
-        arguments: spawn.arguments.clone(),
+        arguments,
         env: sorted_env(&spawn.env),
         output_files,
         output_directories,
@@ -225,6 +226,21 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
         report_output(ctx, backend, action_key, action, result).await;
     }
     checked_outputs(ctx, backend, action_key, action, result).await
+}
+
+/// The command's arguments, with those made from directories expanded into
+/// the directories' files.
+async fn arguments(backend: &Backend, spawn: &Spawn, inputs: &BTreeMap<TreePath, Input>) -> Result<Vec<String>, SkyError> {
+    if spawn.directory_args.is_empty() {
+        return Ok(spawn.arguments.clone());
+    }
+    let mut trees = std::collections::HashMap::new();
+    for (path, input) in inputs {
+        if let (TreePath::Exec(path), true) = (path, input.is_directory) {
+            trees.insert(*path, input.digest);
+        }
+    }
+    crate::directories::expand(backend, &spawn.arguments, &spawn.directory_args, &trees).await
 }
 
 /// The execution requirements that would have Bazel run an action outside

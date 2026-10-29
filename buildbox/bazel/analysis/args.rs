@@ -1,5 +1,6 @@
 //! `Args`: command lines that rule implementations build up.
 
+use crate::command_line::{ArgStyle, ArgValue, DirectoryArgs};
 use crate::file_value::FileValue;
 use allocative::Allocative;
 use bazel_starlark::depset::Depset;
@@ -15,7 +16,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 /// A command line. Values are converted to strings as they're added, with
-/// `map_each` functions called then.
+/// `map_each` functions called then; directories to expand are recorded,
+/// to be expanded when they have files.
 #[derive(Debug, Default, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
 pub struct Args {
     #[allocative(skip)]
@@ -36,6 +38,8 @@ pub struct ArgsState {
     pub param_file_when_needed: bool,
     /// `shell`, `multiline`, `flag_per_line` or `gcc_quoted`.
     pub param_file_format: String,
+    /// The arguments made from directories, which stand for their files.
+    pub directory_args: Vec<DirectoryArgs>,
 }
 
 impl ArgsState {
@@ -92,11 +96,22 @@ impl Args {
         }
     }
 
-    fn push(&self, values: impl IntoIterator<Item = String>) {
+    fn push(&self, values: Vec<String>) {
+        self.push_expanding(values, None);
+    }
+
+    /// Add a call's arguments, which, if it expands directories, stand for
+    /// those `directories` describes.
+    fn push_expanding(&self, values: Vec<String>, directories: Option<DirectoryArgs>) {
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !state.arguments.is_empty() {
-            let start = state.arguments.len();
+        let start = state.arguments.len();
+        if start > 0 {
             state.groups.push(start);
+        }
+        if let Some(mut directories) = directories {
+            directories.start = start as u32;
+            directories.len = values.len() as u32;
+            state.directory_args.push(directories);
         }
         state.arguments.extend(values);
     }
@@ -113,6 +128,12 @@ impl<'v> StarlarkValue<'v> for Args {
         static METHODS: MethodsStatic = MethodsStatic::new("Args", args_methods);
         Some(METHODS.methods())
     }
+}
+
+/// The directory `value` is, if it's a generated one, whose files an
+/// `Args` expands.
+fn tree_artifact(value: Value<'_>) -> Option<crate::artifact::Artifact> {
+    FileValue::artifact(value).filter(|artifact| artifact.is_directory && !artifact.is_source())
 }
 
 /// A value as a command-line argument: a file's path, a label's canonical
@@ -208,9 +229,13 @@ impl<'v> StarlarkValue<'v> for DirectoryExpander {
 
 #[starlark_module]
 fn directory_expander_methods(builder: &mut MethodsBuilder) {
-    /// The files of `file`, if it's a directory: here, itself.
+    /// The files of `file`, if it's a directory, or else `[file]`. bb
+    /// can't list a directory's files when command lines are made.
     fn expand<'v>(this: Value<'v>, #[starlark(require = pos)] file: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
+        if let Some(directory) = tree_artifact(file) {
+            anyhow::bail!("can't expand directory '{}': bb doesn't support expanding directories in map_each functions yet", directory.exec_path);
+        }
         Ok(heap.alloc(starlark::values::list::AllocList([file])))
     }
 }
@@ -220,13 +245,50 @@ struct Expansion<'v> {
     map_each: Option<Value<'v>>,
     format_each: Option<&'v str>,
     uniquify: bool,
+    expand_directories: bool,
+}
+
+/// A call's values as arguments, each directory as its own path, and, if
+/// there are directories to expand, the values to expand later.
+struct Expanded {
+    arguments: Vec<String>,
+    directories: Option<Vec<ArgValue>>,
 }
 
 impl<'v> Expansion<'v> {
-    fn expand(&self, items: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Vec<String>> {
+    fn expand(&self, items: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Expanded> {
+        let items = values(items)?;
+        let directories = match self.expand_directories {
+            true => self.directory_values(&items, eval)?,
+            false => None,
+        };
+        let arguments = self.arguments(items, eval)?;
+        Ok(Expanded { arguments, directories })
+    }
+
+    /// The values, if any is a directory to expand: text, or directories.
+    fn directory_values(&self, items: &[Value<'v>], eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<Option<Vec<ArgValue>>> {
+        let Some(first) = items.iter().find_map(|item| tree_artifact(*item)) else {
+            return Ok(None);
+        };
+        if self.map_each.is_some() {
+            anyhow::bail!("can't expand directory '{}': bb doesn't support expanding directories for map_each functions yet", first.exec_path);
+        }
+        let main_mapping = main_mapping(eval);
+        let values = items
+            .iter()
+            .map(|item| match tree_artifact(*item) {
+                Some(directory) => ArgValue::Directory(directory),
+                None => ArgValue::Text(stringify_with(*item, main_mapping.as_deref())),
+            })
+            .collect();
+        Ok(Some(values))
+    }
+
+    fn arguments(&self, items: Vec<Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Vec<String>> {
         let main_mapping = main_mapping(eval);
         let mut out = Vec::new();
-        for item in values(items)? {
+        for item in items {
             let Some(map_each) = self.map_each else {
                 out.push(format(self.format_each, &stringify_with(item, main_mapping.as_deref()))?);
                 continue;
@@ -255,6 +317,21 @@ impl<'v> Expansion<'v> {
             out.retain(|value| seen.insert(value.clone()));
         }
         Ok(out)
+    }
+}
+
+/// What a call that expands directories adds, but for where its arguments
+/// go, which [`Args::push_expanding`] sets.
+fn directory_args(name: Option<String>, values: Vec<ArgValue>, format_each: Option<&str>, style: ArgStyle, uniquify: bool, omit_if_empty: bool) -> DirectoryArgs {
+    DirectoryArgs {
+        start: 0,
+        len: 0,
+        name,
+        values,
+        format_each: format_each.map(str::to_string),
+        style,
+        uniquify,
+        omit_if_empty,
     }
 }
 
@@ -293,6 +370,11 @@ fn args_methods(builder: &mut MethodsBuilder) {
             }
             None => arg_name_or_value,
         };
+        if tree_artifact(value).is_some() {
+            anyhow::bail!(
+                "Cannot add directories to Args#add since they may expand to multiple values. Either use Args#add_all (if you want expansion) or args.add(directory.path) (if you do not)."
+            );
+        }
         added.push(self::format(format, &stringify_with(value, main_mapping.as_deref()))?);
         args.push(added);
         Ok(this)
@@ -316,27 +398,33 @@ fn args_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] allow_closure: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let _ = (expand_directories, allow_closure);
+        let _ = allow_closure;
         let args = this.downcast_ref::<Args>().ok_or_else(|| anyhow::anyhow!("expected Args"))?;
         let (name, items) = name_and_values(arg_name_or_values, values, eval);
         let expansion = Expansion {
             map_each: map_each.filter(|value| !value.is_none()),
             format_each,
             uniquify,
+            expand_directories,
         };
         let expanded = expansion.expand(items, eval)?;
-        if expanded.is_empty() && omit_if_empty {
+        if expanded.arguments.is_empty() && omit_if_empty {
             return Ok(this);
         }
-        let mut added: Vec<String> = name.into_iter().collect();
-        for value in expanded {
+        let mut added: Vec<String> = name.iter().cloned().collect();
+        for value in expanded.arguments {
             if let Some(before) = before_each {
                 added.push(before.to_string());
             }
             added.push(value);
         }
         added.extend(terminate_with.map(str::to_string));
-        args.push(added);
+        let style = ArgStyle::Each {
+            before_each: before_each.map(str::to_string),
+            terminate_with: terminate_with.map(str::to_string),
+        };
+        let directories = expanded.directories.map(|values| directory_args(name, values, format_each, style, uniquify, omit_if_empty));
+        args.push_expanding(added, directories);
         Ok(this)
     }
 
@@ -358,21 +446,27 @@ fn args_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] allow_closure: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let _ = (expand_directories, allow_closure);
+        let _ = allow_closure;
         let args = this.downcast_ref::<Args>().ok_or_else(|| anyhow::anyhow!("expected Args"))?;
         let (name, items) = name_and_values(arg_name_or_values, values, eval);
         let expansion = Expansion {
             map_each: map_each.filter(|value| !value.is_none()),
             format_each,
             uniquify,
+            expand_directories,
         };
         let expanded = expansion.expand(items, eval)?;
-        if expanded.is_empty() && omit_if_empty {
+        if expanded.arguments.is_empty() && omit_if_empty {
             return Ok(this);
         }
-        let mut added: Vec<String> = name.into_iter().collect();
-        added.push(format(format_joined, &expanded.join(join_with))?);
-        args.push(added);
+        let mut added: Vec<String> = name.iter().cloned().collect();
+        added.push(format(format_joined, &expanded.arguments.join(join_with))?);
+        let style = ArgStyle::Joined {
+            join_with: join_with.to_string(),
+            format_joined: format_joined.map(str::to_string),
+        };
+        let directories = expanded.directories.map(|values| directory_args(name, values, format_each, style, uniquify, omit_if_empty));
+        args.push_expanding(added, directories);
         Ok(this)
     }
 
@@ -543,9 +637,13 @@ fn template_dict_methods(builder: &mut MethodsBuilder) {
             map_each: Some(map_each).filter(|value| !value.is_none()),
             format_each: None,
             uniquify,
+            expand_directories: true,
         };
         let expanded = expansion.expand(values, eval)?;
-        dict.insert(key, format(format_joined, &expanded.join(join_with))?);
+        if expanded.directories.is_some() {
+            anyhow::bail!("bb doesn't support expanding directories in computed substitutions yet");
+        }
+        dict.insert(key, format(format_joined, &expanded.arguments.join(join_with))?);
         Ok(this)
     }
 }

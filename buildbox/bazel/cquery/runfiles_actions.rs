@@ -108,6 +108,7 @@ fn write(content: String) -> ActionKind {
         content,
         executable: false,
         from_args: false,
+        args: None,
     }
 }
 

@@ -15,6 +15,7 @@ mod artifact;
 mod attrs;
 mod build_ctx;
 pub mod cc;
+pub mod command_line;
 mod condition;
 pub mod conflicts;
 mod configured;
@@ -49,7 +50,7 @@ pub mod transition;
 pub mod workspace_status;
 
 pub use action::{Action, ActionKind, ParamFile, RunfilesTree, Spawn, StoredAction, environment};
-pub use args::param_file_arguments;
+pub use args::{param_file_arguments, param_file_contents};
 pub use inputs::{InputSet, KnownSets};
 pub use artifact::{Artifact, name_path, package_dir, parse as parse_path, repo_dir, runfiles_repo_name};
 pub use attrs::{ConfiguredAttrs, ConfiguredAttrsKey};

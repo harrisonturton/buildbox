@@ -386,6 +386,7 @@ fn write_analysis_test_script(state: &RuleState, returned: Value<'_>) -> anyhow:
             content,
             executable: true,
             from_args: false,
+            args: None,
         },
     })?;
     Ok(script)

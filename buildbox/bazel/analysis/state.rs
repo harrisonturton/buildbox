@@ -229,6 +229,7 @@ impl RuleState {
                 content: format!("#!/bin/bash\n{command}"),
                 executable: true,
                 from_args: false,
+                args: None,
             },
         })?;
         Ok((vec![SHELL.to_string(), script.exec_path.to_string()], Some(script)))

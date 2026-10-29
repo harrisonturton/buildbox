@@ -474,6 +474,7 @@ fn spawn_action(mnemonic: &str, message: String, inputs: Vec<Artifact>, outputs:
             env: Vec::new(),
             execution_info,
             param_files: command.param_files.into_iter().map(|(param_file, _)| param_file).collect(),
+            directory_args: Vec::new(),
         }),
     }
 }
@@ -588,6 +589,7 @@ fn params_file(state: &RuleState, primary: Artifact, index: usize, arguments: &[
             content: contents,
             executable: false,
             from_args: true,
+            args: None,
         },
     })?;
     Ok(params)

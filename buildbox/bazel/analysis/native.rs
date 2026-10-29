@@ -267,6 +267,7 @@ fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, he
             env: input.config.options.action_env.clone(),
             execution_info: execution_info(input),
             param_files: Vec::new(),
+            directory_args: Vec::new(),
         }),
     })?;
 

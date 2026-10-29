@@ -466,6 +466,7 @@ fn compile(
                 env: action_env(state, configuration, action, &variables)?,
                 execution_info: Vec::new(),
                 param_files: Vec::new(),
+                directory_args: Vec::new(),
             }),
         })?;
         objects.push(object);
@@ -519,6 +520,7 @@ pub fn archive(
             env: action_env(state, configuration, action, &variables)?,
             execution_info: Vec::new(),
             param_files: Vec::new(),
+            directory_args: Vec::new(),
         }),
     })?;
     Ok(output)
@@ -626,6 +628,7 @@ fn link_executable(
             env: action_env(state, configuration, action, &variables)?,
             execution_info: Vec::new(),
             param_files: Vec::new(),
+            directory_args: Vec::new(),
         }),
     })?;
     Ok(output)
@@ -717,6 +720,7 @@ fn implicit_outputs(state: &RuleState, toolchain: &CcToolchain<'_>, configuratio
                     content: String::new(),
                     executable: false,
                     from_args: false,
+                    args: None,
                 },
             })?;
         }
@@ -749,6 +753,7 @@ fn strip(state: &RuleState, toolchain: &CcToolchain<'_>, configuration: &Feature
             env: action_env(state, configuration, action, &variables)?,
             execution_info: Vec::new(),
             param_files: Vec::new(),
+            directory_args: Vec::new(),
         }),
     })
 }

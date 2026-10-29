@@ -8,6 +8,7 @@ rust_library(
         "action_key.rs",
         "backend.rs",
         "digest.rs",
+        "directories.rs",
         "execution.rs",
         "inputs.rs",
         "jobs.rs",

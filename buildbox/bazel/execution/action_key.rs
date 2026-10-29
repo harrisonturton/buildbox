@@ -3,6 +3,7 @@
 use crate::backend::Backend;
 use crate::digest::BlobDigest;
 use crate::source::{SourceDigestKey, SourceTree, SourceTreeKey};
+use bazel_analysis::command_line::WrittenArgs;
 use bazel_analysis::{Action, ActionKind, Artifact, ConfiguredTargetKey};
 use bazel_fs::{FileState, FileStateKey, RootedPath, Workspace};
 use futures::StreamExt;
@@ -97,6 +98,7 @@ async fn run_internal(ctx: &Ctx, backend: &Arc<Backend>, key: ActionKey, action:
     let inputs = read.iter().filter_map(|(_, generated_by)| generated_by.as_ref().map(ActionKey::progress_id)).collect();
     let shown = progress(ctx).map(|progress| progress.action_started(key.progress_id(), inputs, description(action, key.owner)));
     let outputs = match (&action.kind, read) {
+        (ActionKind::Write { args: Some(args), executable, .. }, _) => write_args(ctx, backend, action, args, *executable).await,
         (ActionKind::Write { content, executable, .. }, _) => write(backend, action, content.as_bytes(), *executable).await,
         (
             ActionKind::Template {
@@ -371,6 +373,18 @@ async fn write(backend: &Backend, action: &Action, content: &[u8], executable: b
             is_directory: false,
         }],
     })
+}
+
+/// Write arguments made from directories, now they have files.
+async fn write_args(ctx: &Ctx, backend: &Backend, action: &Action, args: &WrittenArgs, executable: bool) -> Result<ActionOutputs, SkyError> {
+    let mut trees = std::collections::HashMap::new();
+    for directory in args.directories.iter().flat_map(|directory| directory.directories()) {
+        let (input, _) = generated_input(ctx, directory).await?;
+        trees.insert(directory.exec_path, input.digest);
+    }
+    let arguments = crate::directories::expand(backend, &args.arguments, &args.directories, &trees).await?;
+    let content = bazel_analysis::param_file_contents(&arguments, &args.format);
+    write(backend, action, content.as_bytes(), executable).await
 }
 
 async fn expand_template(

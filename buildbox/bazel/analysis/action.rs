@@ -1,6 +1,7 @@
 //! Actions: what analysis says to run to generate files.
 
 use crate::artifact::Artifact;
+use crate::command_line::{DirectoryArgs, WrittenArgs};
 use crate::inputs::InputSet;
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
@@ -26,8 +27,15 @@ pub enum ActionKind {
     /// Run a command.
     Spawn(Spawn),
     /// Write a file with fixed contents. Contents made from an `Args`
-    /// are a params file's, which Bazel's aquery doesn't show.
-    Write { content: String, executable: bool, from_args: bool },
+    /// are a params file's, which Bazel's aquery doesn't show; if the
+    /// `Args` expands directories, `args` has its arguments to write once
+    /// they have files, and `content` names each directory instead.
+    Write {
+        content: String,
+        executable: bool,
+        from_args: bool,
+        args: Option<Box<WrittenArgs>>,
+    },
     /// Write a file by substituting strings in a template.
     Template {
         template: Artifact,
@@ -62,6 +70,8 @@ pub struct Spawn {
     /// The arguments that name params files holding more arguments, which
     /// another action writes.
     pub param_files: Vec<ParamFile>,
+    /// The arguments made from directories, expanded as the command runs.
+    pub directory_args: Vec<DirectoryArgs>,
 }
 
 /// An environment of `variables`, in order, as Bazel makes them: one set

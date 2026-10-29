@@ -58,6 +58,7 @@ pub fn register(state: &RuleState, configuration: &FeatureConfiguration, variabl
             env: compile_env(state, configuration, &action, variables)?,
             execution_info,
             param_files: Vec::new(),
+            directory_args: Vec::new(),
         }),
     })
 }

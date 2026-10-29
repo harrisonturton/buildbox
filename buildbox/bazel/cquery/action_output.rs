@@ -466,7 +466,7 @@ fn kind_text(owned: &Owned, printer: &Printer, out: &mut String) {
             }
             out.push_str("  ]\n");
         }
-        ActionKind::Write { content, executable, from_args: false } => {
+        ActionKind::Write { content, executable, from_args: false, .. } => {
             writeln!(out, "  IsExecutable: {executable}").ok();
             if printer.output.include_file_write_contents {
                 writeln!(out, "  FileWriteContents: [{}]", data_encoding::BASE64.encode(content.as_bytes())).ok();
