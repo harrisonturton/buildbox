@@ -577,11 +577,7 @@ fn command(state: &RuleState, primary: Artifact, executable: Vec<String>, lines:
 fn params_file(state: &RuleState, primary: Artifact, index: usize, arguments: &[String], format: &str) -> anyhow::Result<Artifact> {
     let path = format!("{}-{index}.params", primary.output_dir_relative());
     let params = state.declare_at_root(&path)?;
-    let contents = crate::args::param_file_contents(&crate::args::ArgsState {
-        arguments: arguments.to_vec(),
-        param_file: None,
-        param_file_format: format.to_string(),
-    });
+    let contents = crate::args::param_file_contents(arguments, format);
     state.register_own(Action {
         mnemonic: Symbol::intern("ParamFile"),
         progress_message: String::new(),

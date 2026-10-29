@@ -33,6 +33,7 @@ pub fn args(configuration: &FeatureConfiguration, action: &str, variables: &Vari
         arguments,
         param_file: Some(param_file),
         param_file_format: param_file_format(parameter_file_type)?.to_string(),
+        ..ArgsState::default()
     })
 }
 

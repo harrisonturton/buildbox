@@ -25,12 +25,52 @@ pub struct Args {
 #[derive(Debug, Default, Clone)]
 pub struct ArgsState {
     pub arguments: Vec<String>,
+    /// Where each call that added arguments, after the first, started
+    /// adding them, which `flag_per_line` joins.
+    pub groups: Vec<usize>,
     /// The format of the argument that names the params file, such as
-    /// `@%s`, if the arguments always go in one.
+    /// `@%s`, if the arguments go in one.
     pub param_file: Option<String>,
-    /// `shell` or `multiline`.
+    /// Whether the arguments go in the params file only when the command
+    /// line would be too long without it, rather than always.
+    pub param_file_when_needed: bool,
+    /// `shell`, `multiline`, `flag_per_line` or `gcc_quoted`.
     pub param_file_format: String,
 }
+
+impl ArgsState {
+    /// The arguments as an action gets them: with `flag_per_line`, each
+    /// call's arguments, if it added more than one, joined into one,
+    /// `first=rest`, as Bazel joins them.
+    pub fn lines(&self) -> Vec<String> {
+        if self.param_file_format != FLAG_PER_LINE {
+            return self.arguments.clone();
+        }
+        let mut bounds = vec![0];
+        bounds.extend(self.groups.iter().copied());
+        bounds.push(self.arguments.len());
+        let mut lines = Vec::new();
+        for window in bounds.windows(2) {
+            let group = &self.arguments[window[0]..window[1]];
+            match group {
+                [] => {}
+                [single] => lines.push(single.clone()),
+                [first, rest @ ..] if first.is_empty() => lines.push(rest.join(" ")),
+                [first, rest @ ..] => lines.push(format!("{first}={}", rest.join(" "))),
+            }
+        }
+        lines
+    }
+
+    /// Whether only flags go in the params file, the rest staying on the
+    /// command line, as for `flag_per_line`.
+    pub fn flags_only(&self) -> bool {
+        self.param_file_format == FLAG_PER_LINE
+    }
+}
+
+/// The params file format of one flag, with its value, per line.
+const FLAG_PER_LINE: &str = "flag_per_line";
 
 starlark_simple_value!(Args);
 
@@ -54,6 +94,10 @@ impl Args {
 
     fn push(&self, values: impl IntoIterator<Item = String>) {
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.arguments.is_empty() {
+            let start = state.arguments.len();
+            state.groups.push(start);
+        }
         state.arguments.extend(values);
     }
 
@@ -332,8 +376,9 @@ fn args_methods(builder: &mut MethodsBuilder) {
         Ok(this)
     }
 
-    /// `use_param_file(param_file_arg, *, use_always = False)`. The
-    /// arguments go in a params file only when `use_always` is set.
+    /// `use_param_file(param_file_arg, *, use_always = False)`: the
+    /// arguments go in a params file, unless `use_always` is off and the
+    /// command line is short enough without one.
     fn use_param_file<'v>(
         this: Value<'v>,
         param_file_arg: &str,
@@ -341,16 +386,20 @@ fn args_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<Value<'v>> {
         let args = this.downcast_ref::<Args>().ok_or_else(|| anyhow::anyhow!("expected Args"))?;
         format(Some(param_file_arg), "")?;
-        if use_always {
-            let param_file_arg = param_file_arg.to_string();
-            args.update(|state| state.param_file = Some(param_file_arg));
-        }
+        let param_file_arg = param_file_arg.to_string();
+        args.update(|state| {
+            state.param_file = Some(param_file_arg);
+            state.param_file_when_needed = !use_always;
+        });
         Ok(this)
     }
 
     /// `set_param_file_format(format)`: `shell`, `multiline` or
     /// `flag_per_line`.
     fn set_param_file_format<'v>(this: Value<'v>, format: &str) -> anyhow::Result<Value<'v>> {
+        if !matches!(format, "shell" | "multiline" | FLAG_PER_LINE) {
+            anyhow::bail!("Invalid value for parameter \"format\": Expected one of \"shell\", \"multiline\", \"flag_per_line\"");
+        }
         let args = this.downcast_ref::<Args>().ok_or_else(|| anyhow::anyhow!("expected Args"))?;
         let format = format.to_string();
         args.update(|state| state.param_file_format = format);
@@ -358,12 +407,12 @@ fn args_methods(builder: &mut MethodsBuilder) {
     }
 }
 
-/// The contents of a params file holding `arguments`.
-pub fn param_file_contents(state: &ArgsState) -> String {
-    let lines: Vec<String> = match state.param_file_format.as_str() {
-        "shell" => state.arguments.iter().map(|argument| shell_quote(argument)).collect(),
-        "gcc_quoted" => state.arguments.iter().map(|argument| gcc_quote(argument)).collect(),
-        _ => state.arguments.clone(),
+/// The contents of a params file of `format` holding `arguments`.
+pub fn param_file_contents(arguments: &[String], format: &str) -> String {
+    let lines: Vec<String> = match format {
+        "shell" => arguments.iter().map(|argument| shell_quote(argument)).collect(),
+        "gcc_quoted" => arguments.iter().map(|argument| gcc_quote(argument)).collect(),
+        _ => arguments.to_vec(),
     };
     lines.iter().map(|line| format!("{line}\n")).collect()
 }
@@ -549,12 +598,19 @@ mod param_file_tests {
     fn reads_back_what_params_files_hold() {
         let arguments: Vec<String> = ["plain", "with space", "it's", ""].iter().map(|argument| argument.to_string()).collect();
         for format in ["multiline", "shell", "gcc_quoted"] {
-            let state = ArgsState {
-                arguments: arguments.clone(),
-                param_file: Some("@%s".to_string()),
-                param_file_format: format.to_string(),
-            };
-            assert_eq!(param_file_arguments(&param_file_contents(&state), format), arguments, "{format}");
+            assert_eq!(param_file_arguments(&param_file_contents(&arguments, format), format), arguments, "{format}");
         }
+    }
+
+    #[test]
+    fn joins_each_calls_arguments_for_flag_per_line() {
+        let arguments: Vec<String> = ["--a", "1", "2", "--b", "", "x", "y"].iter().map(|argument| argument.to_string()).collect();
+        let state = ArgsState {
+            arguments,
+            groups: vec![3, 4, 5],
+            param_file_format: FLAG_PER_LINE.to_string(),
+            ..ArgsState::default()
+        };
+        assert_eq!(state.lines(), ["--a=1 2", "--b", "", "x=y"]);
     }
 }

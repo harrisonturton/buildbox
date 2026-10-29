@@ -9,6 +9,7 @@ use crate::file_value::FileValue;
 use crate::runfiles::{FilesToRun, Runfiles};
 use crate::state::{RuleState, runfiles_tree};
 use allocative::Allocative;
+use bazel_config::OptionValue;
 use bazel_starlark::depset::Depset;
 use intern::{PathId, Symbol};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
@@ -133,46 +134,91 @@ impl Tools {
     }
 }
 
-/// The arguments of an action: strings and `Args`, the latter maybe in a
-/// params file, which another action writes; those that name params files
-/// are recorded in `param_files`, numbered from `first`.
+/// The arguments of an action after `command`: strings and `Args`, the
+/// latter maybe in params files, which other actions write. As in Bazel's
+/// `CommandLines.expand`, an `Args` whose params file is used only when
+/// needed stays on the command line while the command line fits in
+/// `--min_param_file_size`. The arguments that name params files are
+/// recorded in `param_files`.
 fn arguments(
     value: Option<Value<'_>>,
     state: &RuleState,
     outputs: &[Artifact],
     inputs: &mut Vec<Artifact>,
-    first: usize,
+    command: &[String],
     param_files: &mut Vec<ParamFile>,
 ) -> anyhow::Result<Vec<String>> {
     let Some(value) = value.filter(|value| !value.is_none()) else {
         return Ok(Vec::new());
     };
     let items = bazel_starlark::convert::items(value).ok_or_else(|| anyhow::anyhow!("arguments must be a list"))?;
+    let command_lines = 1 + items.iter().filter(|item| item.downcast_ref::<Args>().is_some()).count();
+    let limit = max_command_line_length(state).saturating_sub(command_lines * PARAM_FILE_ARG_LENGTH_ESTIMATE);
+    let mut length = total_length(command);
     let mut out = Vec::new();
     for item in items {
         let Some(args) = item.downcast_ref::<Args>() else {
-            out.push(args::stringify_with(item, Some(&state.main_mapping)));
+            let argument = args::stringify_with(item, Some(&state.main_mapping));
+            length += argument.len() + 1;
+            out.push(argument);
             continue;
         };
         let args = args.state();
+        let lines = args.lines();
         let Some(param_file_arg) = &args.param_file else {
-            out.extend(args.arguments);
+            length += total_length(&lines);
+            out.extend(lines);
             continue;
         };
-        let params = write_param_file(state, outputs, &args)?;
+        if args.param_file_when_needed && length + total_length(&lines) <= limit {
+            length += total_length(&lines);
+            out.extend(lines);
+            continue;
+        }
+        let (in_file, kept): (Vec<String>, Vec<String>) = match args.flags_only() {
+            true => lines.into_iter().partition(|line| line.starts_with("--")),
+            false => (lines, Vec::new()),
+        };
+        let format = match args.flags_only() {
+            true => "multiline",
+            false => args.param_file_format.as_str(),
+        };
+        let params = write_param_file(state, outputs, &in_file, format)?;
         inputs.push(params);
         param_files.push(ParamFile {
-            argument: (first + out.len()) as u32,
+            argument: (command.len() + out.len()) as u32,
             path: params.exec_path,
-            format: args.param_file_format.clone(),
+            format: format.to_string(),
         });
-        out.push(param_file_arg.replacen("%s", &params.exec_path.to_string(), 1));
+        let argument = param_file_arg.replacen("%s", &params.exec_path.to_string(), 1);
+        length += argument.len() + 1 + total_length(&kept);
+        out.push(argument);
+        out.extend(kept);
     }
     Ok(out)
 }
 
+/// What Bazel allows for each params file's argument when deciding
+/// whether a command line fits.
+const PARAM_FILE_ARG_LENGTH_ESTIMATE: usize = 512;
+
+/// The longest command line without params files, `--min_param_file_size`.
+fn max_command_line_length(state: &RuleState) -> usize {
+    match state.config.options.get("min_param_file_size") {
+        Ok(OptionValue::Int(size)) => usize::try_from(*size).unwrap_or(0),
+        _ => DEFAULT_MIN_PARAM_FILE_SIZE,
+    }
+}
+
+const DEFAULT_MIN_PARAM_FILE_SIZE: usize = 32768;
+
+/// The length of arguments on a command line, each with a separator.
+fn total_length(arguments: &[String]) -> usize {
+    arguments.iter().map(|argument| argument.len() + 1).sum()
+}
+
 /// Write a params file for an action, next to its first output.
-fn write_param_file(state: &RuleState, outputs: &[Artifact], args: &args::ArgsState) -> anyhow::Result<Artifact> {
+fn write_param_file(state: &RuleState, outputs: &[Artifact], arguments: &[String], format: &str) -> anyhow::Result<Artifact> {
     let first = outputs.first().ok_or_else(|| anyhow::anyhow!("an action needs at least one output"))?;
     let package = artifact::package_dir(state.label.package);
     let base = artifact::parse(&state.config.bin_dir()).join_path(package);
@@ -186,7 +232,7 @@ fn write_param_file(state: &RuleState, outputs: &[Artifact], args: &args::ArgsSt
         runfiles: Vec::new(),
         outputs: vec![params],
         kind: ActionKind::Write {
-            content: args::param_file_contents(args),
+            content: args::param_file_contents(arguments, format),
             executable: false,
             from_args: true,
         },
@@ -263,8 +309,8 @@ impl<'v> SpawnArgs<'v> {
         let mut arguments = command;
         let mut direct = Vec::new();
         let mut param_files = Vec::new();
-        let first = arguments.len();
-        arguments.extend(self::arguments(self.arguments, state, &outputs, &mut direct, first, &mut param_files)?);
+        let added = self::arguments(self.arguments, state, &outputs, &mut direct, &arguments, &mut param_files)?;
+        arguments.extend(added);
         direct.extend(tools.inputs);
         let inputs = InputSet::new(direct, std::iter::once(declared).chain(tools.sets).collect());
         let mut seen = std::collections::HashSet::new();
@@ -437,7 +483,10 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         let output = FileValue::artifact(output).ok_or_else(|| anyhow::anyhow!("write: output must be a File"))?;
         let from_args = content.downcast_ref::<Args>().is_some();
         let content = match content.downcast_ref::<Args>() {
-            Some(args) => args::param_file_contents(&args.state()),
+            Some(args) => {
+                let args = args.state();
+                args::param_file_contents(&args.lines(), &args.param_file_format)
+            }
             None => args::stringify_with(content, Some(&state.main_mapping)),
         };
         state.register(Action {
