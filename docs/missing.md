@@ -47,13 +47,12 @@ opaque value is an error.
 
 ## 2. Execution platforms, exec groups and remote execution
 
-- **Exec groups.** `ctx.exec_groups[name]` fails ("exec groups aren't
-  supported by bb yet", `analysis/exec_groups.rs`): no toolchains are
-  resolved per group. `ctx.actions.run` and `run_shell` drop `exec_group`,
-  `toolchain` and `resource_set` (`analysis/actions.rs`), and
-  `config.exec(exec_group = ...)` gets the rule's default execution
-  platform (`starlark/attr_module.rs`). `--incompatible_auto_exec_groups`
-  is off, as in Bazel 9, so most rule sets don't notice yet.
+- **Exec groups.** Each exec group resolves its own toolchains and
+  execution platform, and `config.exec("group")` dependencies are built
+  for it. An action's `exec_group` is only checked, though: every action
+  reports the rule's default execution platform, in `aquery` too. `ctx.actions.run`'s `toolchain` and `resource_set`
+  are ignored. Automatic exec groups (`--incompatible_auto_exec_groups`)
+  and `--use_target_platform_for_tests` are errors if turned on.
 - **Remote platform.** The REAPI `Platform` of every action is empty
   (`execution/spawn.rs`): `exec_properties` and platforms'
   `exec_properties` never reach a remote executor, so remote execution on
@@ -280,7 +279,7 @@ like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
    repositories.
 2. Cross-target action conflicts and directory expansion in `Args`
    (section 4).
-3. Exec groups and the remote platform (section 2).
+3. The remote platform (section 2).
 4. Test sharding, undeclared outputs and the remaining test options
    (section 6).
 5. The Build Event Protocol (section 7).

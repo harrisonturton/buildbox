@@ -662,7 +662,7 @@ fn follows(attr: &AttrSchema, options: &QueryOptions) -> bool {
     if !attr.is_dependency || attr.name.as_str() == "visibility" {
         return false;
     }
-    options.tool_deps || (attr.cfg != Cfg::Exec && !CONSTRAINT_ATTRS.contains(&attr.name.as_str()))
+    options.tool_deps || (!matches!(attr.cfg, Cfg::Exec(_)) && !CONSTRAINT_ATTRS.contains(&attr.name.as_str()))
 }
 
 /// The attributes Bazel marks as tools, which `--notool_deps` doesn't

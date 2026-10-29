@@ -31,29 +31,77 @@ pub struct ResolvedToolchains {
     pub resolved: Vec<(Label, Option<Arc<ConfiguredTarget>>)>,
     /// The execution platform chosen for the rule's actions and tools.
     pub exec_platform: Option<Label>,
+    /// Each exec group of the rule, with its own toolchains and execution
+    /// platform.
+    pub exec_groups: Vec<(Symbol, ResolvedToolchains)>,
 }
 
-/// Choose the execution platform for a rule, whose `exec_compatible_with`
-/// is `exec_constraints`, and resolve and analyze the toolchains its class
-/// needs for it.
-pub async fn resolve(ctx: &Ctx, label: Label, class: &RuleClass, config: &BuildConfiguration, exec_constraints: &[Label]) -> Result<ResolvedToolchains, SkyError> {
-    let mut types = Vec::with_capacity(class.toolchain_types.len());
-    for toolchain_type in &class.toolchain_types {
-        types.push(crate::platform::actual(ctx, *toolchain_type).await?);
+impl ResolvedToolchains {
+    /// The toolchains and execution platform of an exec group.
+    pub fn group(&self, name: Symbol) -> Option<&ResolvedToolchains> {
+        self.exec_groups.iter().find(|(group, _)| *group == name).map(|(_, resolved)| resolved)
     }
-    let mut optional = Vec::with_capacity(class.optional_toolchain_types.len());
-    for toolchain_type in &class.optional_toolchain_types {
-        optional.push(crate::platform::actual(ctx, *toolchain_type).await?);
+
+    /// Every toolchain resolved, the rule's and its exec groups'.
+    pub fn all(&self) -> impl Iterator<Item = &Arc<ConfiguredTarget>> {
+        let own = self.resolved.iter().filter_map(|(_, target)| target.as_ref());
+        let groups = self.exec_groups.iter().flat_map(|(_, group)| group.resolved.iter().filter_map(|(_, target)| target.as_ref()));
+        own.chain(groups)
     }
-    let mut constraints = Vec::with_capacity(exec_constraints.len());
-    for constraint in exec_constraints {
-        constraints.push(crate::platform::actual(ctx, *constraint).await?);
+}
+
+/// What a target asks of its execution platforms: the constraints of its
+/// `exec_compatible_with`, and its `exec_group_compatible_with`'s for each
+/// exec group.
+#[derive(Default)]
+pub struct ExecConstraints {
+    pub target: Vec<Label>,
+    pub groups: Vec<(Symbol, Vec<Label>)>,
+}
+
+/// Choose the execution platform for a rule, and for each of its exec
+/// groups, and resolve and analyze the toolchains each needs for it.
+pub async fn resolve(ctx: &Ctx, label: Label, class: &RuleClass, config: &BuildConfiguration, constraints: &ExecConstraints) -> Result<ResolvedToolchains, SkyError> {
+    let mut exec_constraints = class.exec_compatible_with.clone();
+    exec_constraints.extend(&constraints.target);
+    let wanted = Wanted {
+        types: &class.toolchain_types,
+        optional: &class.optional_toolchain_types,
+        exec_constraints: &exec_constraints,
+    };
+    let mut resolved = resolve_wanted(ctx, label, &wanted, config).await?;
+    for group in &class.exec_groups {
+        let mut group_constraints = group.exec_compatible_with.clone();
+        if let Some((_, extra)) = constraints.groups.iter().find(|(name, _)| *name == group.name) {
+            group_constraints.extend(extra);
+        }
+        let wanted = Wanted {
+            types: &group.toolchain_types,
+            optional: &group.optional_toolchain_types,
+            exec_constraints: &group_constraints,
+        };
+        let group_resolved = resolve_wanted(ctx, label, &wanted, config).await?;
+        resolved.exec_groups.push((group.name, group_resolved));
     }
+    Ok(resolved)
+}
+
+/// The toolchain types a rule or exec group needs, and the constraints of
+/// its execution platform.
+struct Wanted<'a> {
+    types: &'a [Label],
+    optional: &'a [Label],
+    exec_constraints: &'a [Label],
+}
+
+/// Choose an execution platform with the constraints `wanted` gives, and
+/// resolve and analyze the toolchains it needs for it.
+async fn resolve_wanted(ctx: &Ctx, label: Label, wanted: &Wanted<'_>, config: &BuildConfiguration) -> Result<ResolvedToolchains, SkyError> {
     let key = ToolchainResolutionKey {
         config: config.id,
-        types,
-        optional,
-        exec_constraints: constraints,
+        types: actual_labels(ctx, wanted.types).await?,
+        optional: actual_labels(ctx, wanted.optional).await?,
+        exec_constraints: actual_labels(ctx, wanted.exec_constraints).await?,
         forced_exec_platform: config.toolchain_exec_platform,
     };
     let resolution = ctx.compute(&key).await?;
@@ -66,7 +114,7 @@ pub async fn resolve(ctx: &Ctx, label: Label, class: &RuleClass, config: &BuildC
         .collect();
     let mut analyzed = ctx.compute_many(&keys).await.into_iter();
     let mut resolved = Vec::with_capacity(resolution.toolchains.len());
-    for ((_, toolchain), requested) in resolution.toolchains.iter().zip(&class.toolchain_types) {
+    for ((_, toolchain), requested) in resolution.toolchains.iter().zip(wanted.types) {
         let target = match toolchain {
             Some(toolchain) => match analyzed.next().ok_or_else(|| SkyError::new("toolchain analysis"))? {
                 Ok(target) => Some(target),
@@ -82,7 +130,17 @@ pub async fn resolve(ctx: &Ctx, label: Label, class: &RuleClass, config: &BuildC
     Ok(ResolvedToolchains {
         resolved,
         exec_platform: Some(resolution.exec_platform),
+        exec_groups: Vec::new(),
     })
+}
+
+/// Labels with each alias replaced by its actual target.
+async fn actual_labels(ctx: &Ctx, labels: &[Label]) -> Result<Vec<Label>, SkyError> {
+    let mut actual = Vec::with_capacity(labels.len());
+    for label in labels {
+        actual.push(crate::platform::actual(ctx, *label).await?);
+    }
+    Ok(actual)
 }
 
 /// Bazel's error for a toolchain target that can't be had: why, at its
@@ -111,6 +169,9 @@ pub struct DeclaredToolchain {
     pub target_compatible_with: Vec<Label>,
     pub exec_compatible_with: Vec<Label>,
     pub target_settings: Vec<Label>,
+    /// Whether the execution platform must also have every constraint of
+    /// the target platform, as `use_target_platform_constraints` says.
+    pub use_target_platform_constraints: bool,
 }
 
 /// The toolchains and execution platforms the build registers, in order of
@@ -294,6 +355,7 @@ async fn declared_toolchain(ctx: &Ctx, label: Label) -> Result<DeclaredToolchain
         target_compatible_with: labels(&rule, "target_compatible_with"),
         exec_compatible_with: labels(&rule, "exec_compatible_with"),
         target_settings: labels(&rule, "target_settings"),
+        use_target_platform_constraints: matches!(rule.attr(Symbol::intern("use_target_platform_constraints")), Some(AttrValue::Bool(true))),
     })
 }
 
@@ -308,10 +370,10 @@ pub struct ToolchainResolution {
 
 encoded_value!(ToolchainResolution);
 
-/// Chooses toolchains: the first execution platform that has the
-/// constraints and for which every mandatory type has a toolchain, and for
-/// each type the first registered toolchain compatible with it and the
-/// target platform.
+/// Chooses toolchains: of the execution platforms that have the
+/// constraints and for which every mandatory type has a toolchain, the
+/// first with the most toolchains, and for each type the first registered
+/// toolchain compatible with it and the target platform.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct ToolchainResolutionKey {
     pub config: ConfigId,
@@ -342,15 +404,25 @@ impl Key for ToolchainResolutionKey {
                 allowed.push((platform, exec));
             }
         }
+        let mut best: Option<ToolchainResolution> = None;
+        let mut best_found = 0;
         for (platform, exec) in &allowed {
-            if let Some(toolchains) = self.resolve_for(ctx, &registered, &target, exec).await? {
-                return Ok(ToolchainResolution {
+            let Some(toolchains) = self.resolve_for(ctx, &registered, &target, exec).await? else {
+                continue;
+            };
+            let found = toolchains.iter().filter(|(_, toolchain)| toolchain.is_some()).count();
+            if best.is_none() || found > best_found {
+                best_found = found;
+                best = Some(ToolchainResolution {
                     exec_platform: *platform,
                     toolchains,
                 });
             }
         }
-        Err(self.unresolved(ctx, &registered, &target, &allowed).await?)
+        match best {
+            Some(resolution) => Ok(resolution),
+            None => Err(self.unresolved(ctx, &registered, &target, &allowed).await?),
+        }
     }
 }
 
@@ -454,6 +526,9 @@ impl ToolchainResolutionKey {
         if !satisfies(ctx, target, &declared.target_compatible_with).await? || !satisfies(ctx, exec, &declared.exec_compatible_with).await? {
             return Ok(false);
         }
+        if declared.use_target_platform_constraints && !target.constraints.iter().all(|constraint| exec.constraints.contains(constraint)) {
+            return Ok(false);
+        }
         for setting in &declared.target_settings {
             let condition = ctx.compute(&ConditionKey { label: *setting, config: self.config }).await?;
             if !condition.matches {
@@ -540,7 +615,8 @@ impl<'v> ToolchainContext<'v> {
 
 impl<'v, V: ValueLike<'v>> fmt::Display for ToolchainContextGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<toolchain_context>")
+        let types: Vec<String> = self.types.iter().map(Label::to_string).collect();
+        write!(f, "<toolchain_context.resolved_labels: {}>", types.join(", "))
     }
 }
 

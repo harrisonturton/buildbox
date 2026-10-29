@@ -563,7 +563,7 @@ async fn own_setup(ctx: &Ctx, label: Label, aspect: &LoadedAspect, descriptor: &
     let class = aspect.class()?;
     let config = deps_config.get();
     let attrs = aspect_attrs(&class, descriptor, &config.options)?;
-    let toolchains = crate::toolchains::resolve(ctx, label, &class, &config, &[]).await?;
+    let toolchains = crate::toolchains::resolve(ctx, label, &class, &config, &crate::toolchains::ExecConstraints::default()).await?;
     let exec_platform = toolchains.exec_platform.unwrap_or(config.host_platform);
     let exec_config = exec_config(ctx, &class, deps_config, exec_platform).await?;
     Ok(RuleSetup {

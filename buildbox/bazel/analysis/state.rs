@@ -12,6 +12,7 @@ use bazel_label::{Label, LabelContext, RepoMappingTable};
 use bazel_starlark::EvalContext;
 use intern::PathId;
 use starlark::eval::Evaluator;
+use starlark::values::Value;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -60,12 +61,29 @@ pub struct RuleState {
     pub tag_execution_info: Vec<(String, String)>,
     /// The toolchain types the rule resolves toolchains for.
     pub toolchain_types: Vec<Label>,
+    /// The names of the rule's exec groups, which its actions may run in.
+    pub exec_groups: Vec<Symbol>,
     /// Errors in the rule's attributes found as its `ctx` was made, as
     /// Bazel words them, which fail its analysis.
     pub attribute_errors: RefCell<Vec<String>>,
 }
 
 impl RuleState {
+    /// Check that an action's `exec_group` is one of the rule's, as Bazel
+    /// does.
+    pub fn check_exec_group(&self, exec_group: Option<Value<'_>>) -> anyhow::Result<()> {
+        let Some(exec_group) = exec_group.filter(|value| !value.is_none()) else {
+            return Ok(());
+        };
+        let Some(name) = exec_group.unpack_str() else {
+            anyhow::bail!("got value of type '{}' for parameter 'exec_group', want 'string or NoneType'", exec_group.get_type());
+        };
+        if !self.exec_groups.iter().any(|group| group.as_str() == name) {
+            anyhow::bail!("Action declared for non-existent exec group '{name}'.");
+        }
+        Ok(())
+    }
+
     pub fn new(label: Label, kind: Symbol, config: Arc<BuildConfiguration>, mapping: Arc<RepoMappingTable>, main_mapping: Arc<RepoMappingTable>) -> RuleState {
         let make_variables = make_variables(&config, &config.cpu, Vec::new());
         RuleState {
@@ -86,6 +104,7 @@ impl RuleState {
             analysis_test: false,
             tag_execution_info: Vec::new(),
             toolchain_types: Vec::new(),
+            exec_groups: Vec::new(),
             attribute_errors: RefCell::new(Vec::new()),
         }
     }

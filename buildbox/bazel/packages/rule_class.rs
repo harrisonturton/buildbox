@@ -33,9 +33,12 @@ pub struct RuleClass {
     /// The toolchain types among those that may go unresolved, for which
     /// the rule gets `None`.
     pub optional_toolchain_types: Vec<Label>,
-    /// The exec groups the rule's actions can run in, by name: those
+    /// The constraints every execution platform of the rule must have, as
+    /// `rule(exec_compatible_with = ...)` gives them.
+    pub exec_compatible_with: Vec<Label>,
+    /// The exec groups the rule's actions can run in: those
     /// `rule(exec_groups = ...)` declares, and `test` for test rules.
-    pub exec_groups: Vec<Symbol>,
+    pub exec_groups: Vec<ExecGroup>,
     /// Whether `rule(cfg = ...)` gives the rule a transition, which changes
     /// the configuration its targets are analyzed in.
     pub incoming_transition: bool,
@@ -50,6 +53,17 @@ pub struct RuleClass {
     /// Whether it's an analysis test: a test whose implementation checks
     /// other targets' analysis, registering no actions of its own.
     pub analysis_test: bool,
+}
+
+/// An exec group: actions and tools that run on an execution platform of
+/// their own, chosen for the group's own toolchains and constraints.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct ExecGroup {
+    pub name: Symbol,
+    pub toolchain_types: Vec<Label>,
+    /// The toolchain types among those that may go unresolved.
+    pub optional_toolchain_types: Vec<Label>,
+    pub exec_compatible_with: Vec<Label>,
 }
 
 /// How a build setting is set: whether it's a flag, which the command line
@@ -165,7 +179,8 @@ pub struct LateBound {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum Cfg {
     Target,
-    Exec,
+    /// The execution platform of the exec group named, or of the rule.
+    Exec(Option<Symbol>),
     /// A Starlark transition.
     Transition,
     /// `config.none()`: the configuration without options.
@@ -218,7 +233,7 @@ impl AttrSchema {
     }
 
     pub fn exec(mut self) -> AttrSchema {
-        self.cfg = Cfg::Exec;
+        self.cfg = Cfg::Exec(None);
         self
     }
 

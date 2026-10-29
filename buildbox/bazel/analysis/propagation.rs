@@ -55,7 +55,7 @@ impl PropagationTarget<'_> {
             if name.as_str().starts_with('$') || name.as_str().starts_with(':') {
                 continue;
             }
-            seen.push((*name, value.clone(), schema.cfg == Cfg::Exec));
+            seen.push((*name, value.clone(), matches!(schema.cfg, Cfg::Exec(_))));
         }
         seen
     }

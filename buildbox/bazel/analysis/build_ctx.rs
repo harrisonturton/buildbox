@@ -266,6 +266,7 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     state.target_constraints = input.target_constraints.clone();
     state.analysis_test = input.class.analysis_test && input.aspect.is_none();
     state.toolchain_types = input.class.toolchain_types.clone();
+    state.exec_groups = input.class.exec_groups.iter().map(|group| group.name).collect();
     if let Some(AttrValue::StringList(tags)) = input.attr("tags") {
         state.tag_execution_info = crate::state::tag_execution_info(tags);
     }
@@ -617,7 +618,7 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     set("version_file", heap.alloc(FileValue(crate::workspace_status::version_file())));
     set("toolchains", heap.alloc(ToolchainContext::new(&input.toolchains, definition_mapping(input), target_description(input), heap)));
     set("fragments", heap.alloc(crate::fragments::Fragments(options)));
-    set("exec_groups", heap.alloc(exec_groups(input)));
+    set("exec_groups", heap.alloc(exec_groups(input, heap)));
     set("split_attr", split_attr_struct(input, prepared, heap));
     set("aspect_ids", heap.alloc(AllocList(input.config.aspects.iter().map(|aspect| aspect.description()))));
     set("build_setting_value", build_setting_value(input, heap));
@@ -688,12 +689,16 @@ fn merged<'v>(targets: &[Arc<ConfiguredTarget>], heap: Heap<'v>) -> anyhow::Resu
     crate::target_value::merge(&values, heap)
 }
 
-/// What `ctx.exec_groups` holds: the exec groups the rule declares.
-fn exec_groups(input: &RuleInput) -> ExecGroups {
-    ExecGroups {
-        target: target_description(input),
-        names: input.class.exec_groups.iter().map(|name| name.to_string()).collect(),
+/// What `ctx.exec_groups` holds: the exec groups the rule declares, with
+/// their toolchains.
+fn exec_groups<'v>(input: &RuleInput, heap: Heap<'v>) -> ExecGroups<'v> {
+    let target = target_description(input);
+    let mut groups = Vec::with_capacity(input.toolchains.exec_groups.len());
+    for (name, resolved) in &input.toolchains.exec_groups {
+        let toolchains = ToolchainContext::new(resolved, definition_mapping(input), target.clone(), heap);
+        groups.push((name.to_string(), heap.alloc(toolchains)));
     }
+    ExecGroups { target, groups }
 }
 
 /// What a rule's or aspect's analysis is of, as Bazel's errors about its

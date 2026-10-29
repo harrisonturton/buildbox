@@ -7,7 +7,7 @@ use crate::instantiate::instantiate;
 use crate::native_rules;
 use allocative::Allocative;
 use bazel_label::Label;
-use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, CallFrame, Cfg, DepRequirements, FileTypes, LateBound, ProviderRef, RuleClass, RuleClassRef};
+use bazel_packages::{AspectRef, AttrDefault, AttrSchema, AttrType, AttrValue, CallFrame, Cfg, DepRequirements, ExecGroup, FileTypes, LateBound, ProviderRef, RuleClass, RuleClassRef};
 use intern::Symbol;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
@@ -253,6 +253,7 @@ fn schema<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>, kind: &str, context: 
     let (toolchain_types, optional) = toolchain_types(rule, &parser)?;
     class.toolchain_types = toolchain_types;
     class.optional_toolchain_types = optional;
+    class.exec_compatible_with = label_list(rule.option("exec_compatible_with"), &parser)?;
     class.exec_groups = exec_groups(rule)?;
     class.incoming_transition = incoming_transition;
     class.build_setting = build_setting(rule).map(crate::config_module::BuildSettingType::spec);
@@ -271,42 +272,22 @@ fn transition_allowlist() -> AttrSchema {
 
 /// The exec groups `rule(exec_groups = {...})` declares, and the `test`
 /// group Bazel gives test rules that don't declare it.
-fn exec_groups<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> anyhow::Result<Vec<Symbol>> {
-    let mut names = exec_group_names(rule.option("exec_groups"), "rule")?;
+fn exec_groups<'v, V: ValueLike<'v>>(rule: &StarlarkRuleGen<V>) -> anyhow::Result<Vec<ExecGroup>> {
+    let mut groups = crate::exec_group::exec_groups(rule.option("exec_groups"), "rule")?;
     let test = Symbol::intern("test");
-    if rule.test && !names.contains(&test) {
-        names.push(test);
+    if rule.test && !groups.iter().any(|group| group.name == test) {
+        groups.push(crate::exec_group::default_test_group());
     }
-    Ok(names)
+    Ok(groups)
 }
 
-/// The names of the exec groups `exec_groups = {...}` declares, for a
-/// rule or an aspect, as `what` says.
-pub(crate) fn exec_group_names(groups: Option<Value<'_>>, what: &str) -> anyhow::Result<Vec<Symbol>> {
-    let mut names = Vec::new();
-    let Some(groups) = groups.filter(|groups| !groups.is_none()) else {
-        return Ok(names);
-    };
-    let Some(groups) = DictRef::from_value(groups) else {
-        anyhow::bail!("{what}: exec_groups must be a dict, not {}", groups.get_type());
-    };
-    for name in groups.keys() {
-        let Some(name) = name.unpack_str() else {
-            anyhow::bail!("{what}: exec group names must be strings, not {}", name.get_type());
-        };
-        if !is_valid_exec_group_name(name) {
-            anyhow::bail!("Exec group name '{name}' is not a valid name.");
-        }
-        names.push(Symbol::intern(name));
+/// The labels of a `rule()` or `aspect()` option that lists them.
+pub(crate) fn label_list(value: Option<Value<'_>>, parser: &LabelParser<'_>) -> anyhow::Result<Vec<Label>> {
+    let mut labels = Vec::new();
+    for item in value.and_then(convert::items).unwrap_or_default() {
+        labels.push(parser.label(item)?);
     }
-    Ok(names)
-}
-
-/// Whether an exec group can have this name: it must be an identifier.
-fn is_valid_exec_group_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let starts_well = chars.next().is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
-    starts_well && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    Ok(labels)
 }
 
 /// The hidden attributes a rule gets from a subrule it declares, whose
@@ -338,7 +319,7 @@ pub(crate) fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelP
         ),
     };
     let cfg = if attribute.is_exec() {
-        Cfg::Exec
+        Cfg::Exec(attribute.exec_group().map(|group| Symbol::intern(&group)))
     } else if attribute.is_unconfigured() {
         Cfg::None
     } else if attribute.has_transition() {

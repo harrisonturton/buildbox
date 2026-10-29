@@ -41,7 +41,7 @@ pub fn dep_configs(cfg: Cfg, attr: Symbol, config: ConfigId, exec_config: Config
         return configs.clone();
     }
     match cfg {
-        Cfg::Exec => vec![(String::new(), exec_config)],
+        Cfg::Exec(_) => vec![(String::new(), exec_config)],
         Cfg::None => vec![(String::new(), bazel_config::no_config())],
         Cfg::Target | Cfg::Transition => vec![(String::new(), config)],
     }

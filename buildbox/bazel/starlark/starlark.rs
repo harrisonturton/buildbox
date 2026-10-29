@@ -12,6 +12,7 @@ pub mod convert;
 pub mod depset;
 pub mod dotted_version;
 pub mod eval;
+pub mod exec_group;
 pub mod fields;
 mod hash;
 pub mod instantiate;

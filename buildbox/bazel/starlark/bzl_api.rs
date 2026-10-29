@@ -5,6 +5,7 @@ use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
+use starlark::values::list_or_tuple::UnpackListOrTuple;
 use starlark::values::none::NoneType;
 use allocative::Allocative;
 use starlark::starlark_simple_value;
@@ -27,9 +28,13 @@ pub(crate) fn bzl_functions(builder: &mut GlobalsBuilder) {
         })
     }
 
-    fn exec_group<'v>(#[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>) -> anyhow::Result<crate::opaque::Opaque> {
-        let _ = kwargs;
-        Ok(crate::opaque::Opaque::new("ExecGroup"))
+    /// `exec_group(toolchains = [], exec_compatible_with = [])`.
+    fn exec_group<'v>(
+        #[starlark(require = named, default = UnpackListOrTuple::default())] toolchains: UnpackListOrTuple<Value<'v>>,
+        #[starlark(require = named, default = UnpackListOrTuple::default())] exec_compatible_with: UnpackListOrTuple<Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<crate::exec_group::ExecGroupValue> {
+        crate::exec_group::exec_group(toolchains.items, exec_compatible_with.items, eval)
     }
 }
 

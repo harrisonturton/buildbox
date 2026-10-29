@@ -619,8 +619,9 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named)] toolchain: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let _ = (unused_inputs_list, input_manifests, exec_group, shadowed_action, resource_set, toolchain);
+        let _ = (unused_inputs_list, input_manifests, shadowed_action, resource_set, toolchain);
         let state = RuleState::get(eval)?;
+        state.check_exec_group(exec_group)?;
         let accepted = executable.unpack_str().is_some() || FileValue::artifact(executable).is_some() || FilesToRun::from_value(executable).is_some();
         if !accepted {
             anyhow::bail!(
@@ -674,8 +675,9 @@ fn actions_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named)] toolchain: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let _ = (input_manifests, exec_group, shadowed_action, resource_set, toolchain);
+        let _ = (input_manifests, shadowed_action, resource_set, toolchain);
         let state = RuleState::get(eval)?;
+        state.check_exec_group(exec_group)?;
         let has_arguments = arguments.and_then(bazel_starlark::convert::items).is_some_and(|items| !items.is_empty());
         let command = match command.unpack_str() {
             Some(script) => {

@@ -140,6 +140,7 @@ fn class_of(kind: &str, common: Vec<AttrSchema>, own: Vec<AttrSchema>, test: boo
         outputs: Vec::new(),
         toolchain_types: Vec::new(),
         optional_toolchain_types: Vec::new(),
+        exec_compatible_with: Vec::new(),
         exec_groups: Vec::new(),
         incoming_transition: false,
         build_setting: None,

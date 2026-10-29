@@ -133,9 +133,11 @@ const UNSUPPORTED_NATIVE_OPTIONS: &[&str] = &[
     "experimental_output_paths",
     "experimental_strict_fileset_output",
     "experimental_writable_outputs",
+    "incompatible_auto_exec_groups",
     "platform_mappings",
     "shell_executable",
     "strict_filesets",
+    "use_target_platform_for_tests",
 ];
 
 /// How the command line gives a native option.

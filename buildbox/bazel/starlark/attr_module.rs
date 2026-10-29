@@ -65,14 +65,21 @@ impl<'v, V: ValueLike<'v>> AttributeGen<V> {
         })
     }
 
-    /// Whether the dependency's configuration is one a transition gives: a
-    /// Starlark transition, or one of Bazel's that bb only stands in for.
+    /// For `cfg = config.exec("group")`: the exec group whose execution
+    /// platform the dependency is built for.
+    pub fn exec_group(&self) -> Option<String> {
+        let choice = self.cfg?.to_value().downcast_ref::<ConfigChoice>()?;
+        choice.exec_group.clone()
+    }
+
     /// Whether the dependency is built without a configuration: `cfg =
     /// config.none()`.
     pub fn is_unconfigured(&self) -> bool {
         self.cfg.is_some_and(|cfg| cfg.to_value().downcast_ref::<ConfigChoice>().is_some_and(|choice| choice.kind == ConfigKind::None))
     }
 
+    /// Whether the dependency's configuration is one a transition gives: a
+    /// Starlark transition, or one of Bazel's that bb only stands in for.
     pub fn has_transition(&self) -> bool {
         self.cfg.is_some_and(|cfg| {
             let cfg = cfg.to_value();

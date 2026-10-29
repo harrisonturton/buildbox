@@ -379,6 +379,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("tvos_sdk_version", String, Null),
         option("use_ijars", Bool, Text("true")),
         option("use_platforms_in_apple_crosstool_transition", Bool, Text("false")),
+        option("use_target_platform_for_tests", Bool, Text("false")),
         option("watchos_sdk_version", String, Null),
         option("xcode_version", String, Null),
         option("xcode_version_config", Label, Text("@@bazel_tools//tools/cpp:host_xcodes")),

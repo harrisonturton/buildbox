@@ -16,6 +16,7 @@ rust_library(
         "depset.rs",
         "dotted_version.rs",
         "eval.rs",
+        "exec_group.rs",
         "fields.rs",
         "instantiate.rs",
         "hash.rs",

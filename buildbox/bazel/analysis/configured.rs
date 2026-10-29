@@ -10,7 +10,7 @@ use crate::build_ctx::{self, Dep, RuleInput};
 use crate::failure::{AttributeErrors, ImplementationFailed, ProvidersClash};
 use crate::platform::PlatformKey;
 use crate::providers;
-use crate::toolchains::{self, ResolvedToolchains};
+use crate::toolchains::{self, ExecConstraints, ResolvedToolchains};
 use crate::transition::{AttrConfigs, ExecConfigKey, configured_key, dep_configs};
 use bazel_config::{AspectDescriptor, ConfigId};
 use bazel_label::Label;
@@ -435,13 +435,22 @@ pub(crate) async fn setup(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule, clas
         Implementation::Starlark { rule, .. } => crate::transition::attr_configs(ctx, label, rule, &attrs, deps_config).await?,
         Implementation::Builtin { .. } | Implementation::Native(_) => Vec::new(),
     };
-    let toolchains = match toolchains::resolve(ctx, label, &class, &config, &attr_labels(&attrs, "exec_compatible_with")).await {
+    let constraints = match exec_constraints(ctx, label, &class, &attrs).await? {
+        Ok(constraints) => constraints,
+        Err(message) => return Err(located(ctx, label, message).await.with_origin(label.to_string())),
+    };
+    let toolchains = match toolchains::resolve(ctx, label, &class, &config, &constraints).await {
         Ok(toolchains) => toolchains,
         Err(error) if error.origin().is_some() => return Err(error),
         Err(error) => return Err(toolchain_error(ctx, key, error).await),
     };
     let exec_platform = toolchains.exec_platform.unwrap_or(config.host_platform);
     let exec_config = exec_config(ctx, &class, deps_config, exec_platform).await?;
+    let mut attr_configs = attr_configs;
+    match exec_group_configs(ctx, &class, deps_config, &toolchains).await? {
+        Ok(group_configs) => attr_configs.extend(group_configs),
+        Err(message) => return Err(located(ctx, label, message).await.with_origin(label.to_string())),
+    }
     let attr_configs = crate::aspect::with_attached_aspects(ctx, &class, &attrs, deps_config, exec_config, attr_configs).await?;
     Ok(Setup::Ready(RuleSetup {
         class,
@@ -587,10 +596,63 @@ pub(crate) fn attr_labels(attrs: &[(Symbol, AttrValue)], name: &str) -> Vec<Labe
     }
 }
 
+/// What a target asks of the execution platforms of the rule and its exec
+/// groups, or Bazel's error for an `exec_group_compatible_with` naming a
+/// group the rule doesn't have.
+async fn exec_constraints(ctx: &Ctx, label: Label, class: &RuleClass, attrs: &[(Symbol, AttrValue)]) -> Result<Result<ExecConstraints, String>, SkyError> {
+    let mut constraints = ExecConstraints {
+        target: attr_labels(attrs, "exec_compatible_with"),
+        groups: Vec::new(),
+    };
+    let name = Symbol::intern("exec_group_compatible_with");
+    let Some((_, AttrValue::StringListDict(groups))) = attrs.iter().find(|(attr, _)| *attr == name) else {
+        return Ok(Ok(constraints));
+    };
+    let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
+    let context = bazel_label::LabelContext::new(label.package, &mapping.0);
+    for (group, texts) in groups {
+        if !class.exec_groups.iter().any(|declared| declared.name.as_str() == group) {
+            let declared: Vec<String> = class.exec_groups.iter().map(|declared| declared.name.to_string()).collect();
+            let suggestion = bazel_starlark::reported::did_you_mean(group, &declared);
+            return Ok(Err(format!("Tried to set execution constraints for non-existent exec groups on {label}: {group}{suggestion}")));
+        }
+        let mut labels = Vec::with_capacity(texts.len());
+        for text in texts {
+            match Label::parse(text, &context) {
+                Ok(parsed) => labels.push(parsed),
+                Err(error) => return Ok(Err(format!("in exec_group_compatible_with attribute of {label}: invalid label '{text}': {error}"))),
+            }
+        }
+        constraints.groups.push((Symbol::intern(group), labels));
+    }
+    Ok(Ok(constraints))
+}
+
+/// The configurations of the dependencies of attributes with `cfg =
+/// config.exec("group")`: their exec group's execution platform's, or
+/// Bazel's error for a group the rule doesn't have.
+async fn exec_group_configs(ctx: &Ctx, class: &RuleClass, config: ConfigId, toolchains: &ResolvedToolchains) -> Result<Result<AttrConfigs, String>, SkyError> {
+    let mut configs = Vec::new();
+    for schema in &class.attrs {
+        let Cfg::Exec(Some(group)) = schema.cfg else {
+            continue;
+        };
+        let Some(resolved) = toolchains.group(group) else {
+            let name = schema.name.as_str();
+            let name = name.strip_prefix('_').map(|rest| format!("${rest}")).unwrap_or_else(|| name.to_string());
+            return Ok(Err(format!("Attr '{name}' declares a transition for non-existent exec group '{group}'")));
+        };
+        let platform = resolved.exec_platform.unwrap_or(config.get().host_platform);
+        let exec = ctx.compute(&ExecConfigKey { config, platform }).await?;
+        configs.push((schema.name, vec![(String::new(), exec.0)]));
+    }
+    Ok(Ok(configs))
+}
+
 /// The configuration of a rule's tools, which run on `platform`: its exec
 /// configuration, if it has attributes for tools.
 pub(crate) async fn exec_config(ctx: &Ctx, class: &RuleClass, config: ConfigId, platform: Label) -> Result<ConfigId, SkyError> {
-    if !class.attrs.iter().any(|schema| schema.cfg == Cfg::Exec) {
+    if !class.attrs.iter().any(|schema| matches!(schema.cfg, Cfg::Exec(_))) {
         return Ok(config);
     }
     let exec = ctx.compute(&ExecConfigKey { config, platform }).await?;
@@ -725,7 +787,12 @@ async fn dependency_edges(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package
     for toolchain_type in setup.class.toolchain_types.iter().chain(&setup.class.optional_toolchain_types) {
         add_edge(&mut edges, ConfiguredDep { label: *toolchain_type, config: Some(setup.deps_config), implicit: true });
     }
-    for target in setup.toolchains.resolved.iter().filter_map(|(_, target)| target.as_ref()) {
+    for group in &setup.class.exec_groups {
+        for toolchain_type in &group.toolchain_types {
+            add_edge(&mut edges, ConfiguredDep { label: *toolchain_type, config: Some(setup.deps_config), implicit: true });
+        }
+    }
+    for target in setup.toolchains.all() {
         add_edge(&mut edges, ConfiguredDep { label: target.label, config: Some(target.config), implicit: true });
     }
     let config = key.config.get();
@@ -983,10 +1050,8 @@ pub(crate) fn fingerprint(
     for dep in deps.values() {
         dep.fingerprint(&mut fingerprinter);
     }
-    for (_, toolchain) in &toolchains.resolved {
-        if let Some(toolchain) = toolchain {
-            fingerprinter.bytes(toolchain.fingerprint.as_bytes());
-        }
+    for toolchain in toolchains.all() {
+        fingerprinter.bytes(toolchain.fingerprint.as_bytes());
     }
     fingerprinter.finish()
 }

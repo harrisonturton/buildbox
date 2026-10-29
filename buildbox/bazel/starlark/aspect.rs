@@ -4,7 +4,7 @@
 use crate::attr_module::Attribute;
 use crate::context::EvalContext;
 use crate::convert::LabelParser;
-use crate::rule_value::{attr_schema, exec_group_names, provider_key, toolchain_labels};
+use crate::rule_value::{attr_schema, provider_key, toolchain_labels};
 use allocative::Allocative;
 use bazel_label::Label;
 use bazel_packages::{AspectRef, AttrType, RuleClass};
@@ -222,7 +222,7 @@ impl<'v, V: ValueLike<'v>> AspectGen<V> {
         class.attrs = attrs;
         class.toolchain_types = toolchain_types;
         class.optional_toolchain_types = optional_toolchain_types;
-        class.exec_groups = exec_group_names(self.exec_groups.map(|groups| groups.to_value()), "aspect")?;
+        class.exec_groups = crate::exec_group::exec_groups(self.exec_groups.map(|groups| groups.to_value()), "aspect")?;
         let mut propagated = Vec::with_capacity(self.toolchains_aspects.len());
         for text in self.toolchains_aspects.iter().filter(|text| *text != "*") {
             let label = parser.parse(text).map_err(|error| anyhow::anyhow!("Unable to parse label '{text}' in attribute 'toolchains_aspects': {error}"))?;
