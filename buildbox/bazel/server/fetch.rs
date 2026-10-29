@@ -32,7 +32,10 @@ pub async fn fetch(context: &CommandContext<'_>, args: &[String], out: &Output) 
         return fetch_targets(context, &options, started, out).await;
     }
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    crate::command::refresh(context, &workspace, &options).await;
+    if let Err(message) = crate::command::refresh(context, &workspace, &options).await {
+        out.error(&message).await;
+        return crate::command::exit::COMMAND_LINE_ERROR;
+    }
     let session = workspace.graph.session().await;
     let main_mapping = match crate::command::main_mapping(context, &session, &options, out).await {
         Ok(mapping) => mapping,
@@ -67,7 +70,10 @@ pub async fn fetch(context: &CommandContext<'_>, args: &[String], out: &Output) 
 /// Analyze the targets, which fetches the repositories they need.
 async fn fetch_targets(context: &CommandContext<'_>, options: &ParsedOptions, started: Instant, out: &Output) -> i32 {
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    crate::command::refresh(context, &workspace, options).await;
+    if let Err(message) = crate::command::refresh(context, &workspace, options).await {
+        out.error(&message).await;
+        return crate::command::exit::COMMAND_LINE_ERROR;
+    }
     let session = workspace.graph.session().await;
     let built = match build::run(context, &session, options, out).await {
         Ok(built) => built,

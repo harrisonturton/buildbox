@@ -29,6 +29,10 @@ const COMMON_OPTIONS: &[(&str, OptionKind)] = &[
     ("repository_cache", OptionKind::Value),
     ("enable_platform_specific_config", OptionKind::Bool),
     ("registry", OptionKind::Multi),
+    ("override_repository", OptionKind::Multi),
+    ("override_module", OptionKind::Multi),
+    ("inject_repository", OptionKind::Multi),
+    ("ignore_dev_dependency", OptionKind::Bool),
     ("module_mirrors", OptionKind::Multi),
     ("check_direct_dependencies", OptionKind::Value),
     ("check_bazel_compatibility", OptionKind::Value),
@@ -93,7 +97,10 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
     }
     let workspace = context.server.workspaces().get(&context.workspace_root);
     out.track(workspace.progress.track()).await;
-    crate::command::refresh(context, &workspace, &options).await;
+    if let Err(message) = crate::command::refresh(context, &workspace, &options).await {
+        out.error(&message).await;
+        return crate::command::exit::COMMAND_LINE_ERROR;
+    }
     let session = workspace.graph.session().await;
     out.phase(Phase::RepoMapping).await;
     let main_mapping = match crate::command::main_mapping(context, &session, &options, out).await {
@@ -287,7 +294,10 @@ async fn configured_query(context: &CommandContext<'_>, args: &[String], languag
         }
     };
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    crate::command::refresh(context, &workspace, &options).await;
+    if let Err(message) = crate::command::refresh(context, &workspace, &options).await {
+        out.error(&message).await;
+        return crate::command::exit::COMMAND_LINE_ERROR;
+    }
     let session = workspace.graph.session().await;
     let purpose = match language {
         Language::Cquery => Purpose::Query,

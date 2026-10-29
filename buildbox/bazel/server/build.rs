@@ -88,6 +88,10 @@ pub fn build_spec() -> OptionSpec {
         ("show_progress", Bool),
         ("enable_platform_specific_config", Bool),
         ("registry", Multi),
+        ("override_repository", Multi),
+        ("override_module", Multi),
+        ("inject_repository", Multi),
+        ("ignore_dev_dependency", Bool),
         ("module_mirrors", Multi),
         ("workspace_status_command", Value),
         ("embed_label", Value),
@@ -214,7 +218,10 @@ pub async fn build(context: &CommandContext<'_>, args: &[String], out: &Output) 
         Err(code) => return code,
     };
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    crate::command::refresh(context, &workspace, &options).await;
+    if let Err(message) = crate::command::refresh(context, &workspace, &options).await {
+        out.error(&message).await;
+        return crate::command::exit::COMMAND_LINE_ERROR;
+    }
     if let Err(code) = update_status(context, &workspace, &options, out).await {
         return failed(code, started, out).await;
     }

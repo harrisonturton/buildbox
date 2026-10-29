@@ -174,31 +174,26 @@ pub struct DeclaredToolchain {
     pub use_target_platform_constraints: bool,
 }
 
-/// The toolchains and execution platforms the build registers, in order of
-/// precedence.
-#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+/// The toolchains the build registers, in order of precedence.
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
 pub struct RegisteredToolchains {
     pub toolchains: Vec<DeclaredToolchain>,
-    pub execution_platforms: Vec<Label>,
 }
 
 encoded_value!(RegisteredToolchains);
 
-/// The toolchains and execution platforms a configuration registers: those
-/// its `--extra_toolchains` and `--extra_execution_platforms` name, then
-/// those modules register. As in Bazel, the last `--extra_toolchains` comes
-/// first.
+/// The toolchains a configuration registers: those its `--extra_toolchains`
+/// name, then those modules register. As in Bazel, the last
+/// `--extra_toolchains` comes first.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct RegisteredToolchainsKey {
     pub extra_toolchains: Vec<String>,
-    pub extra_execution_platforms: Vec<String>,
 }
 
 impl RegisteredToolchainsKey {
     pub fn of(config: &BuildConfiguration) -> RegisteredToolchainsKey {
         RegisteredToolchainsKey {
             extra_toolchains: config.options.strings("extra_toolchains").to_vec(),
-            extra_execution_platforms: config.options.strings("extra_execution_platforms").to_vec(),
         }
     }
 }
@@ -209,25 +204,52 @@ impl Key for RegisteredToolchainsKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<RegisteredToolchains, SkyError> {
         let registrations = ctx.compute(&RegistrationsKey).await?;
-        let mut toolchain_patterns: Vec<Registered<'_>> = self.extra_toolchains.iter().rev().map(|pattern| Registered::flag(pattern)).collect();
-        let mut platform_patterns: Vec<Registered<'_>> = self.extra_execution_platforms.iter().map(|pattern| Registered::flag(pattern)).collect();
+        let mut patterns: Vec<Registered<'_>> = self.extra_toolchains.iter().rev().map(|pattern| Registered::flag(pattern)).collect();
         for registration in &registrations.0 {
-            toolchain_patterns.extend(registration.toolchains.iter().map(|pattern| Registered::module(registration.repo, pattern)));
-            platform_patterns.extend(registration.execution_platforms.iter().map(|pattern| Registered::module(registration.repo, pattern)));
+            patterns.extend(registration.toolchains.iter().map(|pattern| Registered::module(registration.repo, pattern)));
         }
-        let (labels, execution_platforms) = futures::try_join!(
-            expand(ctx, &toolchain_patterns, "toolchain"),
-            expand(ctx, &platform_patterns, "platform")
-        )?;
+        let labels = expand(ctx, &patterns, "toolchain").await?;
         let mut declared = Vec::with_capacity(labels.len());
         for label in labels {
             declared.push(declared_toolchain(ctx, label));
         }
         let toolchains = futures::future::try_join_all(declared).await?;
-        Ok(RegisteredToolchains {
-            toolchains,
-            execution_platforms,
-        })
+        Ok(RegisteredToolchains { toolchains })
+    }
+}
+
+/// The execution platforms the build registers, in order of precedence.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct RegisteredExecutionPlatforms(pub Vec<Label>);
+
+encoded_value!(RegisteredExecutionPlatforms);
+
+/// The execution platforms a configuration registers: those its
+/// `--extra_execution_platforms` name, then those modules register.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct RegisteredExecutionPlatformsKey {
+    pub extra_execution_platforms: Vec<String>,
+}
+
+impl RegisteredExecutionPlatformsKey {
+    pub fn of(config: &BuildConfiguration) -> RegisteredExecutionPlatformsKey {
+        RegisteredExecutionPlatformsKey {
+            extra_execution_platforms: config.options.strings("extra_execution_platforms").to_vec(),
+        }
+    }
+}
+
+impl Key for RegisteredExecutionPlatformsKey {
+    type Value = RegisteredExecutionPlatforms;
+    const KIND: &'static str = "REGISTERED_EXECUTION_PLATFORMS";
+
+    async fn compute(&self, ctx: &Ctx) -> Result<RegisteredExecutionPlatforms, SkyError> {
+        let registrations = ctx.compute(&RegistrationsKey).await?;
+        let mut patterns: Vec<Registered<'_>> = self.extra_execution_platforms.iter().map(|pattern| Registered::flag(pattern)).collect();
+        for registration in &registrations.0 {
+            patterns.extend(registration.execution_platforms.iter().map(|pattern| Registered::module(registration.repo, pattern)));
+        }
+        Ok(RegisteredExecutionPlatforms(expand(ctx, &patterns, "platform").await?))
     }
 }
 
@@ -391,11 +413,17 @@ impl Key for ToolchainResolutionKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<ToolchainResolution, SkyError> {
         let config = self.config.get();
-        let registered = ctx.compute(&RegisteredToolchainsKey::of(&config)).await?;
+        let registered = match self.types.is_empty() {
+            true => Arc::new(RegisteredToolchains::default()),
+            false => ctx.compute(&RegisteredToolchainsKey::of(&config)).await?,
+        };
         let target = ctx.compute(&PlatformKey(config.platform)).await?;
         let platforms = match self.forced_exec_platform {
             Some(platform) => vec![platform],
-            None => execution_platforms(&registered, config.host_platform),
+            None => {
+                let registered_platforms = ctx.compute(&RegisteredExecutionPlatformsKey::of(&config)).await?;
+                execution_platforms(&registered_platforms.0, config.host_platform)
+            }
         };
         let mut allowed = Vec::with_capacity(platforms.len());
         for platform in platforms {
@@ -548,8 +576,8 @@ impl ToolchainResolutionKey {
 
 /// The execution platforms toolchain resolution chooses from, in order:
 /// those registered, then the host platform, each once.
-fn execution_platforms(registered: &RegisteredToolchains, host_platform: Label) -> Vec<Label> {
-    let mut platforms = registered.execution_platforms.clone();
+fn execution_platforms(registered: &[Label], host_platform: Label) -> Vec<Label> {
+    let mut platforms = registered.to_vec();
     if !platforms.contains(&host_platform) {
         platforms.push(host_platform);
     }

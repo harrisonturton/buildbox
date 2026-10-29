@@ -2,6 +2,7 @@
 
 use crate::written::Written;
 use bazel_analysis::workspace_status::{BuildStatus, StatusValues, WorkspaceStatusKey};
+use bazel_bzlmod::command_overrides::{CommandOverrides, CommandOverridesKey, CommandOverridesService};
 use bazel_bzlmod::registry::{CommandRegistries, Registries, RegistriesKey};
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
 use bazel_execution::{Jobs, SourceDigestKey, TestKey};
@@ -40,6 +41,8 @@ pub struct Workspace {
     pub status: Arc<BuildStatus>,
     /// The registries modules are resolved from.
     pub registries: Arc<CommandRegistries>,
+    /// The repositories and modules the command's options replace or add.
+    pub overrides: Arc<CommandOverridesService>,
     /// Which symbols are autoloaded, and where.
     pub autoloads: Arc<CommandAutoloads>,
     /// What builds wrote to the output tree.
@@ -118,6 +121,13 @@ impl Workspace {
         }
     }
 
+    /// Replace and add repositories and modules as these overrides say.
+    pub async fn set_overrides(&self, overrides: CommandOverrides) {
+        if self.overrides.set(overrides) {
+            self.graph.invalidate(&[CommandOverridesKey]).await;
+        }
+    }
+
     /// Autoload symbols as these settings say.
     pub async fn set_autoloads(&self, settings: AutoloadSettings) {
         if self.autoloads.set(settings) {
@@ -166,6 +176,7 @@ impl Workspaces {
         let client_env = ClientEnv::new();
         let status = BuildStatus::new();
         let registries = CommandRegistries::new();
+        let overrides = CommandOverridesService::new();
         let autoloads = CommandAutoloads::new();
         let progress = Progress::new();
         let jobs = Arc::new(Jobs::default());
@@ -177,6 +188,7 @@ impl Workspaces {
             .with(client_env.clone())
             .with(status.clone())
             .with(registries.clone())
+            .with(overrides.clone())
             .with(autoloads.clone())
             .with(progress.clone())
             .with(jobs.clone());
@@ -187,6 +199,7 @@ impl Workspaces {
             client_env,
             status,
             registries,
+            overrides,
             autoloads,
             written: Arc::default(),
             progress,

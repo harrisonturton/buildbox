@@ -21,7 +21,10 @@ pub async fn run(context: &CommandContext<'_>, args: &[String], out: &Output) ->
     };
     let program_args = options.residue.split_off(1);
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    crate::command::refresh(context, &workspace, &options).await;
+    if let Err(message) = crate::command::refresh(context, &workspace, &options).await {
+        out.error(&message).await;
+        return crate::command::exit::COMMAND_LINE_ERROR;
+    }
     if let Err(code) = build::update_status(context, &workspace, &options, out).await {
         return build::failed(code, started, out).await;
     }

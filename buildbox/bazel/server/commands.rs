@@ -90,7 +90,7 @@ async fn info_output_directory(context: &CommandContext<'_>, options: &ParsedOpt
         return Ok(String::new());
     }
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    crate::command::refresh(context, &workspace, options).await;
+    crate::command::refresh(context, &workspace, options).await?;
     let session = workspace.graph.session().await;
     crate::build::output_directory(context, &session, options).await
 }

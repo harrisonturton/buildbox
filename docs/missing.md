@@ -161,9 +161,8 @@ and Bazel's summaries work as in Bazel. Missing:
   `--lockfile_mode` other than `update` is an error. `extension_metadata`
   and `repo_metadata(reproducible = ...)` are accepted and ignored, so
   there are no `use_repo` fix-up warnings.
-- **Options:** `--override_module`, `--override_repository` and
-  `--ignore_dev_dependency` aren't implemented. Nor are credential helpers
-  (`--credential_helper`); downloads use `.netrc` only.
+- **Credential helpers** (`--credential_helper`) aren't implemented;
+  downloads use `.netrc` only.
 - **Repository rules:**
   - `repository_ctx.getenv` doesn't make the repository depend on the
     variable, and `watch`, `watch_tree` and `read(watch = ...)` do nothing
@@ -241,8 +240,8 @@ like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
 
 ## Suggested order
 
-1. `--override_repository` and `--override_module`, credential helpers,
-   and repository rules' `getenv` and `watch` (section 8).
+1. Credential helpers, and repository rules' `getenv` and `watch`
+   (section 8).
 2. The lockfile (section 8).
 3. `map_each` over directories (section 4).
 4. The remote platform (section 2).

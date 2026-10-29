@@ -9,6 +9,7 @@
 
 pub mod attrs;
 pub mod bootstrap;
+pub mod command_overrides;
 pub mod config;
 pub mod extension;
 pub mod fetch_repo;

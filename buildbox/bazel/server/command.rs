@@ -4,6 +4,7 @@ use crate::output::Output;
 use crate::running::RunningCommand;
 use crate::BazelServer;
 use crate::workspace;
+use bazel_bzlmod::command_overrides::CommandOverrides;
 use bazel_bzlmod::registry::Registries;
 use bazel_bzlmod::repo_env::RepoEnvironment;
 use bazel_loading::autoload::AutoloadSettings;
@@ -33,9 +34,11 @@ pub fn repo_environment(context: &CommandContext<'_>, options: &ParsedOptions) -
 }
 
 /// Give the workspace's graph the command's inputs from outside it: the
-/// environment, `--registry`, `--module_mirrors` and the files that
-/// changed.
-pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Workspace, options: &ParsedOptions) {
+/// environment, `--registry`, `--module_mirrors`, the overrides of
+/// repositories and modules, and the files that changed. Returns the error
+/// for an override the options give wrongly.
+pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Workspace, options: &ParsedOptions) -> Result<(), String> {
+    let overrides = command_overrides(context, options)?;
     workspace.refresh(repo_environment(context, options)).await;
     let urls = |name: &str| options.all(name).into_iter().map(|url| url.trim_end_matches('/').to_string()).collect();
     let mirrors = options.all("module_mirrors").into_iter().flat_map(|list| list.split(',')).filter(|url| !url.is_empty());
@@ -44,7 +47,61 @@ pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Worksp
         mirrors: mirrors.map(|url| url.trim_end_matches('/').to_string()).collect(),
     };
     workspace.set_registries(registries).await;
+    workspace.set_overrides(overrides).await;
     workspace.set_autoloads(autoload_settings(context, options)).await;
+    Ok(())
+}
+
+/// The overrides of repositories and modules the options give.
+fn command_overrides(context: &CommandContext<'_>, options: &ParsedOptions) -> Result<CommandOverrides, String> {
+    Ok(CommandOverrides {
+        repositories: path_overrides(context, options, "override_repository", "Repository overrides must be of the form 'repository-name=path'")?,
+        modules: path_overrides(context, options, "override_module", "Module overrides must be of the form 'module-name=path'")?,
+        injections: path_overrides(context, options, "inject_repository", "Repository injections must be of the form 'repository-name=path'")?,
+        ignore_dev_dependency: options.flag("ignore_dev_dependency", false),
+    })
+}
+
+/// The `name=path` pairs an option gives, as Bazel reads them: the last
+/// path given for a name wins, and an empty one removes the name. Paths
+/// may start with `~` or `%workspace%`, and relative ones are relative to
+/// the working directory.
+fn path_overrides(context: &CommandContext<'_>, options: &ParsedOptions, option: &str, form: &str) -> Result<Vec<(String, String)>, String> {
+    let mut overrides: Vec<(String, String)> = Vec::new();
+    for given in options.all(option) {
+        let Some((name, path)) = given.split_once('=') else {
+            return Err(format!("While parsing option --{option}={given}: {form}"));
+        };
+        if !is_valid_repo_name(name) {
+            return Err(format!("While parsing option --{option}={given}: Invalid repository name given to override"));
+        }
+        overrides.retain(|(overridden, _)| overridden != name);
+        if !path.is_empty() {
+            overrides.push((name.to_string(), absolute_path(context, path)));
+        }
+    }
+    Ok(overrides)
+}
+
+/// Whether a name given to an override can name a repository: an apparent
+/// name, or a canonical one, which has a `+`.
+fn is_valid_repo_name(name: &str) -> bool {
+    let first = name.chars().next();
+    let valid_start = first.is_some_and(|c| c.is_ascii_alphanumeric() || (name.contains('+') && c == '_'));
+    valid_start && name.chars().all(|c| c.is_ascii_alphanumeric() || "_-.+~".contains(c))
+}
+
+/// A path an option gives, absolute: `~` is the client's home directory,
+/// `%workspace%` the workspace, and a relative path is relative to the
+/// working directory.
+fn absolute_path(context: &CommandContext<'_>, path: &str) -> String {
+    let home = context.env.get("HOME").cloned().unwrap_or_default();
+    let path = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{home}{rest}"),
+        _ => path.to_string(),
+    };
+    let path = path.replace("%workspace%", &context.workspace_root.display().to_string());
+    context.working_directory.join(path).display().to_string()
 }
 
 /// The autoloads the options ask for. A workspace whose `.bazelversion`

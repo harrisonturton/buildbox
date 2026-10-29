@@ -243,6 +243,9 @@ pub trait IncludeReader {
 struct ModuleContext<'a> {
     file: RefCell<ModuleFile>,
     is_root: bool,
+    /// Whether to leave out the root module's dev dependencies too, as
+    /// `--ignore_dev_dependency` asks.
+    ignore_dev: bool,
     includes: Option<&'a dyn IncludeReader>,
     module_called: RefCell<bool>,
 }
@@ -268,7 +271,7 @@ impl ModuleContext<'_> {
     /// Whether a declaration should be dropped: dev dependencies only count
     /// in the root module.
     fn ignores(&self, dev: bool) -> bool {
-        dev && !self.is_root
+        dev && (!self.is_root || self.ignore_dev)
     }
 }
 
@@ -280,6 +283,7 @@ pub fn evaluate(file_name: &str, source: &str, is_root: bool, includes: Option<&
     let context = ModuleContext {
         file: RefCell::new(ModuleFile::default()),
         is_root,
+        ignore_dev: false,
         includes,
         module_called: RefCell::new(false),
     };
@@ -314,11 +318,12 @@ pub struct ModuleFileError {
 }
 
 /// Evaluate the root module's MODULE.bazel, reporting an error as Bazel
-/// does.
-pub fn evaluate_root(source: &str, includes: Option<&dyn IncludeReader>) -> Result<ModuleFile, ModuleFileError> {
+/// does, without its dev dependencies if `ignore_dev` says so.
+pub fn evaluate_root(source: &str, includes: Option<&dyn IncludeReader>, ignore_dev: bool) -> Result<ModuleFile, ModuleFileError> {
     let context = ModuleContext {
         file: RefCell::new(ModuleFile::default()),
         is_root: true,
+        ignore_dev,
         includes,
         module_called: RefCell::new(false),
     };

@@ -7,6 +7,7 @@ use crate::module_file::{self, BazelDep, IncludeReader, ModuleFile, ModuleFileEr
 use crate::fetch_repo::read_label_patch;
 use crate::registry::{self, Registries, RegistriesKey, RegistryFileKey, RegistryLookup, RegistryModule, RegistryModuleKey};
 use crate::selection::{self, DepSpec, Interim, ModuleKey, MultipleVersions, Selection};
+use crate::command_overrides::CommandOverridesKey;
 use crate::repo_spec::{OverrideSpec, RepoRuleSpec, RepoSpec};
 use crate::star_value::StarValue;
 use bazel_fs::{Root, RootedPath, WorkspaceRootKey};
@@ -49,13 +50,23 @@ impl Key for RootModuleKey {
         };
         let source = String::from_utf8_lossy(&bytes).into_owned();
         let reader = Includes::new(ctx, RepoName::MAIN, Root::Workspace);
-        let file = tokio::task::spawn_blocking(move || module_file::evaluate_root(&source, Some(&reader)))
+        let command = ctx.compute(&CommandOverridesKey).await?;
+        let ignore_dev = command.ignore_dev_dependency;
+        let file = tokio::task::spawn_blocking(move || module_file::evaluate_root(&source, Some(&reader), ignore_dev))
             .await
             .map_err(|error| SkyError::transient(error.to_string()))?;
-        match file {
-            Ok(file) => Ok(ModuleFileValue { file, error: None }),
-            Err(error) => Ok(ModuleFileValue { file: ModuleFile::default(), error: Some(error) }),
+        let mut file = match file {
+            Ok(file) => file,
+            Err(error) => return Ok(ModuleFileValue { file: ModuleFile::default(), error: Some(error) }),
+        };
+        if let Err(message) = command.inject(&mut file) {
+            let error = ModuleFileError {
+                error: bazel_packages::PackageError::new(message),
+                summary: "error executing MODULE.bazel file for the root module".to_string(),
+            };
+            return Ok(ModuleFileValue { file: ModuleFile::default(), error: Some(error) });
         }
+        Ok(ModuleFileValue { file, error: None })
     }
 }
 
@@ -331,7 +342,8 @@ impl Key for DepGraphKey {
         }
         let root = root.file.clone();
         let registries = (*ctx.compute(&RegistriesKey).await?).clone();
-        let overrides: HashMap<String, Override> = root.overrides.iter().cloned().collect();
+        let command = ctx.compute(&CommandOverridesKey).await?;
+        let overrides: HashMap<String, Override> = command.module_overrides(&root).into_iter().collect();
         let discovery = discover(ctx, &config, &registries, &root, &overrides).await?;
         check_overrides_exist(&root, &discovery)?;
         let graph = interim_graph(&root, &discovery, &overrides);

@@ -34,7 +34,10 @@ pub async fn mod_command(context: &CommandContext<'_>, args: &[String], out: &Ou
         return exit::COMMAND_LINE_ERROR;
     }
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    crate::command::refresh(context, &workspace, &options).await;
+    if let Err(message) = crate::command::refresh(context, &workspace, &options).await {
+        out.error(&message).await;
+        return crate::command::exit::COMMAND_LINE_ERROR;
+    }
     let session = workspace.graph.session().await;
     if let Err(code) = crate::command::main_mapping(context, &session, &options, out).await {
         return code;

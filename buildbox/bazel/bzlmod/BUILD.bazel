@@ -7,6 +7,7 @@ rust_library(
     srcs = [
         "attrs.rs",
         "bootstrap.rs",
+        "command_overrides.rs",
         "bzlmod.rs",
         "config.rs",
         "extension.rs",

@@ -56,7 +56,10 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     };
     let epoch = bazel_execution::next_epoch();
     let workspace = context.server.workspaces().get(&context.workspace_root);
-    crate::command::refresh(context, &workspace, &options).await;
+    if let Err(message) = crate::command::refresh(context, &workspace, &options).await {
+        out.error(&message).await;
+        return crate::command::exit::COMMAND_LINE_ERROR;
+    }
     if let Err(code) = build::update_status(context, &workspace, &options, out).await {
         return build::failed(code, started, out).await;
     }

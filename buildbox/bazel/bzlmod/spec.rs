@@ -1,11 +1,39 @@
 //! Finding the spec of any repository.
 
+use crate::command_overrides::{CommandOverrides, CommandOverridesKey};
 use crate::repo_spec::{RepoRuleSpec, RepoSpec};
-use crate::resolve::DepGraphKey;
-use bazel_label::{Label, LabelContext, PackageId, RepoName};
+use crate::resolve::{DepGraph, DepGraphKey};
+use bazel_label::{Label, LabelContext, PackageId, RepoMapping, RepoName};
 use intern::PathId;
 use skycodec::{Decode, Encode};
 use skyframe::{Ctx, Key, SkyError};
+
+/// The directory replacing `repo`, if an override names it by the apparent
+/// name the main repository sees it by, or Bazel's error for an override
+/// of an apparent name the main repository doesn't have.
+fn overridden_by_apparent_name<'a>(graph: &DepGraph, command: &'a CommandOverrides, repo: RepoName) -> Result<Option<&'a str>, SkyError> {
+    let mut apparent = command.by_apparent_name().peekable();
+    if apparent.peek().is_none() {
+        return Ok(None);
+    }
+    let Some((root, _)) = graph.module(RepoName::MAIN) else {
+        return Ok(None);
+    };
+    let mapping = graph.module_mapping(root);
+    for (name, path) in apparent {
+        let Some(canonical) = mapping.resolve(name) else {
+            let visible: Vec<String> = mapping.entries.iter().map(|(apparent, _)| format!("@{apparent}")).collect();
+            let suggestion = bazel_starlark::reported::did_you_mean(name, &visible);
+            return Err(SkyError::new(format!(
+                "no repository visible as '@{name}'{suggestion} from the main repository, but overridden with --override_repository. Use --inject_repository to add new repositories."
+            )));
+        };
+        if canonical == repo {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
 
 /// How a repository is made: from the dependency graph for modules and
 /// `use_repo_rule` repositories, or from a module extension's result.
@@ -18,10 +46,17 @@ impl Key for RepoSpecKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<RepoSpec, SkyError> {
         let repo = self.0;
+        let command = ctx.compute(&CommandOverridesKey).await?;
+        if let Some(path) = command.repository(repo.as_str()) {
+            return Ok(RepoSpec::Local { path: path.to_string() });
+        }
         if repo.as_str() == "local_config_platform" {
             return Ok(RepoSpec::HostPlatform);
         }
         let graph = ctx.compute(&DepGraphKey).await?;
+        if let Some(path) = overridden_by_apparent_name(&graph, &command, repo)? {
+            return Ok(RepoSpec::Local { path: path.to_string() });
+        }
         if let Some((_, module)) = graph.module(repo) {
             return module.spec.clone().ok_or_else(|| SkyError::new("the main repository isn't fetched"));
         }
