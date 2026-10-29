@@ -53,6 +53,12 @@ pub(crate) fn query_spec() -> OptionSpec {
         ("graph:node_limit", Int),
         ("graph:conditional_edges_limit", Int),
     ]);
+    // `query` loads packages without configuring them, so it takes the
+    // configuration options Bazel's does, which `.bazelrc` files often give
+    // in `common` lines, and ignores them.
+    let takes = |name: &str| bazel_options::bazel_option(name).is_some_and(|option| option.takes("query"));
+    let native = bazel_config::command_line_options().filter(|option| takes(option.name));
+    options.extend(native.map(|option| (option.name, build::option_kind(option))));
     OptionSpec::new(&options)
 }
 

@@ -88,9 +88,10 @@ pub const NO_OP_OPTIONS: &[(&str, OptionKind)] = &[
 ];
 
 /// Native options configurations have that bb doesn't act on yet, so
-/// they may only be given their defaults.
+/// they may only be given their defaults. `--build_runfile_links` isn't
+/// among them though bb doesn't act on it either: bb always builds runfile
+/// links, which `--nobuild_runfile_links` only saves the work of.
 const UNSUPPORTED_NATIVE_OPTIONS: &[&str] = &[
-    "build_runfile_links",
     "build_runfile_manifests",
     "check_licenses",
     "enable_runfiles",
@@ -105,7 +106,7 @@ const UNSUPPORTED_NATIVE_OPTIONS: &[&str] = &[
 ];
 
 /// How the command line gives a native option.
-fn option_kind(option: &NativeOption) -> OptionKind {
+pub(crate) fn option_kind(option: &NativeOption) -> OptionKind {
     match option.ty {
         OptionType::Bool => OptionKind::Bool,
         OptionType::Int => OptionKind::Int,
