@@ -1,6 +1,5 @@
 //! The schemas of rule classes, for queries over packages.
 
-use crate::bzl::BzlLoadKey;
 use bazel_label::Label;
 use bazel_packages::{RuleClass, RuleClassRef};
 use bazel_starlark::native_rules::NATIVE_RULES;
@@ -35,7 +34,7 @@ impl Key for RuleClassKey {
         if is_build_file(self.bzl) {
             return defined_in_build_file(ctx, self.bzl, self.name).await;
         }
-        let module = ctx.compute(&BzlLoadKey(self.bzl)).await?;
+        let module = ctx.compute(&crate::bzl_key_for_build(ctx, self.bzl).await?).await?;
         let missing = || SkyError::new(format!("{} doesn't export a rule named '{}'", self.bzl, self.name));
         let (value, _) = module.module.get_any_visibility(self.name.as_str()).map_err(|_| missing())?;
         let rule = StarlarkRule::from_value(value.value()).ok_or_else(missing)?;

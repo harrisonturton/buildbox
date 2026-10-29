@@ -39,6 +39,10 @@ pub struct Builtins {
     /// define in Starlark.
     pub exec_transition: Option<OwnedFrozenValue>,
     fingerprint: Fingerprint,
+    /// The rules and top-level values builtins export, in `_exports`'s
+    /// heap.
+    rules: Vec<(String, FrozenValue)>,
+    toplevels: Vec<(String, FrozenValue)>,
     _exports: Option<FrozenModule>,
 }
 
@@ -76,6 +80,8 @@ impl Key for BuiltinsKey {
                 rule_classes: HashMap::new(),
                 exec_transition: None,
                 fingerprint: Fingerprint::of(b"no builtins"),
+                rules: Vec::new(),
+                toplevels: Vec::new(),
                 _exports: None,
             });
         };
@@ -118,8 +124,8 @@ fn evaluate(dir: &Path, mapping: RepoMappingTable) -> anyhow::Result<Builtins> {
         .map_err(|_| anyhow::anyhow!("common/builtin_exec_platforms.bzl doesn't define bazel_exec_transition"))?;
     let fingerprint = Fingerprint::of(dir.display().to_string().as_bytes());
     let starlark_builtins = StarlarkBuiltins {
-        rules,
-        toplevels,
+        rules: rules.clone(),
+        toplevels: toplevels.clone(),
         heap: exports.frozen_heap(),
         id: fingerprint.to_string(),
     };
@@ -129,11 +135,25 @@ fn evaluate(dir: &Path, mapping: RepoMappingTable) -> anyhow::Result<Builtins> {
         rule_classes,
         exec_transition: Some(exec_transition),
         fingerprint,
+        rules,
+        toplevels,
         _exports: Some(exports),
     })
 }
 
 impl Builtins {
+    /// What builtins export, for making globals with other changes, or
+    /// `None` if there are no builtins.
+    pub fn starlark_builtins(&self) -> Option<StarlarkBuiltins<'_>> {
+        let exports = self._exports.as_ref()?;
+        Some(StarlarkBuiltins {
+            rules: self.rules.clone(),
+            toplevels: self.toplevels.clone(),
+            heap: exports.frozen_heap(),
+            id: self.fingerprint.to_string(),
+        })
+    }
+
     /// The implementation function of a builtin rule, by name.
     pub fn rule_implementation(&self, kind: &str) -> Option<OwnedFrozenValue> {
         let rules = self._exports.as_ref()?.get("exported_rules").ok()?;

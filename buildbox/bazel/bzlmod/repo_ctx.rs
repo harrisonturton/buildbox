@@ -106,7 +106,7 @@ fn repo_methods(builder: &mut MethodsBuilder) {
 /// Fetch a repository by running its repository rule.
 pub async fn fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec) -> Result<FetchedRepo, SkyError> {
     let config = ctx.global::<BzlmodConfig>()?;
-    let module = ctx.compute(&BzlLoadKey(spec.bzl)).await?;
+    let module = ctx.compute(&BzlLoadKey::for_bzlmod(spec.bzl)).await?;
     let mappings = mappings(ctx, &module, spec.base_repo).await?;
     let inputs = main_repo_inputs(ctx, spec).await?;
     let definer = defining_repo_dir(ctx, spec).await?;

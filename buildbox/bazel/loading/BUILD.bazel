@@ -5,6 +5,7 @@ package(default_visibility = ["//visibility:private"])
 rust_library(
     name = "loading",
     srcs = [
+        "autoload.rs",
         "builtins.rs",
         "bzl.rs",
         "loading.rs",

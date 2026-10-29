@@ -6,6 +6,7 @@ use bazel_bzlmod::registry::{CommandRegistries, Registries, RegistriesKey};
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
 use bazel_execution::{Jobs, SourceDigestKey, TestKey};
 use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
+use bazel_loading::autoload::{AutoloadSettings, AutoloadSettingsKey, CommandAutoloads};
 use bazel_progress::Progress;
 use skyframe::{Engine, Globals, Graph};
 use std::collections::HashMap;
@@ -39,6 +40,8 @@ pub struct Workspace {
     pub status: Arc<BuildStatus>,
     /// The registries modules are resolved from.
     pub registries: Arc<CommandRegistries>,
+    /// Which symbols are autoloaded, and where.
+    pub autoloads: Arc<CommandAutoloads>,
     /// What builds wrote to the output tree.
     pub written: Arc<Written>,
     /// What the graph's evaluations are doing, for progress output.
@@ -115,6 +118,13 @@ impl Workspace {
         }
     }
 
+    /// Autoload symbols as these settings say.
+    pub async fn set_autoloads(&self, settings: AutoloadSettings) {
+        if self.autoloads.set(settings) {
+            self.graph.invalidate(&[AutoloadSettingsKey]).await;
+        }
+    }
+
     /// Give builds' status files these values.
     pub async fn set_status(&self, values: StatusValues) {
         if self.status.set(values) {
@@ -156,6 +166,7 @@ impl Workspaces {
         let client_env = ClientEnv::new();
         let status = BuildStatus::new();
         let registries = CommandRegistries::new();
+        let autoloads = CommandAutoloads::new();
         let progress = Progress::new();
         let jobs = Arc::new(Jobs::default());
         let globals = self
@@ -166,6 +177,7 @@ impl Workspaces {
             .with(client_env.clone())
             .with(status.clone())
             .with(registries.clone())
+            .with(autoloads.clone())
             .with(progress.clone())
             .with(jobs.clone());
         let workspace = Arc::new(Workspace {
@@ -175,6 +187,7 @@ impl Workspaces {
             client_env,
             status,
             registries,
+            autoloads,
             written: Arc::default(),
             progress,
             jobs,

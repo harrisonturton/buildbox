@@ -99,7 +99,7 @@ async fn load_package(ctx: &Ctx, id: PackageId) -> Result<LoadedPackage, SkyErro
     let load_labels = prepared.load_labels();
     let (mut package, printed) = blocking(move || {
         let (loads, context, builder) = prepared.evaluation();
-        bazel_starlark::eval_build(ast, &prepared.builtins.build, &loads, context, builder)
+        bazel_starlark::eval_build(ast, &prepared.globals, &loads, context, builder)
     })
     .await?;
     crate::report_printed(ctx, &printed).await;
@@ -125,12 +125,12 @@ impl Key for BuildModuleKey {
         };
         let load_labels = prepared.load_labels();
         let label = prepared.build_label;
-        let fingerprint = crate::bzl::fingerprint(label, &prepared.source, &prepared.mapping, &prepared.loaded);
+        let fingerprint = crate::bzl::fingerprint(label, &prepared.source, &prepared.mapping, &prepared.loaded, prepared.context);
         let repos = prepared.repos.clone();
         let name = bazel_starlark::heap_name("build", label, fingerprint);
         let (_, module) = blocking(move || {
             let (loads, context, builder) = prepared.evaluation();
-            bazel_starlark::eval_build_module(ast, &prepared.builtins.build, &loads, context, builder, name)
+            bazel_starlark::eval_build_module(ast, &prepared.globals, &loads, context, builder, name)
         })
         .await?;
         let module = module.map_err(|error| SkyError::new(format!("no module for package '{}': {error}", display(id))))?;
@@ -161,7 +161,11 @@ struct Evaluation {
     loaded: Vec<(String, Arc<BzlModule>)>,
     repos: Vec<bazel_label::RepoName>,
     mappings: std::collections::HashMap<bazel_label::RepoName, Arc<RepoMappingTable>>,
-    builtins: Arc<crate::Builtins>,
+    /// The globals the BUILD file is evaluated with.
+    globals: starlark::environment::Globals,
+    /// The context its `.bzl` files are loaded in, which tells its module
+    /// apart from others of the same file.
+    context: crate::bzl::BzlContext,
     module: Option<(String, String)>,
     globber: GraphGlobber,
 }
@@ -202,11 +206,20 @@ async fn prepare(ctx: &Ctx, id: PackageId) -> Result<Prepared, SkyError> {
         Ok(ast) => ast,
         Err(errors) => return Ok(Prepared::Failed(failed_package(id, build_file, errors))),
     };
-    let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), None, &mapping.0).await;
+    let autoloads = ctx.compute(&crate::autoload::AutoloadSettingsKey).await?;
+    let context = match autoloads.enabled() {
+        true => crate::bzl::BzlContext::Build,
+        false => crate::bzl::BzlContext::Plain,
+    };
+    let loaded = load_all(ctx, build_label, &bazel_starlark::loads(&ast), None, &mapping.0, context).await;
     let loaded = loaded.map_err(|error| crate::reworded(&error, |why| format!("error loading package '{}': {why}", display(id))))?;
     let repos = transitive_repos(id.repo, loaded.iter().map(|(_, module)| &**module));
     let mappings = mappings(ctx, &repos).await?;
     let builtins = ctx.compute(&crate::BuiltinsKey).await?;
+    let globals = match (autoloads.enabled(), autoloads.in_build(id.repo)) {
+        (false, _) => builtins.build.clone(),
+        (true, with) => ctx.compute(&crate::autoload::AutoloadGlobalsKey { with }).await?.build.clone(),
+    };
     let module = ctx.global::<crate::Repositories>()?.0.module(ctx, id.repo).await?;
     let globber = GraphGlobber {
         ctx: ctx.clone(),
@@ -222,7 +235,8 @@ async fn prepare(ctx: &Ctx, id: PackageId) -> Result<Prepared, SkyError> {
         loaded,
         repos,
         mappings,
-        builtins,
+        globals,
+        context,
         module,
         globber,
     })))

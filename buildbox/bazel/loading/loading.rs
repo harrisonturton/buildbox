@@ -5,6 +5,7 @@
 //! [`Repositories`] service, which a higher layer (such as Bzlmod)
 //! provides. Everything else is computed from files.
 
+pub mod autoload;
 mod builtins;
 mod bzl;
 mod package;
@@ -13,7 +14,7 @@ mod recursive;
 mod rule_class;
 
 pub use builtins::{BUILTINS_REPO, Builtins, BuiltinsDir, BuiltinsKey, builtins_mapping};
-pub use bzl::{BzlLoadKey, BzlModule, mappings, reworded, split_reported};
+pub use bzl::{BzlContext, BzlLoadKey, BzlModule, bzl_key_for_build, mappings, reworded, split_reported};
 
 pub use package::{BuildModuleKey, LoadedPackage, missing_target_suggestion, PackageKey, PackageLookup, PackageLookupKey, build_file_path, display as display_package, no_such_target, target_location, target_location_in};
 pub use printed::{SourceText, SourceTextKey, error_paths, read_source, report_printed, source_path};
@@ -39,6 +40,14 @@ pub trait RepositoryResolver: Send + Sync + 'static {
     /// `module_name()` and `module_version()` give them.
     fn module<'a>(&'a self, ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<Option<(String, String)>, SkyError>> {
         let _ = (ctx, repo);
+        Box::pin(async { Ok(None) })
+    }
+
+    /// The repository of the highest version of the module `name` in the
+    /// build, unless that version is no newer than `newer_than`, or `None`
+    /// if the build doesn't depend on the module.
+    fn module_repo<'a>(&'a self, ctx: &'a Ctx, name: &'a str, newer_than: Option<&'a str>) -> BoxFuture<'a, Result<Option<RepoName>, SkyError>> {
+        let _ = (ctx, name, newer_than);
         Box::pin(async { Ok(None) })
     }
 

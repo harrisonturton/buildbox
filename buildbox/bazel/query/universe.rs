@@ -602,10 +602,12 @@ impl<C: Compute> Universe<C> {
     /// files.
     pub fn loaded_files<'a>(&'a self, roots: Vec<Label>, seen: &'a mut BTreeSet<Label>) -> BoxFuture<'a, Result<(), QueryError>> {
         Box::pin(async move {
-            let new: Vec<BzlLoadKey> = roots.into_iter().filter(|label| seen.insert(*label)).map(BzlLoadKey).collect();
+            let new: Vec<Label> = roots.into_iter().filter(|label| seen.insert(*label)).collect();
             if new.is_empty() {
                 return Ok(());
             }
+            let autoloads = self.compute.compute(&bazel_loading::autoload::AutoloadSettingsKey).await?;
+            let new: Vec<BzlLoadKey> = new.into_iter().map(|label| BzlLoadKey::for_build(label, &autoloads)).collect();
             let mut next = Vec::new();
             for module in self.compute.compute_many(&new).await {
                 next.extend(module?.loads.iter().copied());

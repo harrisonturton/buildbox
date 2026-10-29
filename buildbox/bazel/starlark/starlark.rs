@@ -2,6 +2,7 @@
 //! files use while packages are loaded.
 
 pub mod aspect;
+pub mod autoload;
 pub mod attr_module;
 pub mod build_api;
 pub mod bzl_api;
@@ -263,17 +264,76 @@ pub static BZL_GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
 
 /// The globals of BUILD files, with builtin rules.
 pub fn build_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
-    let name = globals_name("bb build", builtins);
+    build_globals_changed(builtins, &AutoloadChanges::default())
+}
+
+/// The globals of BUILD files, with builtin rules as
+/// `--incompatible_autoload_externally` changes them.
+pub fn build_globals_changed(builtins: &StarlarkBuiltins<'_>, changes: &AutoloadChanges<'_>) -> Globals {
+    let name = globals_name(&changes.named("bb build"), builtins);
     let mut builder = build_globals_builder();
     builder.frozen_heap().add_reference(builtins.heap);
-    for (name, value) in &builtins.rules {
-        builder.set(name, *value);
+    for heap in &changes.heaps {
+        builder.frozen_heap().add_reference(heap);
     }
-    builder.build_named(name)
+    for (name, value) in builtins.rules.iter().chain(&changes.rules) {
+        if !changes.removes(name) {
+            builder.set(name, *value);
+        }
+    }
+    without(builder.build_named(name), changes, name)
+}
+
+/// What `--incompatible_autoload_externally` changes in the globals of
+/// files: the symbols it adds, from the rule sets that define them now,
+/// and those it removes.
+#[derive(Default)]
+pub struct AutoloadChanges<'a> {
+    /// Values for the top level of `.bzl` files.
+    pub toplevels: Vec<(String, FrozenValue)>,
+    /// Rules, for BUILD files and `native`.
+    pub rules: Vec<(String, FrozenValue)>,
+    /// Names removed from the top level and from `native`.
+    pub removed: Vec<String>,
+    /// The heaps the added values are in, which the globals keep alive.
+    pub heaps: Vec<&'a FrozenHeapRef>,
+    /// Identifies the changes, for naming the globals' heaps; empty when
+    /// there are none.
+    pub id: String,
+}
+
+impl AutoloadChanges<'_> {
+    fn removes(&self, name: &str) -> bool {
+        self.removed.iter().any(|removed| removed == name)
+    }
+
+    /// The name of globals with these changes, from that of `what`.
+    fn named(&self, what: &str) -> String {
+        match self.id.is_empty() {
+            true => what.to_string(),
+            false => format!("{what} autoloads {}", self.id),
+        }
+    }
+}
+
+/// `globals` without the top-level names `changes` removes.
+fn without(globals: Globals, changes: &AutoloadChanges<'_>, name: GlobalFrozenHeapName) -> Globals {
+    if !globals.iter().any(|(name, _)| changes.removes(name)) {
+        return globals;
+    }
+    let mut builder = GlobalsBuilder::new();
+    builder.frozen_heap().add_reference(globals.heap());
+    for (name, value) in globals.iter() {
+        if !changes.removes(name) {
+            builder.set(name, value);
+        }
+    }
+    let name: &'static str = Box::leak(format!("{} without removed", name.name).into_boxed_str());
+    builder.build_named(GlobalFrozenHeapName { name })
 }
 
 /// A name for globals made with `builtins`, unique to them. Globals are
-/// made once per set of builtins, so the name is leaked.
+/// made once per set of builtins and autoloads, so the name is leaked.
 fn globals_name(what: &str, builtins: &StarlarkBuiltins<'_>) -> GlobalFrozenHeapName {
     let name: &'static str = Box::leak(format!("{what} {}", builtins.id).into_boxed_str());
     GlobalFrozenHeapName { name }
@@ -281,23 +341,42 @@ fn globals_name(what: &str, builtins: &StarlarkBuiltins<'_>) -> GlobalFrozenHeap
 
 /// The globals of `.bzl` files, with builtin rules and values.
 pub fn bzl_globals(builtins: &StarlarkBuiltins<'_>) -> Globals {
+    bzl_globals_changed(builtins, &AutoloadChanges::default())
+}
+
+/// The globals of `.bzl` files, with builtin rules and values as
+/// `--incompatible_autoload_externally` changes them.
+pub fn bzl_globals_changed(builtins: &StarlarkBuiltins<'_>, changes: &AutoloadChanges<'_>) -> Globals {
     with_legacy_globals(|legacy| {
-        let name = globals_name(pass_name(legacy, "bb bzl", "bb bzl without legacy_globals"), builtins);
+        let name = globals_name(&changes.named(pass_name(legacy, "bb bzl", "bb bzl without legacy_globals")), builtins);
         let mut builder = bzl_globals_builder();
         builder.frozen_heap().add_reference(builtins.heap);
+        for heap in &changes.heaps {
+            builder.frozen_heap().add_reference(heap);
+        }
         for (name, value) in &builtins.toplevels {
-            builder.set(name, *value);
+            if !changes.removes(name) {
+                builder.set(name, *value);
+            }
         }
         add_extensions(&mut builder);
+        for (name, value) in &changes.toplevels {
+            builder.set(name, *value);
+        }
         builder.namespace("native", |native| {
             build_api::build_functions(native);
             native_rules::register(native);
             native_values(native, legacy);
             native.frozen_heap().add_reference(builtins.heap);
-            for (name, value) in &builtins.rules {
-                native.set(name, *value);
+            for heap in &changes.heaps {
+                native.frozen_heap().add_reference(heap);
+            }
+            for (name, value) in builtins.rules.iter().chain(&changes.rules) {
+                if !changes.removes(name) {
+                    native.set(name, *value);
+                }
             }
         });
-        builder.build_named(name)
+        without(builder.build_named(name), changes, name)
     })
 }

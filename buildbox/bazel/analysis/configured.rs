@@ -14,7 +14,7 @@ use crate::toolchains::{self, ResolvedToolchains};
 use crate::transition::{AttrConfigs, ExecConfigKey, configured_key, dep_configs};
 use bazel_config::{AspectDescriptor, ConfigId};
 use bazel_label::Label;
-use bazel_loading::{BzlLoadKey, BzlModule, PackageKey, RepoMappingKey};
+use bazel_loading::{BzlModule, PackageKey, RepoMappingKey};
 use bazel_progress::{Event, Progress};
 use bazel_packages::{AttrType, AttrValue, Cfg, Package, Rule, RuleClass, RuleClassRef, Target};
 use intern::{PathId, Symbol};
@@ -498,7 +498,7 @@ async fn native_helper(ctx: &Ctx, label: Label, class: &RuleClass) -> Result<Opt
     let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
     let context = bazel_label::LabelContext::new(label.package, &mapping.0);
     let java_info = Label::parse("@rules_java//java/private:java_info.bzl", &context).map_err(|error| SkyError::new(format!("{label}: finding rules_java: {error}")))?;
-    let module = ctx.compute(&BzlLoadKey(java_info)).await?;
+    let module = ctx.compute(&bazel_loading::bzl_key_for_build(ctx, java_info).await?).await?;
     let merge = module.module.get_any_visibility("merge_plugin_info_without_outputs");
     let merge = merge.map_err(|_| SkyError::new(format!("{java_info} has no merge_plugin_info_without_outputs")))?;
     Ok(Some(merge.0))
@@ -949,7 +949,7 @@ async fn implementation(ctx: &Ctx, class: &RuleClassRef) -> Result<Implementatio
     }
     let (module, global) = match bazel_loading::is_build_file(bzl) {
         true => (ctx.compute(&bazel_loading::BuildModuleKey(bzl.package)).await?, bazel_starlark::testing::analysis_test_global(name.as_str())),
-        false => (ctx.compute(&BzlLoadKey(bzl)).await?, name.as_str().to_string()),
+        false => (ctx.compute(&bazel_loading::bzl_key_for_build(ctx, bzl).await?).await?, name.as_str().to_string()),
     };
     let missing = || SkyError::new(format!("{bzl} doesn't export a rule named '{name}'"));
     let rule = module.module.get_any_visibility(&global).map_err(|_| missing())?.0;

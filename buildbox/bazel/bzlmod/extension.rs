@@ -47,7 +47,7 @@ impl Key for ExtensionKey {
         let Some(info) = graph.extensions.get(self.0 as usize).cloned() else {
             return Err(SkyError::new("no such module extension"));
         };
-        let module = ctx.compute(&BzlLoadKey(info.bzl)).await?;
+        let module = ctx.compute(&BzlLoadKey::for_bzlmod(info.bzl)).await?;
         crate::repo_env::declared(ctx, &extension_environ(&module, &info.name)).await?;
         let mut repos: Vec<RepoName> = module.repos.clone();
         repos.push(info.bzl.repo());

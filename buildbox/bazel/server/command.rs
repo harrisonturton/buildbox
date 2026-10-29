@@ -6,6 +6,7 @@ use crate::BazelServer;
 use crate::workspace;
 use bazel_bzlmod::registry::Registries;
 use bazel_bzlmod::repo_env::RepoEnvironment;
+use bazel_loading::autoload::AutoloadSettings;
 use bazel_options::{ParsedOptions, RcFile};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,38 @@ pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Worksp
         mirrors: mirrors.map(|url| url.trim_end_matches('/').to_string()).collect(),
     };
     workspace.set_registries(registries).await;
+    workspace.set_autoloads(autoload_settings(context, options)).await;
+}
+
+/// The autoloads the options ask for. A workspace whose `.bazelversion`
+/// pins Bazel 7 or 8, which had the rules Bazel 9 moved out built in, gets
+/// them autoloaded in every repository unless the options say otherwise,
+/// as Bazel 8 autoloads them.
+fn autoload_settings(context: &CommandContext<'_>, options: &ParsedOptions) -> AutoloadSettings {
+    let pinned_before_9 = pinned_major_version(&context.workspace_root).is_some_and(|major| major < 9);
+    let list = |text: &str| text.split(',').map(str::trim).filter(|item| !item.is_empty()).map(str::to_string).collect::<Vec<_>>();
+    let symbols = match options.get("incompatible_autoload_externally") {
+        Some(given) => list(given),
+        None if pinned_before_9 => list(BAZEL_8_AUTOLOADS),
+        None => Vec::new(),
+    };
+    AutoloadSettings {
+        symbols,
+        disable_in_main_repo: options.flag("incompatible_disable_autoloads_in_main_repo", !pinned_before_9),
+        repositories_without: list(options.get("repositories_without_autoloads").unwrap_or_default()),
+    }
+}
+
+/// What Bazel 8 autoloads by default, and the C++ rules, which Bazel 8 had
+/// built in and Bazel 9 doesn't.
+const BAZEL_8_AUTOLOADS: &str = "+@rules_cc,+@rules_python,+java_common,+JavaInfo,+JavaPluginInfo,ProguardSpecProvider,java_binary,java_import,java_library,java_plugin,java_test,java_runtime,java_toolchain,java_package_configuration,@com_google_protobuf,@rules_shell,+@rules_android";
+
+/// The major version of Bazel the workspace's `.bazelversion` pins, if it
+/// pins one.
+fn pinned_major_version(workspace: &std::path::Path) -> Option<u32> {
+    let text = std::fs::read_to_string(workspace.join(".bazelversion")).ok()?;
+    let version = text.lines().next()?.trim();
+    version.split(['.', '-']).next()?.parse().ok()
 }
 
 /// The error for a main repository mapping that couldn't be computed, as

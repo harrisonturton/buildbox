@@ -10,7 +10,7 @@ use bazel_config::{BuildConfiguration, BuildOptions, ConfigId, LabelParser, Nati
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName};
 use crate::configured::ConfiguredTargetKey;
 use crate::settings::BuildSetting;
-use bazel_loading::{BzlLoadKey, PackageKey, RepoMappingKey};
+use bazel_loading::{PackageKey, RepoMappingKey};
 use bazel_packages::{AttrValue, Cfg, RuleClassRef, SourcePosition, Target};
 use bazel_starlark::attr_module::Attribute;
 use bazel_starlark::label_value::LabelValue;
@@ -316,7 +316,7 @@ async fn rule_transition(ctx: &Ctx, class: &RuleClassRef) -> Result<Option<Owned
     let Some((bzl, name)) = class.definition else {
         return Ok(None);
     };
-    let module = ctx.compute(&BzlLoadKey(bzl)).await?;
+    let module = ctx.compute(&bazel_loading::bzl_key_for_build(ctx, bzl).await?).await?;
     let Ok((rule, _)) = module.module.get_any_visibility(name.as_str()) else {
         return Ok(None);
     };

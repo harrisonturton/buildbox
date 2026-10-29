@@ -47,16 +47,78 @@ impl Value for BzlModule {
     }
 }
 
-/// Loads the `.bzl` file a label names.
+/// Loads the `.bzl` file a label names, in a context.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
-pub struct BzlLoadKey(pub Label);
+pub struct BzlLoadKey {
+    pub label: Label,
+    pub context: BzlContext,
+}
+
+/// What a `.bzl` file is loaded for, which decides whether it gets the
+/// symbols `--incompatible_autoload_externally` autoloads, as Bazel's
+/// keys for BUILD files and for Bzlmod do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub enum BzlContext {
+    /// For Bzlmod, or for BUILD files when nothing is autoloaded: without
+    /// autoloads, and loading the same.
+    Plain,
+    /// For BUILD files, in a repository whose `.bzl` files don't get
+    /// autoloads.
+    Build,
+    /// For BUILD files, with autoloads.
+    Autoloads,
+}
+
+impl BzlLoadKey {
+    /// The key of a `.bzl` file loaded for BUILD files, with these
+    /// autoloads.
+    pub fn for_build(label: Label, autoloads: &crate::autoload::Autoloads) -> BzlLoadKey {
+        BzlLoadKey {
+            label,
+            context: autoloads.bzl_context(label.repo()),
+        }
+    }
+
+    /// The key of a `.bzl` file loaded for Bzlmod: by MODULE.bazel files,
+    /// module extensions and repository rules.
+    pub fn for_bzlmod(label: Label) -> BzlLoadKey {
+        BzlLoadKey {
+            label,
+            context: BzlContext::Plain,
+        }
+    }
+}
+
+/// The key of a `.bzl` file loaded, directly or not, by BUILD files, or
+/// that defines what they use, such as rules and aspects.
+pub async fn bzl_key_for_build(compute: &impl skyframe::Compute, label: Label) -> Result<BzlLoadKey, SkyError> {
+    let autoloads = compute.compute(&crate::autoload::AutoloadSettingsKey).await?;
+    Ok(BzlLoadKey::for_build(label, &autoloads))
+}
+
+/// The key of a `.bzl` file that a file loaded in `context` loads.
+async fn loaded_key(ctx: &Ctx, label: Label, context: BzlContext) -> Result<BzlLoadKey, SkyError> {
+    match context {
+        BzlContext::Plain => Ok(BzlLoadKey::for_bzlmod(label)),
+        BzlContext::Build | BzlContext::Autoloads => bzl_key_for_build(ctx, label).await,
+    }
+}
+
+/// The globals of `.bzl` files loaded in `context`.
+async fn bzl_globals(ctx: &Ctx, context: BzlContext) -> Result<starlark::environment::Globals, SkyError> {
+    match context {
+        BzlContext::Plain => Ok(ctx.compute(&crate::BuiltinsKey).await?.bzl.clone()),
+        BzlContext::Build => Ok(ctx.compute(&crate::autoload::AutoloadGlobalsKey { with: false }).await?.bzl.clone()),
+        BzlContext::Autoloads => Ok(ctx.compute(&crate::autoload::AutoloadGlobalsKey { with: true }).await?.bzl.clone()),
+    }
+}
 
 impl Key for BzlLoadKey {
     type Value = BzlModule;
     const KIND: &'static str = "BZL_LOAD";
 
     async fn compute(&self, ctx: &Ctx) -> Result<BzlModule, SkyError> {
-        let label = self.0;
+        let label = self.label;
         let source = read_bzl(ctx, label).await?;
         let mapping = ctx.compute(&RepoMappingKey(label.repo())).await?;
         let ast = match bazel_starlark::parse_reporting_all(label, source.clone()) {
@@ -64,11 +126,11 @@ impl Key for BzlLoadKey {
             Err(errors) => return Err(failed_module(ctx, label, &errors, "compilation").await),
         };
         let positions = bazel_starlark::load_positions(&ast);
-        let loaded = load_all(ctx, label, &bazel_starlark::loads(&ast), Some(&positions), &mapping.0).await?;
+        let loaded = load_all(ctx, label, &bazel_starlark::loads(&ast), Some(&positions), &mapping.0, self.context).await?;
         let repos = transitive_repos(label.repo(), loaded.iter().map(|(_, module)| &**module));
         let mappings = mappings(ctx, &repos).await?;
-        let builtins = ctx.compute(&crate::BuiltinsKey).await?;
-        let fingerprint = fingerprint(label, &source, &mapping.0, &loaded);
+        let globals = bzl_globals(ctx, self.context).await?;
+        let fingerprint = fingerprint(label, &source, &mapping.0, &loaded, self.context);
         let load_labels = loaded.iter().map(|(_, module)| module.label).collect();
 
         let module = blocking(move || {
@@ -77,7 +139,7 @@ impl Key for BzlLoadKey {
             };
             let mut context = EvalContext::new(FileKind::Bzl, label);
             context.mappings = mappings;
-            bazel_starlark::eval_bzl(ast, &builtins.bzl, &loads, context, bazel_starlark::heap_name("bzl", label, fingerprint))
+            bazel_starlark::eval_bzl(ast, &globals, &loads, context, bazel_starlark::heap_name("bzl", label, fingerprint))
         })
         .await?;
         let (module, printed) = module;
@@ -166,19 +228,20 @@ pub(crate) async fn load_all(
     loads: &[String],
     positions: Option<&[SourcePosition]>,
     mapping: &RepoMappingTable,
+    context: BzlContext,
 ) -> Result<Vec<(String, Arc<BzlModule>)>, SkyError> {
-    let context = LabelContext {
+    let label_context = LabelContext {
         package: from.package,
         mapping,
         lenient: false,
     };
     let mut keys = Vec::with_capacity(loads.len());
     for load in loads {
-        let label = Label::parse(load, &context).map_err(|error| SkyError::new(format!("{from}: in load statement: {error}")))?;
+        let label = Label::parse(load, &label_context).map_err(|error| SkyError::new(format!("{from}: in load statement: {error}")))?;
         if !label.name.as_str().ends_with(".bzl") && !label.name.as_str().ends_with(".scl") {
             return Err(SkyError::new(format!("{from}: the label '{load}' must refer to a .bzl file")));
         }
-        keys.push(BzlLoadKey(label));
+        keys.push(loaded_key(ctx, label, context).await?);
     }
     let modules = ctx.compute_many(&keys).await;
     let mut loaded = Vec::with_capacity(loads.len());
@@ -224,9 +287,15 @@ pub async fn mappings(ctx: &Ctx, repos: &[RepoName]) -> Result<HashMap<RepoName,
     Ok(mappings)
 }
 
-pub(crate) fn fingerprint(label: Label, source: &str, mapping: &RepoMappingTable, loaded: &[(String, Arc<BzlModule>)]) -> Fingerprint {
+/// Identifies a module: its file, its source, how it sees other
+/// repositories, what it loads, and the context it's loaded in, unless
+/// that's [`BzlContext::Plain`].
+pub(crate) fn fingerprint(label: Label, source: &str, mapping: &RepoMappingTable, loaded: &[(String, Arc<BzlModule>)], context: BzlContext) -> Fingerprint {
     let mut fingerprinter = Fingerprinter::new();
     fingerprinter.bytes(label.canonical_form().as_bytes());
+    if context != BzlContext::Plain {
+        fingerprinter.bytes(format!("{context:?}").as_bytes());
+    }
     fingerprinter.bytes(source.as_bytes());
     fingerprinter.bytes(&skycodec::to_bytes(mapping));
     for (load, module) in loaded {

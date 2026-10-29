@@ -15,7 +15,7 @@ use crate::transition::{AttrConfigs, configured_key, dep_configs};
 use crate::late_bound::late_bound_value;
 use bazel_config::{AspectDescriptor, BuildOptions, ConfigId};
 use bazel_label::Label;
-use bazel_loading::{BzlLoadKey, BzlModule};
+use bazel_loading::{BzlModule};
 use bazel_progress::Progress;
 use crate::propagation::{self, Propagation, PropagationFunction, PropagationTarget};
 use bazel_packages::{AttrDefault, AttrSchema, AttrType, AttrValue, Package, Rule, RuleClass, RuleClassRef, Target};
@@ -38,7 +38,7 @@ pub(crate) struct LoadedAspect {
 impl LoadedAspect {
     /// The aspect `file` exports as `name`.
     pub async fn load(ctx: &impl Compute, file: Label, name: &str) -> Result<LoadedAspect, SkyError> {
-        let module = ctx.compute(&BzlLoadKey(file)).await?;
+        let module = ctx.compute(&bazel_loading::bzl_key_for_build(ctx, file).await?).await?;
         let missing = || SkyError::new(format!("{name} is not exported from {file}"));
         let value = module.module.get_any_visibility(name).map_err(|_| missing())?.0;
         if Aspect::from_value(value.value()).is_none() {

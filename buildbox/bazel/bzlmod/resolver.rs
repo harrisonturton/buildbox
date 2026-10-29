@@ -66,6 +66,22 @@ impl RepositoryResolver for BzlmodRepositories {
         })
     }
 
+    fn module_repo<'a>(&'a self, ctx: &'a Ctx, name: &'a str, newer_than: Option<&'a str>) -> BoxFuture<'a, Result<Option<RepoName>, SkyError>> {
+        Box::pin(async move {
+            let graph = ctx.compute(&DepGraphKey).await?;
+            let version = |text: &str| crate::version::Version::parse(text).ok();
+            let highest = graph.modules.iter().filter(|module| module.name == name).max_by_key(|module| version(&module.version));
+            let Some(highest) = highest else {
+                return Ok(None);
+            };
+            let newer = match newer_than.and_then(version) {
+                Some(minimum) => version(&highest.version).is_none_or(|found| found > minimum),
+                None => true,
+            };
+            Ok(newer.then_some(highest.repo))
+        })
+    }
+
     fn module<'a>(&'a self, ctx: &'a Ctx, repo: RepoName) -> BoxFuture<'a, Result<Option<(String, String)>, SkyError>> {
         Box::pin(async move {
             let graph = ctx.compute(&DepGraphKey).await?;
