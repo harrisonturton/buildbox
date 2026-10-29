@@ -76,15 +76,20 @@ pub fn build_spec() -> OptionSpec {
 /// Options bb takes and ignores, since they only tune how Bazel itself
 /// runs, which bb does its own way. bb's server keeps downloads and fetched
 /// repositories in its root, shared by every workspace, as Bazel's
-/// repository caches do.
+/// repository caches do, and uses no remote cache, so whether to upload to
+/// one doesn't arise.
 pub const NO_OP_OPTIONS: &[(&str, OptionKind)] = &[
+    ("experimental_check_external_repository_files", OptionKind::Bool),
     ("experimental_repository_cache_hardlinks", OptionKind::Bool),
+    ("heap_dump_on_oom", OptionKind::Bool),
     ("loading_phase_threads", OptionKind::Value),
     ("local_resources", OptionKind::Multi),
     ("progress_report_interval", OptionKind::Value),
+    ("remote_upload_local_results", OptionKind::Bool),
     ("repo_contents_cache", OptionKind::Value),
     ("repository_cache", OptionKind::Value),
     ("show_progress_rate_limit", OptionKind::Value),
+    ("watchfs", OptionKind::Bool),
 ];
 
 /// Native options configurations have that bb doesn't act on yet, so

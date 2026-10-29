@@ -59,6 +59,7 @@ pub(crate) fn query_spec() -> OptionSpec {
     let takes = |name: &str| bazel_options::bazel_option(name).is_some_and(|option| option.takes("query"));
     let native = bazel_config::command_line_options().filter(|option| takes(option.name));
     options.extend(native.map(|option| (option.name, build::option_kind(option))));
+    options.extend(build::NO_OP_OPTIONS.iter().filter(|(name, _)| takes(name)));
     OptionSpec::new(&options)
 }
 
