@@ -54,12 +54,11 @@ opaque value is an error.
   reports the rule's default execution platform, in `aquery` too. `ctx.actions.run`'s `toolchain` and `resource_set`
   are ignored. Automatic exec groups (`--incompatible_auto_exec_groups`)
   and `--use_target_platform_for_tests` are errors if turned on.
-- **Remote platform.** The REAPI `Platform` of every action is empty
-  (`execution/spawn.rs`): `exec_properties` and platforms'
-  `exec_properties` never reach a remote executor, so remote execution on
-  a platform other than the server's own doesn't work.
-  `Command.execution_platform` always reports the host platform, whatever
-  toolchain resolution chose.
+- **Remote platform.** Actions are sent with their exec group's exec
+  properties, from the execution platform and the target's
+  `exec_properties`, as Bazel combines them; there's no
+  `--remote_default_exec_properties`. `Command.execution_platform` in
+  failure reports always names the host platform.
 - **Remote services are configured on the server**, not per build:
   `--remote_executor`, `--remote_cache`, `--disk_cache` and the other
   `--remote_*` options are errors unless left at their defaults.
@@ -235,5 +234,4 @@ like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
 
 1. The lockfile (section 8).
 2. `map_each` over directories (section 4).
-3. The remote platform (section 2).
-4. Apple (section 1).
+3. Apple (section 1).

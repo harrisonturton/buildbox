@@ -72,6 +72,12 @@ pub struct Spawn {
     pub param_files: Vec<ParamFile>,
     /// The arguments made from directories, expanded as the command runs.
     pub directory_args: Vec<DirectoryArgs>,
+    /// The exec group the command runs in, or `None` for the rule's own.
+    pub exec_group: Option<Symbol>,
+    /// The properties of the platform it runs on, as remote executors are
+    /// given them, sorted by name. The rule's state sets them from
+    /// `exec_group` when the action is registered.
+    pub platform: Vec<(String, String)>,
 }
 
 /// An environment of `variables`, in order, as Bazel makes them: one set

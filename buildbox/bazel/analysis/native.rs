@@ -268,6 +268,8 @@ fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, he
             execution_info: execution_info(input),
             param_files: Vec::new(),
             directory_args: Vec::new(),
+            exec_group: None,
+            platform: Vec::new(),
         }),
     })?;
 

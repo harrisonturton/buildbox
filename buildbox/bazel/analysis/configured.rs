@@ -107,12 +107,14 @@ impl RunEnvironment {
 }
 
 /// How a test's attributes say to run it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TestAttrs {
     /// `shard_count`: how many shards to split it into, or 0 for none.
     pub shard_count: u32,
     /// `flaky`: whether to try it again when it fails.
     pub flaky: bool,
+    /// The exec properties of its `test` exec group, which it runs with.
+    pub exec_properties: Vec<(String, String)>,
 }
 
 impl TestAttrs {
@@ -123,7 +125,11 @@ impl TestAttrs {
             _ => 0,
         };
         let flaky = matches!(attr("flaky"), Some(AttrValue::Bool(true)));
-        TestAttrs { shard_count, flaky }
+        TestAttrs {
+            shard_count,
+            flaky,
+            exec_properties: Vec::new(),
+        }
     }
 }
 
@@ -344,8 +350,12 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     let edges = dependency_edges(ctx, key, package, rule, &setup, &deps).await?;
     let applications = aspect_applications(&deps);
     let exec_platform = setup.toolchains.exec_platform.unwrap_or(key.config.get().host_platform);
-    let test = is_test.then(|| TestAttrs::of(&setup.attrs));
+    let mut test = is_test.then(|| TestAttrs::of(&setup.attrs));
     let input = rule_input(ctx, key, package, setup, deps).await?;
+    if let Some(test) = &mut test {
+        let group = input.exec_properties.iter().find(|(group, _)| group.is_some_and(|group| group.as_str() == "test"));
+        test.exec_properties = group.map(|(_, properties)| properties.clone()).unwrap_or_default();
+    }
     let analyzed = evaluate_reporting(ctx, label, input, heap_name("target", key, fingerprint)).await?;
     let executable = executable(&analyzed);
     let run_env = run_environment(&analyzed);
@@ -476,6 +486,7 @@ pub(crate) async fn rule_input(ctx: &Ctx, key: ConfiguredTargetKey, package: &Pa
         Implementation::Builtin { .. } | Implementation::Native(_) => Default::default(),
     };
     let helper = native_helper(ctx, key.label, &setup.class).await?;
+    let exec_properties = crate::exec_groups::exec_properties(ctx, &setup.attrs, &setup.toolchains, config.host_platform).await?;
     Ok(RuleInput {
         label: key.label,
         config,
@@ -494,6 +505,7 @@ pub(crate) async fn rule_input(ctx: &Ctx, key: ConfiguredTargetKey, package: &Pa
         target_cpu: platform.cpu(),
         aspect: None,
         toolchains: setup.toolchains,
+        exec_properties,
         helper,
     })
 }
@@ -1124,7 +1136,7 @@ pub(crate) fn forwarded(key: ConfiguredTargetKey, target: &ConfiguredTarget) -> 
         executable: None,
         args: target.args.clone(),
         run_env: target.run_env.clone(),
-        test: target.test,
+        test: target.test.clone(),
         size: 64,
     })
 }

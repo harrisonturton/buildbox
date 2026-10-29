@@ -467,6 +467,8 @@ fn compile(
                 execution_info: Vec::new(),
                 param_files: Vec::new(),
                 directory_args: Vec::new(),
+                exec_group: None,
+                platform: Vec::new(),
             }),
         })?;
         objects.push(object);
@@ -521,6 +523,8 @@ pub fn archive(
             execution_info: Vec::new(),
             param_files: Vec::new(),
             directory_args: Vec::new(),
+            exec_group: None,
+            platform: Vec::new(),
         }),
     })?;
     Ok(output)
@@ -629,6 +633,8 @@ fn link_executable(
             execution_info: Vec::new(),
             param_files: Vec::new(),
             directory_args: Vec::new(),
+            exec_group: None,
+            platform: Vec::new(),
         }),
     })?;
     Ok(output)
@@ -754,6 +760,8 @@ fn strip(state: &RuleState, toolchain: &CcToolchain<'_>, configuration: &Feature
             execution_info: Vec::new(),
             param_files: Vec::new(),
             directory_args: Vec::new(),
+            exec_group: None,
+            platform: Vec::new(),
         }),
     })
 }

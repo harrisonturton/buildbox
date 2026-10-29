@@ -59,6 +59,8 @@ pub fn register(state: &RuleState, configuration: &FeatureConfiguration, variabl
             execution_info,
             param_files: Vec::new(),
             directory_args: Vec::new(),
+            exec_group: None,
+            platform: Vec::new(),
         }),
     })
 }

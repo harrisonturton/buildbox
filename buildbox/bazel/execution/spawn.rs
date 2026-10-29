@@ -42,6 +42,8 @@ pub struct SpawnRequest {
     pub timeout: Option<std::time::Duration>,
     /// What to call the command in messages.
     pub description: String,
+    /// The properties of the platform it must run on, sorted by name.
+    pub platform: Vec<(String, String)>,
 }
 
 /// Where an input goes in an action's input tree. Actions hold one for each
@@ -91,7 +93,7 @@ pub async fn execute(backend: &Backend, mut request: SpawnRequest) -> Result<Spa
         command,
         input_root,
         timeout: request.timeout,
-        platform: Vec::new(),
+        platform: request.platform.clone(),
     };
     tracing::info!("{}", request.description);
     let result = backend
@@ -128,6 +130,7 @@ async fn prepare(backend: &Backend, inputs: BTreeMap<TreePath, Input>, request: 
     let proto = reapi::Action {
         command_digest: command_digest.to_proto().into(),
         input_root_digest: tree.root.to_proto().into(),
+        platform: platform_proto(&request.platform).map(Into::into).unwrap_or_default(),
         do_not_cache: !request.cacheable,
         timeout: request.timeout.map(|timeout| buffa_types::google::protobuf::Duration {
             seconds: timeout.as_secs() as i64,
@@ -191,6 +194,7 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
         write_cache: true,
         timeout: None,
         description: description(action, owner),
+        platform: spawn.platform.clone(),
     };
     let local = ctx.global::<LocalActionCache>().ok().filter(|_| request.cacheable);
     let key = local.as_ref().map(|_| local_key(&request));
@@ -393,9 +397,10 @@ fn local_key(request: &SpawnRequest) -> Fingerprint {
     strings(&request.arguments);
     strings(&request.output_files);
     strings(&request.output_directories);
-    for (name, value) in &request.env {
+    for (name, value) in request.env.iter().chain(&request.platform) {
         fingerprinter.u64(name.len() as u64).bytes(name.as_bytes()).u64(value.len() as u64).bytes(value.as_bytes());
     }
+    fingerprinter.u64(request.platform.len() as u64);
     fingerprinter.u64(request.timeout.map_or(0, |timeout| timeout.as_millis() as u64));
     fingerprinter.u64(request.inputs.len() as u64);
     let mut path = String::new();
@@ -659,8 +664,29 @@ fn command_proto(request: &SpawnRequest) -> reapi::Command {
         environment_variables,
         output_files: request.output_files.clone(),
         output_directories: request.output_directories.clone(),
+        platform: platform_proto(&request.platform).map(Into::into).unwrap_or_default(),
         ..Default::default()
     }
+}
+
+/// The REAPI `Platform` of an action's properties, which are sorted by
+/// name, as the API requires; none if there are none.
+fn platform_proto(properties: &[(String, String)]) -> Option<reapi::Platform> {
+    if properties.is_empty() {
+        return None;
+    }
+    let properties = properties
+        .iter()
+        .map(|(name, value)| reapi::platform::Property {
+            name: name.clone(),
+            value: value.clone(),
+            ..Default::default()
+        })
+        .collect();
+    Some(reapi::Platform {
+        properties,
+        ..Default::default()
+    })
 }
 
 /// A cached successful result, if there is one and the outputs it names

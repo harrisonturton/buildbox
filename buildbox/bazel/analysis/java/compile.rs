@@ -475,6 +475,8 @@ fn spawn_action(mnemonic: &str, message: String, inputs: Vec<Artifact>, outputs:
             execution_info,
             param_files: command.param_files.into_iter().map(|(param_file, _)| param_file).collect(),
             directory_args: Vec::new(),
+            exec_group: None,
+            platform: Vec::new(),
         }),
     }
 }

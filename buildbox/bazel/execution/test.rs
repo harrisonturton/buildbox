@@ -353,6 +353,7 @@ async fn generate_xml(ctx: &Ctx, backend: &Backend, test: &TestSpec, log: BlobDi
         write_cache: true,
         timeout: None,
         description: format!("Generating test.xml for {}", test.name()),
+        platform: test.platform.clone(),
     };
     let spawned = execute(backend, request).await?;
     let file = spawned.result.output_files.iter().find(|file| file.path == xml_path);
@@ -487,6 +488,8 @@ struct TestSpec {
     read_cache: bool,
     /// Whether it must run while no other test does.
     exclusive: bool,
+    /// The properties of the platform it runs on.
+    platform: Vec<(String, String)>,
 }
 
 impl TestSpec {
@@ -553,6 +556,7 @@ impl TestSpec {
                 CacheResults::Auto => test.run.runs <= 1,
             },
             exclusive: tagged(&["exclusive", "exclusive-if-local"]),
+            platform: target.test.as_ref().map(|test| test.exec_properties.clone()).unwrap_or_default(),
         })
     }
 
@@ -632,6 +636,7 @@ impl TestSpec {
             write_cache: attempt == 0,
             timeout: Some(self.timeout),
             description: format!("Testing {}", self.name()),
+            platform: self.platform.clone(),
         })
     }
 

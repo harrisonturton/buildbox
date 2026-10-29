@@ -63,25 +63,34 @@ pub struct RuleState {
     pub toolchain_types: Vec<Label>,
     /// The names of the rule's exec groups, which its actions may run in.
     pub exec_groups: Vec<Symbol>,
+    /// The exec properties of the rule's actions, by exec group, `None`
+    /// for the rule's own.
+    pub exec_properties: Vec<(Option<Symbol>, Vec<(String, String)>)>,
     /// Errors in the rule's attributes found as its `ctx` was made, as
     /// Bazel words them, which fail its analysis.
     pub attribute_errors: RefCell<Vec<String>>,
 }
 
 impl RuleState {
-    /// Check that an action's `exec_group` is one of the rule's, as Bazel
-    /// does.
-    pub fn check_exec_group(&self, exec_group: Option<Value<'_>>) -> anyhow::Result<()> {
+    /// The exec group an action's `exec_group` names, checking that it's
+    /// one of the rule's, as Bazel does.
+    pub fn check_exec_group(&self, exec_group: Option<Value<'_>>) -> anyhow::Result<Option<Symbol>> {
         let Some(exec_group) = exec_group.filter(|value| !value.is_none()) else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(name) = exec_group.unpack_str() else {
             anyhow::bail!("got value of type '{}' for parameter 'exec_group', want 'string or NoneType'", exec_group.get_type());
         };
-        if !self.exec_groups.iter().any(|group| group.as_str() == name) {
-            anyhow::bail!("Action declared for non-existent exec group '{name}'.");
+        match self.exec_groups.iter().find(|group| group.as_str() == name) {
+            Some(group) => Ok(Some(*group)),
+            None => anyhow::bail!("Action declared for non-existent exec group '{name}'."),
         }
-        Ok(())
+    }
+
+    /// The exec properties of an exec group's actions, or the rule's own.
+    pub fn exec_properties(&self, exec_group: Option<Symbol>) -> Vec<(String, String)> {
+        let found = self.exec_properties.iter().find(|(group, _)| *group == exec_group);
+        found.map(|(_, properties)| properties.clone()).unwrap_or_default()
     }
 
     pub fn new(label: Label, kind: Symbol, config: Arc<BuildConfiguration>, mapping: Arc<RepoMappingTable>, main_mapping: Arc<RepoMappingTable>) -> RuleState {
@@ -105,6 +114,7 @@ impl RuleState {
             tag_execution_info: Vec::new(),
             toolchain_types: Vec::new(),
             exec_groups: Vec::new(),
+            exec_properties: Vec::new(),
             attribute_errors: RefCell::new(Vec::new()),
         }
     }
@@ -161,7 +171,10 @@ impl RuleState {
 
     /// Register an action of bb's own for the rule, which analysis tests
     /// may have too.
-    pub fn register_own(&self, action: Action) -> anyhow::Result<()> {
+    pub fn register_own(&self, mut action: Action) -> anyhow::Result<()> {
+        if let ActionKind::Spawn(spawn) = &mut action.kind {
+            spawn.platform = self.exec_properties(spawn.exec_group);
+        }
         match self.share(&action) {
             Some(true) => {
                 self.actions.borrow_mut().push(action);

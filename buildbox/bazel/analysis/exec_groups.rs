@@ -1,7 +1,15 @@
 //! `ctx.exec_groups`: the exec groups a rule declares, each with the
-//! toolchains resolved for its execution platform.
+//! toolchains resolved for its execution platform; and the exec
+//! properties of each group's actions.
 
+use crate::platform::PlatformKey;
+use crate::toolchains::ResolvedToolchains;
 use allocative::Allocative;
+use bazel_label::Label;
+use bazel_packages::AttrValue;
+use intern::Symbol;
+use skyframe::{Ctx, SkyError};
+use std::collections::BTreeMap;
 use starlark::coerce::Coerce;
 use starlark::starlark_complex_value;
 use starlark::values::{
@@ -102,6 +110,56 @@ where
     }
 }
 
+/// The properties of each exec group's actions, `None` for the rule's
+/// own, as Bazel combines them: the execution platform's, then the
+/// target's `exec_properties`, then the platform's and the target's for the
+/// group, the later winning. A key `group.key` is for that group.
+pub(crate) async fn exec_properties(
+    ctx: &Ctx,
+    attrs: &[(Symbol, AttrValue)],
+    toolchains: &ResolvedToolchains,
+    host_platform: Label,
+) -> Result<Vec<(Option<Symbol>, Vec<(String, String)>)>, SkyError> {
+    let name = Symbol::intern("exec_properties");
+    let target = match attrs.iter().find(|(attr, _)| *attr == name) {
+        Some((_, AttrValue::StringDict(entries))) => entries.clone(),
+        _ => Vec::new(),
+    };
+    let mut groups = vec![(None, toolchains.exec_platform)];
+    groups.extend(toolchains.exec_groups.iter().map(|(group, resolved)| (Some(*group), resolved.exec_platform)));
+    let mut properties = Vec::with_capacity(groups.len());
+    for (group, platform) in groups {
+        let platform = ctx.compute(&PlatformKey(platform.unwrap_or(host_platform))).await?;
+        properties.push((group, combined(&platform.exec_properties, &target, group)));
+    }
+    Ok(properties)
+}
+
+/// The properties of `group`'s actions, from the platform's and the
+/// target's.
+fn combined(platform: &[(String, String)], target: &[(String, String)], group: Option<Symbol>) -> Vec<(String, String)> {
+    let mut combined = BTreeMap::new();
+    let mut add = |entries: &[(String, String)], wanted: Option<Symbol>| {
+        for (key, value) in entries {
+            let (entry_group, property) = match key.split_once('.') {
+                Some((entry_group, property)) => (Some(entry_group), property),
+                None => (None, key.as_str()),
+            };
+            if entry_group == wanted.map(|group| group.as_str()) {
+                combined.insert(property.to_string(), value.clone());
+            }
+        }
+    };
+    add(platform, None);
+    add(target, None);
+    if group.is_some() {
+        add(platform, group);
+        add(target, None);
+        add(target, group);
+    }
+    combined.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +194,16 @@ mod tests {
     fn give_each_group_its_toolchains() {
         assert_eq!(eval("groups['test'].toolchains").unwrap(), "test toolchains");
         assert_eq!(eval("groups['cpp_link'].toolchains").unwrap(), "link toolchains");
+    }
+
+    #[test]
+    fn combine_exec_properties_as_bazel_does() {
+        let platform = vec![("os".to_string(), "linux".to_string()), ("pool".to_string(), "small".to_string()), ("test.pool".to_string(), "tests".to_string())];
+        let target = vec![("pool".to_string(), "big".to_string()), ("test.cpu".to_string(), "8".to_string())];
+        let pairs = |entries: &[(&str, &str)]| entries.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect::<Vec<_>>();
+        assert_eq!(combined(&platform, &target, None), pairs(&[("os", "linux"), ("pool", "big")]));
+        let test = Some(Symbol::intern("test"));
+        assert_eq!(combined(&platform, &target, test), pairs(&[("cpu", "8"), ("os", "linux"), ("pool", "big")]));
     }
 
     #[test]

@@ -115,6 +115,8 @@ pub struct RuleInput {
     /// For an aspect: the target it's applied to.
     pub aspect: Option<AspectView>,
     pub toolchains: ResolvedToolchains,
+    /// The exec properties of the rule's actions, by exec group.
+    pub exec_properties: Vec<(Option<Symbol>, Vec<(String, String)>)>,
     /// A rule set's Starlark function a native rule's implementation calls:
     /// for `java_plugins_flag_alias`, rules_java's merge of plugins.
     pub helper: Option<starlark::values::OwnedFrozenValue>,
@@ -267,6 +269,7 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     state.analysis_test = input.class.analysis_test && input.aspect.is_none();
     state.toolchain_types = input.class.toolchain_types.clone();
     state.exec_groups = input.class.exec_groups.iter().map(|group| group.name).collect();
+    state.exec_properties = input.exec_properties.clone();
     if let Some(AttrValue::StringList(tags)) = input.attr("tags") {
         state.tag_execution_info = crate::state::tag_execution_info(tags);
     }

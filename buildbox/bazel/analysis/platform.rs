@@ -13,6 +13,10 @@ pub struct Platform {
     pub label: Label,
     /// Constraint values with their settings, sorted by setting.
     pub constraints: Vec<(Label, Label)>,
+    /// The properties actions running on it are executed with, its own
+    /// replacing its parents', sorted by name. A key may name an exec
+    /// group, as `group.key`.
+    pub exec_properties: Vec<(String, String)>,
 }
 
 encoded_value!(Platform);
@@ -47,10 +51,21 @@ impl Key for PlatformKey {
     async fn compute(&self, ctx: &Ctx) -> Result<Platform, SkyError> {
         let rule = load_rule(ctx, self.0, "platform").await?;
         let mut constraints = Vec::new();
+        let mut exec_properties = Vec::new();
         for parent in labels(&rule, "parents") {
             let parent = ctx.compute(&PlatformKey(parent)).await?;
             constraints.extend(parent.constraints.iter().copied());
+            exec_properties.extend(parent.exec_properties.iter().cloned());
         }
+        if let Some(AttrValue::StringDict(own)) = rule.attr(Symbol::intern("exec_properties")) {
+            for (name, value) in own {
+                exec_properties.retain(|(existing, _)| existing != name);
+                if !value.is_empty() {
+                    exec_properties.push((name.clone(), value.clone()));
+                }
+            }
+        }
+        exec_properties.sort();
         let values = labels(&rule, "constraint_values");
         let keys: Vec<ConstraintValueKey> = values.iter().map(|value| ConstraintValueKey(*value)).collect();
         for value in ctx.compute_many(&keys).await {
@@ -62,6 +77,7 @@ impl Key for PlatformKey {
         Ok(Platform {
             label: self.0,
             constraints,
+            exec_properties,
         })
     }
 }

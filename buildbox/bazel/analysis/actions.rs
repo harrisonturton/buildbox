@@ -326,6 +326,8 @@ fn primary_input(given: Option<Value<'_>>, tools: &Tools) -> Option<Artifact> {
 
 /// What `run` and `run_shell` share.
 struct SpawnArgs<'v> {
+    /// The exec group the action runs in, or `None` for the rule's own.
+    exec_group: Option<Symbol>,
     outputs: Value<'v>,
     inputs: Option<Value<'v>>,
     tools: Option<Value<'v>>,
@@ -379,6 +381,8 @@ impl<'v> SpawnArgs<'v> {
                 execution_info: crate::state::action_execution_info(string_dict(self.execution_requirements, "execution_requirements")?, &state.tag_execution_info),
                 param_files,
                 directory_args,
+                exec_group: self.exec_group,
+                platform: Vec::new(),
             }),
         };
         state.register(action)?;
@@ -657,7 +661,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let _ = (unused_inputs_list, input_manifests, shadowed_action, resource_set, toolchain);
         let state = RuleState::get(eval)?;
-        state.check_exec_group(exec_group)?;
+        let exec_group = state.check_exec_group(exec_group)?;
         let accepted = executable.unpack_str().is_some() || FileValue::artifact(executable).is_some() || FilesToRun::from_value(executable).is_some();
         if !accepted {
             anyhow::bail!(
@@ -675,6 +679,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
             }
         };
         let spawn = SpawnArgs {
+            exec_group,
             outputs,
             inputs,
             tools,
@@ -713,7 +718,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let _ = (input_manifests, shadowed_action, resource_set, toolchain);
         let state = RuleState::get(eval)?;
-        state.check_exec_group(exec_group)?;
+        let exec_group = state.check_exec_group(exec_group)?;
         let has_arguments = arguments.and_then(bazel_starlark::convert::items).is_some_and(|items| !items.is_empty());
         let command = match command.unpack_str() {
             Some(script) => {
@@ -724,6 +729,7 @@ fn actions_methods(builder: &mut MethodsBuilder) {
             None => bazel_starlark::convert::strings(command).ok_or_else(|| anyhow::anyhow!("run_shell: command must be a string"))?,
         };
         let spawn = SpawnArgs {
+            exec_group,
             outputs,
             inputs,
             tools,

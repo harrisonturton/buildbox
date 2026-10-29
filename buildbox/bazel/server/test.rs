@@ -186,7 +186,7 @@ async fn select_tests(
     }
     let mut keys = Vec::new();
     for target in selected {
-        let attrs = built_target(built, target).and_then(|built| built.test).unwrap_or_default();
+        let attrs = built_target(built, target).and_then(|built| built.test.clone()).unwrap_or_default();
         let label = target.label.to_string();
         let shards = repetition.shards(attrs.shard_count);
         let attempts = repetition.attempts(&label, attrs.flaky);
