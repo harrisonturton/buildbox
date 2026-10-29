@@ -16,6 +16,7 @@ pub mod fetch_repo;
 pub mod git;
 pub mod graph_access;
 pub mod io;
+pub mod lockfile;
 pub mod module_ctx;
 pub mod module_file;
 pub mod path_value;

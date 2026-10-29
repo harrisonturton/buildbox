@@ -5,6 +5,8 @@ use crate::running::RunningCommand;
 use crate::BazelServer;
 use crate::workspace;
 use bazel_bzlmod::command_overrides::CommandOverrides;
+use bazel_bzlmod::lockfile::{LockfileKey, LockfileMode, LockfileModeKey};
+use bazel_bzlmod::resolve::DepGraphKey;
 use bazel_fetch::CredentialHelpers;
 use bazel_bzlmod::registry::Registries;
 use bazel_bzlmod::repo_env::RepoEnvironment;
@@ -40,7 +42,7 @@ pub fn repo_environment(context: &CommandContext<'_>, options: &ParsedOptions) -
 /// repositories and modules, and the files that changed. Returns the error
 /// for an override the options give wrongly.
 pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Workspace, options: &ParsedOptions) -> Result<(), String> {
-    check_lockfile_mode(options)?;
+    let mode = lockfile_mode(options)?;
     let overrides = command_overrides(context, options)?;
     workspace.credentials.set(credential_helpers(context, options)?);
     workspace.refresh(repo_environment(context, options)).await;
@@ -52,19 +54,50 @@ pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Worksp
     };
     workspace.set_registries(registries).await;
     workspace.set_overrides(overrides).await;
+    workspace.set_lockfile_mode(mode).await;
     workspace.set_autoloads(autoload_settings(context, options)).await;
     Ok(())
 }
 
-/// Check `--lockfile_mode`. bb neither reads nor writes `MODULE.bazel.lock`,
-/// which is what `off` asks for, and what `update` comes to without a
-/// lockfile to keep; `refresh` and `error` it can't do.
-fn check_lockfile_mode(options: &ParsedOptions) -> Result<(), String> {
+/// The lockfile mode `--lockfile_mode` gives.
+fn lockfile_mode(options: &ParsedOptions) -> Result<LockfileMode, String> {
     let mode = options.get("lockfile_mode").unwrap_or("update");
-    match mode.to_ascii_lowercase().as_str() {
-        "off" | "update" => Ok(()),
-        "refresh" | "error" => Err(format!("--lockfile_mode={mode} :: bb doesn't support --lockfile_mode={mode} yet")),
-        _ => Err(format!("While parsing option --lockfile_mode={mode}: Not a valid Lockfile mode: '{mode}' (should be off, update, refresh or error)")),
+    LockfileMode::parse(mode).ok_or_else(|| format!("While parsing option --lockfile_mode={mode}: Not a valid Lockfile mode: '{mode}' (should be off, update, refresh or error)"))
+}
+
+/// The commands that resolve the module graph, after which the lockfile
+/// is updated, as Bazel updates it after commands that load packages.
+const RESOLVING_COMMANDS: &[&str] = &["build", "test", "run", "query", "cquery", "aquery", "fetch", "mod"];
+
+/// Write the lockfile a command's resolution makes, if its mode writes the
+/// lockfile and what it records changed. A command that couldn't resolve
+/// the graph leaves it alone.
+async fn update_lockfile(context: &CommandContext<'_>, command: &str) {
+    if !RESOLVING_COMMANDS.contains(&command) {
+        return;
+    }
+    let workspace = context.server.workspaces().get(&context.workspace_root);
+    let session = workspace.graph.session().await;
+    let Ok(mode) = session.evaluate(&LockfileModeKey).await else {
+        return;
+    };
+    if !mode.writes() {
+        return;
+    }
+    let (Ok(graph), Ok(old)) = (session.evaluate(&DepGraphKey).await, session.evaluate(&LockfileKey).await) else {
+        return;
+    };
+    let text = old.updated(&graph).render();
+    let path = context.workspace_root.join(bazel_bzlmod::lockfile::LOCKFILE);
+    let written = tokio::task::spawn_blocking(move || {
+        if std::fs::read_to_string(&path).is_ok_and(|current| current == text) {
+            return Ok(());
+        }
+        std::fs::write(&path, text)
+    })
+    .await;
+    if let Ok(Err(error)) = written {
+        tracing::warn!("failed to write {}: {error}", bazel_bzlmod::lockfile::LOCKFILE);
     }
 }
 
@@ -213,6 +246,9 @@ fn pinned_major_version(workspace: &std::path::Path) -> Option<u32> {
 /// The error for a main repository mapping that couldn't be computed, as
 /// Bazel words it.
 pub fn main_mapping_error(message: &str) -> String {
+    if bazel_bzlmod::lockfile::is_lockfile_error(message) {
+        return message.to_string();
+    }
     format!("Error computing the main repository mapping: {message}")
 }
 
@@ -442,6 +478,7 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         "mod" => crate::modcmd::mod_command(&context, args, out).await,
         other => unsupported(other, out).await,
     };
+    update_lockfile(&context, &command).await;
     crate::build_events::finish(code, out).await
 }
 

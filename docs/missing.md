@@ -157,10 +157,14 @@ and Bazel's summaries work as in Bazel. Missing:
 
 ## 8. Bzlmod and repositories
 
-- **Lockfile.** `MODULE.bazel.lock` is neither read nor written:
-  `--lockfile_mode=off` and `update` are taken, `refresh` and `error` are
-  errors. `extension_metadata` and `repo_metadata(reproducible = ...)` are
-  accepted and ignored, so there are no `use_repo` fix-up warnings.
+- **Lockfile.** `MODULE.bazel.lock` is read and written as Bazel does
+  for registry files and yanked versions, in every `--lockfile_mode`
+  (`bzlmod/lockfile.rs`). bb can't compute Bazel's digests of module
+  extensions, so it keeps the extension entries and facts the lockfile has
+  for extensions still in use, as written, adds none, and always evaluates
+  extensions rather than reusing an entry. With `--lockfile_mode=error`, a
+  non-reproducible extension must have an entry, but whether the entry is
+  up to date isn't checked.
 - **Repository rules:**
   - `.7z`, `.deb` and `.ar` archives can't be extracted (`fetch/extract.rs`).
   - `execute(quiet = False)` doesn't show the output, and
@@ -236,6 +240,6 @@ like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
 
 ## Suggested order
 
-1. The lockfile (section 8).
+1. Persistent workers (section 2).
 2. `map_each` over directories (section 4).
 3. Apple (section 1).

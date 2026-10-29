@@ -4,6 +4,7 @@ use crate::written::Written;
 use bazel_analysis::workspace_status::{BuildStatus, StatusValues, WorkspaceStatusKey};
 use bazel_bzlmod::command_overrides::{CommandOverrides, CommandOverridesKey, CommandOverridesService};
 use bazel_bzlmod::config::CommandCredentials;
+use bazel_bzlmod::lockfile::{CommandLockfileMode, LockfileMode, LockfileModeKey};
 use bazel_bzlmod::registry::{CommandRegistries, Registries, RegistriesKey};
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
 use bazel_execution::{Jobs, SourceDigestKey, TestKey};
@@ -46,6 +47,8 @@ pub struct Workspace {
     pub overrides: Arc<CommandOverridesService>,
     /// The credential helpers downloads authenticate with.
     pub credentials: Arc<CommandCredentials>,
+    /// How the command uses `MODULE.bazel.lock`.
+    pub lockfile_mode: Arc<CommandLockfileMode>,
     /// Which symbols are autoloaded, and where.
     pub autoloads: Arc<CommandAutoloads>,
     /// What builds wrote to the output tree.
@@ -124,6 +127,13 @@ impl Workspace {
         }
     }
 
+    /// Use the lockfile as `mode` says.
+    pub async fn set_lockfile_mode(&self, mode: LockfileMode) {
+        if self.lockfile_mode.set(mode) {
+            self.graph.invalidate(&[LockfileModeKey]).await;
+        }
+    }
+
     /// Replace and add repositories and modules as these overrides say.
     pub async fn set_overrides(&self, overrides: CommandOverrides) {
         if self.overrides.set(overrides) {
@@ -181,6 +191,7 @@ impl Workspaces {
         let registries = CommandRegistries::new();
         let overrides = CommandOverridesService::new();
         let credentials = CommandCredentials::new();
+        let lockfile_mode = CommandLockfileMode::new();
         let autoloads = CommandAutoloads::new();
         let progress = Progress::new();
         let jobs = Arc::new(Jobs::default());
@@ -194,6 +205,7 @@ impl Workspaces {
             .with(registries.clone())
             .with(overrides.clone())
             .with(credentials.clone())
+            .with(lockfile_mode.clone())
             .with(autoloads.clone())
             .with(progress.clone())
             .with(jobs.clone());
@@ -206,6 +218,7 @@ impl Workspaces {
             registries,
             overrides,
             credentials,
+            lockfile_mode,
             autoloads,
             written: Arc::default(),
             progress,

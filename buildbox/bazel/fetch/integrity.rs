@@ -42,6 +42,13 @@ impl HashAlgorithm {
     }
 }
 
+/// The SHA-256 of `bytes`, in lowercase hex, as Bazel records registry
+/// files' hashes.
+pub fn sha256_hex_of(bytes: &[u8]) -> String {
+    let digest = ring::digest::digest(&SHA256, bytes);
+    digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 impl Integrity {
     /// A hex-encoded SHA-256, as `sha256 = "..."` gives.
     pub fn sha256_hex(hex: &str) -> Result<Integrity, IntegrityError> {

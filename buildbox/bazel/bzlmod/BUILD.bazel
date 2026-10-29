@@ -15,6 +15,7 @@ rust_library(
         "git.rs",
         "graph_access.rs",
         "io.rs",
+        "lockfile.rs",
         "module_ctx.rs",
         "module_file.rs",
         "path_value.rs",

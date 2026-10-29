@@ -3,6 +3,7 @@
 use crate::attrs::{AttrContext, apply_schema, from_recorded};
 use crate::config::BzlmodConfig;
 use crate::graph_access::GraphAccess;
+use crate::lockfile::{LockfileKey, LockfileMode, LockfileModeKey};
 use crate::io::IoState;
 use crate::module_ctx::{ModuleCtx, Tag};
 use crate::repo_spec::RepoRuleSpec;
@@ -70,17 +71,35 @@ impl Key for ExtensionKey {
         };
         let span = tracing::info_span!("bzlmod.module_extension", extension = %info.prefix);
         let graph = graph.clone();
+        let evaluated = info.clone();
         let result = tokio::task::spawn_blocking(move || {
             let _entered = span.enter();
             let _ = std::fs::remove_dir_all(&work_dir);
             std::fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
-            let result = run_extension(&graph, self_index(&info, &graph), &module, io, mappings);
+            let result = run_extension(&graph, self_index(&evaluated, &graph), &module, io, mappings);
             let _ = std::fs::remove_dir_all(&work_dir);
-            result.map_err(|error| format!("module extension {} in {}: {error}", info.name, info.bzl))
+            result.map_err(|error| format!("module extension {} in {}: {error}", evaluated.name, evaluated.bzl))
         })
         .await;
-        let repos = result.map_err(|error| SkyError::transient(error.to_string()))?.map_err(SkyError::new)?;
+        let (repos, reproducible) = result.map_err(|error| SkyError::transient(error.to_string()))?.map_err(SkyError::new)?;
+        check_lockfile_entry(ctx, &info, reproducible).await?;
         Ok(ExtensionResult { repos })
+    }
+}
+
+/// With `--lockfile_mode=error`, an extension that isn't reproducible must
+/// have an entry in the lockfile, as Bazel requires. bb can't check that
+/// the entry is up to date, only that it's there.
+async fn check_lockfile_entry(ctx: &Ctx, info: &crate::resolve::ExtensionInfo, reproducible: bool) -> Result<(), SkyError> {
+    if reproducible || *ctx.compute(&LockfileModeKey).await? != LockfileMode::Error {
+        return Ok(());
+    }
+    let id = format!("{}%{}", info.bzl.canonical_form(), info.name);
+    let lockfile = ctx.compute(&LockfileKey).await?;
+    let recorded = lockfile.module_extensions.iter().any(|(entry, _)| *entry == id || entry.strip_prefix(id.as_str()).is_some_and(|rest| rest.starts_with('%')));
+    match recorded {
+        true => Ok(()),
+        false => Err(SkyError::new(format!("The module extension '{id}' does not exist in the lockfile"))),
     }
 }
 
@@ -96,7 +115,7 @@ fn run_extension(
     module: &bazel_loading::BzlModule,
     io: IoState,
     mappings: HashMap<RepoName, Arc<RepoMappingTable>>,
-) -> anyhow::Result<Vec<(String, RepoRuleSpec)>> {
+) -> anyhow::Result<(Vec<(String, RepoRuleSpec)>, bool)> {
     let info = &graph.extensions[index];
     let owner = info.bzl.repo();
     let mut context = EvalContext::new(FileKind::Bzl, info.bzl);
@@ -104,7 +123,7 @@ fn run_extension(
     context.repos = Some(RefCell::new(Vec::new()));
     let graph_access = io.graph.clone();
 
-    let result = Module::with_temp_heap(|env| -> anyhow::Result<()> {
+    let result = Module::with_temp_heap(|env| -> anyhow::Result<bool> {
         let heap = env.heap();
         let (value, _) = module
             .module
@@ -125,14 +144,15 @@ fn run_extension(
         });
         let mut eval = Evaluator::new(&env);
         eval.extra = Some(&context);
-        eval.eval_function(extension.implementation, &[ctx], &[]).map_err(|error| anyhow::anyhow!("{error}"))?;
-        Ok(())
+        let returned = eval.eval_function(extension.implementation, &[ctx], &[]).map_err(|error| anyhow::anyhow!("{error}"))?;
+        let metadata = starlark::values::ValueLike::downcast_ref::<crate::module_ctx::ExtensionMetadata>(returned);
+        Ok(metadata.is_some_and(|metadata| metadata.reproducible))
     });
     graph_access.report_printed(&context.printed.take());
-    result?;
+    let reproducible = result?;
 
     let definitions = context.repos.take().map(RefCell::into_inner).unwrap_or_default();
-    Ok(definitions
+    let repos = definitions
         .into_iter()
         .map(|definition| {
             let spec = RepoRuleSpec {
@@ -144,7 +164,8 @@ fn run_extension(
             };
             (definition.name, spec)
         })
-        .collect())
+        .collect();
+    Ok((repos, reproducible))
 }
 
 /// `module_ctx.modules`: each module using the extension, with its tags.

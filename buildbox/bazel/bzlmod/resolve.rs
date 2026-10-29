@@ -8,6 +8,7 @@ use crate::fetch_repo::read_label_patch;
 use crate::registry::{self, Registries, RegistriesKey, RegistryFileKey, RegistryLookup, RegistryModule, RegistryModuleKey};
 use crate::selection::{self, DepSpec, Interim, ModuleKey, MultipleVersions, Selection};
 use crate::command_overrides::CommandOverridesKey;
+use crate::lockfile::{Lockfile, LockfileKey, LockfileMode, LockfileModeKey};
 use crate::repo_spec::{OverrideSpec, RepoRuleSpec, RepoSpec};
 use crate::star_value::StarValue;
 use bazel_fs::{Root, RootedPath, WorkspaceRootKey};
@@ -15,7 +16,7 @@ use bazel_label::{Label, LabelContext, PackageId, RepoMapping, RepoMappingTable,
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
 use skyframe::{encoded_value, Ctx, Key, SkyError};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 /// Modules whose repositories keep their module name as their canonical
@@ -154,11 +155,22 @@ pub struct DepGraph {
     /// The selected versions their registries have yanked, with why,
     /// which are errors unless `--allow_yanked_versions` allows them.
     pub yanked: Vec<(String, String)>,
+    /// The registry files resolution read, by URL, with their SHA-256,
+    /// `None` where a registry didn't have one, as the lockfile records
+    /// them: every MODULE.bazel looked for, and the source files of the
+    /// selected modules.
+    pub registry_file_hashes: Vec<(String, Option<String>)>,
 }
 
 encoded_value!(DepGraph);
 
 impl DepGraph {
+    /// The ids of the module extensions the graph uses, as the lockfile
+    /// names them: `@@repo//pkg:file.bzl%name`.
+    pub fn extension_ids(&self) -> Vec<String> {
+        self.extensions.iter().map(|extension| format!("{}%{}", extension.bzl.canonical_form(), extension.name)).collect()
+    }
+
     pub fn module(&self, repo: RepoName) -> Option<(usize, &ResolvedModule)> {
         self.modules.iter().enumerate().find(|(_, module)| module.repo == repo)
     }
@@ -350,13 +362,18 @@ impl Key for DepGraphKey {
         let selection = selection::select(&graph, &discovery.order, &multiple_versions(&overrides)).map_err(SkyError::new)?;
         let modules = resolved_modules(&root, &discovery, &selection);
         let direct_dep_mismatches = direct_dep_mismatches(&graph, &selection);
-        let yanked = yanked_versions(ctx, &discovery, &selection).await?;
+        let mode = *ctx.compute(&LockfileModeKey).await?;
+        let lockfile = ctx.compute(&LockfileKey).await?;
+        let registry_file_hashes = registry_file_hashes(&discovery, &selection);
+        check_registry_files(mode, &lockfile, &registry_file_hashes)?;
+        let yanked = yanked_versions(ctx, &discovery, &selection, mode, &lockfile).await?;
         let extensions = extensions(&modules)?;
         Ok(DepGraph {
             modules,
             extensions,
             direct_dep_mismatches,
             yanked,
+            registry_file_hashes,
         })
     }
 }
@@ -367,6 +384,10 @@ struct Discovered {
     spec: Option<RepoSpec>,
     /// The registry it came from, if it came from one.
     registry: Option<String>,
+    /// The registry files its MODULE.bazel was looked for in, and those its
+    /// spec came from, with their SHA-256, as the lockfile records them.
+    module_files: Vec<(String, Option<String>)>,
+    source_files: Vec<(String, Option<String>)>,
 }
 
 /// The module versions reachable from the root, before selection, in the
@@ -440,7 +461,7 @@ async fn discovery_round(
     overrides: &HashMap<String, Override>,
     known: &HashSet<String>,
 ) -> Result<(Discovery, HashSet<String>), SkyError> {
-    let mut modules = HashMap::from([(ModuleKey::root(), Discovered { file: root.clone(), spec: None, registry: None })]);
+    let mut modules = HashMap::from([(ModuleKey::root(), Discovered { file: root.clone(), spec: None, registry: None, module_files: Vec::new(), source_files: Vec::new() })]);
     let mut order = vec![ModuleKey::root()];
     let mut parents: HashMap<ModuleKey, ModuleKey> = HashMap::new();
     let mut unfulfilled = HashSet::new();
@@ -522,6 +543,8 @@ async fn fetch_modules(
             file,
             spec: Some(spec),
             registry: Some(module.registry.clone()),
+            module_files: module.module_files.clone(),
+            source_files: module.source_files.clone(),
         });
     }
     Ok(modules)
@@ -645,18 +668,81 @@ fn direct_dep_mismatches(graph: &HashMap<ModuleKey, Interim>, selection: &Select
 
 /// The selected versions their registries have yanked, as `name@version`,
 /// with why.
-async fn yanked_versions(ctx: &Ctx, discovery: &Discovery, selection: &Selection) -> Result<Vec<(String, String)>, SkyError> {
+async fn yanked_versions(ctx: &Ctx, discovery: &Discovery, selection: &Selection, mode: LockfileMode, lockfile: &Lockfile) -> Result<Vec<(String, String)>, SkyError> {
     let mut yanked = Vec::new();
     for selected in &selection.modules {
-        let Some(registry) = &discovery.modules[&selected.key].registry else {
+        let discovered = &discovery.modules[&selected.key];
+        let Some(registry) = &discovered.registry else {
             continue;
         };
+        match recorded_yanked(mode, lockfile, &selected.key.to_string(), discovered) {
+            Some(Some(reason)) => {
+                yanked.push((selected.key.to_string(), reason));
+                continue;
+            }
+            Some(None) => continue,
+            None => {}
+        }
         let reasons = ctx.compute(&registry::YankedVersionsKey { registry: registry.clone(), name: selected.key.name.clone() }).await?;
         if let Some((_, reason)) = reasons.0.iter().find(|(version, _)| *version == selected.key.version) {
             yanked.push((selected.key.to_string(), reason.clone()));
         }
     }
     Ok(yanked)
+}
+
+/// Whether the lockfile says a selected module is yanked, as Bazel trusts
+/// it: `Some` with why if it was yanked, `Some(None)` if it wasn't, or
+/// `None` if the registry must be asked. A module selected when the
+/// lockfile was written, whose `source.json` it records, wasn't yanked
+/// then; `refresh` always asks, and `error` never may.
+fn recorded_yanked(mode: LockfileMode, lockfile: &Lockfile, key: &str, discovered: &Discovered) -> Option<Option<String>> {
+    if matches!(mode, LockfileMode::Off | LockfileMode::Refresh) {
+        return None;
+    }
+    if let Some(reason) = lockfile.selected_yanked_versions.get(key) {
+        return Some(Some(reason.clone()));
+    }
+    if mode == LockfileMode::Error {
+        return Some(None);
+    }
+    let recorded = discovered.source_files.first().is_some_and(|(url, _)| lockfile.registry_file_hashes.contains_key(url));
+    recorded.then_some(None)
+}
+
+/// The registry files resolution read, as the lockfile records them.
+fn registry_file_hashes(discovery: &Discovery, selection: &Selection) -> Vec<(String, Option<String>)> {
+    let mut hashes: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for discovered in discovery.modules.values() {
+        hashes.extend(discovered.module_files.iter().cloned());
+    }
+    for selected in &selection.modules {
+        hashes.extend(discovery.modules[&selected.key].source_files.iter().cloned());
+    }
+    hashes.into_iter().collect()
+}
+
+/// Check the registry files read against the lockfile, as Bazel does as
+/// it downloads them: a file whose hash it records must still have it, and
+/// with `--lockfile_mode=error`, every remote file must be recorded.
+fn check_registry_files(mode: LockfileMode, lockfile: &Lockfile, hashes: &[(String, Option<String>)]) -> Result<(), SkyError> {
+    if mode == LockfileMode::Off {
+        return Ok(());
+    }
+    for (url, hash) in hashes.iter().filter(|(url, _)| !url.starts_with("file:")) {
+        match (lockfile.registry_file_hashes.get(url), hash) {
+            (None, _) if mode == LockfileMode::Error => {
+                return Err(SkyError::new(format!(
+                    "Missing checksum for registry file {url} not permitted with --lockfile_mode=error. Please run `bb mod deps --lockfile_mode=update` to update your lockfile."
+                )));
+            }
+            (Some(Some(wanted)), Some(actual)) if wanted != actual => {
+                return Err(SkyError::new(format!("Failed to fetch registry file {url}: Checksum was {actual} but wanted {wanted}")));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// A registry module's MODULE.bazel, with the changes a
@@ -728,7 +814,7 @@ async fn special_module(
             dir: dir.display().to_string(),
         };
         let file = read_module_file(ctx, Root::Dir(Symbol::intern(&dir.display().to_string())), "bazel_tools").await?;
-        return Ok(Some(Discovered { file, spec: Some(spec), registry: None }));
+        return Ok(Some(Discovered { file, spec: Some(spec), registry: None, module_files: Vec::new(), source_files: Vec::new() }));
     }
     let Some(override_) = overrides.get(name) else {
         return Ok(None);
@@ -751,7 +837,7 @@ async fn special_module(
     let fetched = ctx.compute(&FetchSpecKey { repo, spec: spec.clone() }).await;
     let fetched = fetched.map_err(|error| error.context("error during computation of main repo mapping"))?;
     let file = read_module_file(ctx, Root::Dir(fetched.dir), name).await?;
-    Ok(Some(Discovered { file, spec: Some(spec), registry: None }))
+    Ok(Some(Discovered { file, spec: Some(spec), registry: None, module_files: Vec::new(), source_files: Vec::new() }))
 }
 
 /// One of `@bazel_tools`'s rules that overrides fetch modules with.
@@ -937,6 +1023,7 @@ use_repo(crate, "crates")
             extensions,
             direct_dep_mismatches: Vec::new(),
             yanked: Vec::new(),
+            registry_file_hashes: Vec::new(),
         };
         let app_crates = graph.module_mapping(0).resolve("app_crates").unwrap();
         assert_eq!(app_crates.as_str(), "rules_rust++crate+app_crates");

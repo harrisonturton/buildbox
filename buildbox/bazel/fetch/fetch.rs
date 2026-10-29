@@ -15,6 +15,6 @@ mod patch;
 pub use credentials::CredentialHelpers;
 pub use download::{DownloadCache, DownloadError, RequestHeaders};
 pub use extract::{ArchiveType, ExtractError, extract};
-pub use integrity::{Integrity, IntegrityError};
+pub use integrity::{Integrity, IntegrityError, sha256_hex_of};
 pub use netrc::{Credentials, Netrc};
 pub use patch::{PatchError, apply_patch, apply_to_file};

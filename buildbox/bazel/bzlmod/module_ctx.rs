@@ -7,7 +7,6 @@ use starlark::collections::SmallMap;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_complex_value;
 use starlark::starlark_module;
-use starlark::values::none::NoneType;
 use starlark::values::{
     Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
@@ -85,16 +84,37 @@ fn module_methods(builder: &mut MethodsBuilder) {
         }
     }
 
-    /// What the extension tells Bazel about the repositories it generates.
-    /// Accepted and ignored.
+    /// What the extension tells Bazel about the repositories it generates,
+    /// which it returns. bb keeps whether its result is reproducible.
     fn extension_metadata<'v>(
         this: Value<'v>,
         #[starlark(kwargs)] kwargs: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        let _ = (this, kwargs);
-        Ok(NoneType)
+    ) -> anyhow::Result<ExtensionMetadata> {
+        let _ = this;
+        let reproducible = kwargs.get("reproducible").is_some_and(|value| value.to_bool());
+        Ok(ExtensionMetadata { reproducible })
     }
 }
+
+/// What `module_ctx.extension_metadata()` returns, which an extension's
+/// implementation returns in turn.
+#[derive(Debug, Clone, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
+pub struct ExtensionMetadata {
+    /// Whether the extension's result depends only on its inputs, so the
+    /// lockfile needn't record it.
+    pub reproducible: bool,
+}
+
+starlark::starlark_simple_value!(ExtensionMetadata);
+
+impl fmt::Display for ExtensionMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<extension_metadata>")
+    }
+}
+
+#[starlark::values::starlark_value(type = "extension_metadata")]
+impl<'v> StarlarkValue<'v> for ExtensionMetadata {}
 
 /// A tag, with its attributes converted by its tag class.
 #[derive(Debug, Trace, Freeze, NoSerialize, ProvidesStaticType, Allocative, StarlarkPagablePanic)]

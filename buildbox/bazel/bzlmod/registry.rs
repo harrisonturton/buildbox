@@ -1,6 +1,7 @@
 //! Reading modules from registries.
 
 use crate::config::BzlmodConfig;
+use crate::lockfile::{LockfileKey, LockfileMode, LockfileModeKey};
 use crate::module_file::{self, GitSource, ModuleFile};
 use crate::repo_spec::{ArchiveSpec, GitSpec, RemoteFile, RepoSpec};
 use skycodec::{Decode, Encode, Fingerprint};
@@ -165,6 +166,12 @@ pub struct RegistryModule {
     pub registry: String,
     pub file: ModuleFile,
     pub spec: RepoSpec,
+    /// The URLs of the MODULE.bazel files looked for, in each registry
+    /// until one had it, with their SHA-256, `None` where it was missing.
+    pub module_files: Vec<(String, Option<String>)>,
+    /// The other registry files the module's spec came from, with their
+    /// SHA-256: its `source.json` and the registry's `bazel_registry.json`.
+    pub source_files: Vec<(String, Option<String>)>,
 }
 
 /// A module version from the first registry that has it, or if none has
@@ -192,21 +199,34 @@ impl Key for RegistryModuleKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<RegistryLookup, SkyError> {
         let mut missing = String::new();
+        let mut module_files = Vec::new();
+        let mode = ctx.compute(&LockfileModeKey).await?;
+        let lockfile = ctx.compute(&LockfileKey).await?;
         for registry in &self.registries {
             let url = module_file_url(registry, &self.name, &self.version);
+            let known_missing = lockfile.registry_file_hashes.get(&url).is_some_and(Option::is_none);
+            if known_missing && matches!(*mode, LockfileMode::Update | LockfileMode::Error) {
+                missing.push_str(&format!("\n* {url}: previously not found (as recorded in MODULE.bazel.lock, refresh with --lockfile_mode=refresh)"));
+                module_files.push((url, None));
+                continue;
+            }
             let module_file = ctx.compute(&RegistryFileKey(url.clone())).await;
             let module_file = module_file.map_err(|error| error.context(format!("Error accessing registry {registry}")))?;
             let Some(bytes) = &module_file.0 else {
                 missing.push_str(&format!("\n* {url}: not found"));
+                module_files.push((url, None));
                 continue;
             };
+            module_files.push((url.clone(), Some(bazel_fetch::sha256_hex_of(bytes))));
             let source = String::from_utf8_lossy(bytes).into_owned();
             let file = module_file::evaluate(&url, &source, false, None).map_err(|error| SkyError::new(format!("{url}: {error}")))?;
-            let source_json = ctx.compute(&RegistryFileKey(source_url(registry, &self.name, &self.version))).await?;
+            let source_json_url = source_url(registry, &self.name, &self.version);
+            let source_json = ctx.compute(&RegistryFileKey(source_json_url.clone())).await?;
             let Some(source_json) = &source_json.0 else {
                 return Err(SkyError::new(format!("{registry} has no source.json for {}@{}", self.name, self.version)));
             };
-            let registry_json = registry_json(ctx, registry).await?;
+            let (registry_json, registry_json_file) = registry_json(ctx, registry).await?;
+            let source_files = vec![(source_json_url, Some(bazel_fetch::sha256_hex_of(source_json))), registry_json_file];
             let mut mirrors = self.mirrors.clone();
             mirrors.extend(registry_json.mirrors.iter().filter(|mirror| !self.mirrors.contains(mirror)).cloned());
             let found = Found {
@@ -222,6 +242,8 @@ impl Key for RegistryModuleKey {
                 registry: registry.clone(),
                 file,
                 spec,
+                module_files,
+                source_files,
             }));
         }
         Ok(RegistryLookup::Missing(missing))
@@ -235,21 +257,23 @@ struct RegistryJson {
     module_base_path: Option<String>,
 }
 
-/// A registry's `bazel_registry.json`, or the defaults if it has none.
-async fn registry_json(ctx: &Ctx, registry: &str) -> Result<RegistryJson, SkyError> {
+/// A registry's `bazel_registry.json`, or the defaults if it has none,
+/// with its URL and SHA-256.
+async fn registry_json(ctx: &Ctx, registry: &str) -> Result<(RegistryJson, (String, Option<String>)), SkyError> {
     let url = format!("{}/bazel_registry.json", registry.trim_end_matches('/'));
     let file = ctx.compute(&RegistryFileKey(url.clone())).await;
     let file = file.map_err(|error| error.context(format!("Error accessing registry {registry}")))?;
     let Some(bytes) = &file.0 else {
-        return Ok(RegistryJson::default());
+        return Ok((RegistryJson::default(), (url, None)));
     };
+    let hash = bazel_fetch::sha256_hex_of(bytes);
     let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| SkyError::new(format!("invalid {url}: {error}")))?;
     let mirrors = match json.get("mirrors").and_then(|mirrors| mirrors.as_array()) {
         Some(mirrors) => mirrors.iter().filter_map(|mirror| mirror.as_str()).map(|mirror| mirror.trim_end_matches('/').to_string()).collect(),
         None => Vec::new(),
     };
     let module_base_path = json.get("module_base_path").and_then(|path| path.as_str()).map(str::to_string);
-    Ok(RegistryJson { mirrors, module_base_path })
+    Ok((RegistryJson { mirrors, module_base_path }, (url, Some(hash))))
 }
 
 /// A module version found in a registry, and what the registry says of
