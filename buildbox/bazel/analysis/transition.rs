@@ -212,7 +212,8 @@ async fn exec_options(ctx: &Ctx, transition: &OwnedFrozenValue, config: ConfigId
     let (settings, mappings) = transitions_context(ctx, &transitions).await?;
     let mut start = BuildOptions::default();
     start.starlark_flags = options.starlark_flags.clone();
-    start.action_env = options.action_env.clone();
+    start.action_env = options.host_action_env.clone();
+    start.host_action_env = options.host_action_env.clone();
     let defines = options.get("define").map_err(|error| SkyError::new(error.to_string()))?.clone();
     start.set("define", defines).map_err(|error| SkyError::new(error.to_string()))?;
     let input = OwnedInput {

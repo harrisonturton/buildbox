@@ -1138,7 +1138,8 @@ async fn configuration(context: &CommandContext<'_>, session: &Session, options:
         let host = build.label("host_platform").into_iter().collect();
         build.set("platforms", OptionValue::Labels(host)).map_err(|error| error.to_string())?;
     }
-    build.action_env = action_env(context, options);
+    build.action_env = action_env(context, options, "action_env");
+    build.host_action_env = action_env(context, options, "host_action_env");
     set_starlark_flags(context, session, &mut build, options, main_mapping, &parse_label).await?;
     Ok(ConfigId::intern(&build))
 }
@@ -1203,8 +1204,10 @@ fn add_flag(given: &mut Vec<(BuildSetting, FlagValue)>, setting: BuildSetting, v
 
 /// The environment of actions that use the default shell environment, as
 /// Bazel gives it: a fixed `PATH`, or with
-/// `--noincompatible_strict_action_env` the client's, and `--action_env`s.
-fn action_env(context: &CommandContext<'_>, options: &ParsedOptions) -> Vec<(String, String)> {
+/// `--noincompatible_strict_action_env` the client's, and the variables of
+/// `option`, `action_env` or `host_action_env`. A variable taken from the
+/// client that the client doesn't set is left out.
+fn action_env(context: &CommandContext<'_>, options: &ParsedOptions, option: &str) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
     let path = match options.flag("incompatible_strict_action_env", true) {
         true => Some(STRICT_PATH.to_string()),
@@ -1213,13 +1216,15 @@ fn action_env(context: &CommandContext<'_>, options: &ParsedOptions) -> Vec<(Str
     if let Some(path) = path {
         env.push(("PATH".to_string(), path));
     }
-    for entry in options.all("action_env") {
+    for entry in options.all(option) {
         let (name, value) = match entry.split_once('=') {
-            Some((name, value)) => (name.to_string(), value.to_string()),
-            None => (entry.to_string(), context.env.get(entry).cloned().unwrap_or_default()),
+            Some((name, value)) => (name.to_string(), Some(value.to_string())),
+            None => (entry.to_string(), context.env.get(entry).cloned()),
         };
         env.retain(|(existing, _)| *existing != name);
-        env.push((name, value));
+        if let Some(value) = value {
+            env.push((name, value));
+        }
     }
     env.sort();
     env

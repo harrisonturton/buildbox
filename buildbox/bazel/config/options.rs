@@ -641,6 +641,9 @@ pub struct BuildOptions {
     /// The environment of actions that use the default shell environment,
     /// resolved against the client's, sorted by name.
     pub action_env: Vec<(String, String)>,
+    /// The environment `--host_action_env` gives, resolved the same way,
+    /// which Bazel's exec transition makes tools' `action_env`.
+    pub host_action_env: Vec<(String, String)>,
 }
 
 impl BuildOptions {
