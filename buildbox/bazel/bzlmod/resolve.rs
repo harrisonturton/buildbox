@@ -9,7 +9,7 @@ use crate::registry::{self, Registries, RegistriesKey, RegistryFileKey, Registry
 use crate::selection::{self, DepSpec, Interim, ModuleKey, MultipleVersions, Selection};
 use crate::repo_spec::{ArchiveSpec, GitSpec, RepoSpec};
 use bazel_fs::{Root, RootedPath, Workspace};
-use bazel_label::{Label, LabelContext, PackageId, RepoMappingTable, RepoName};
+use bazel_label::{Label, LabelContext, PackageId, RepoMapping, RepoMappingTable, RepoName};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
 use skyframe::{encoded_value, Ctx, Key, SkyError};
@@ -46,10 +46,7 @@ impl Key for RootModuleKey {
             return Ok(ModuleFileValue { file: ModuleFile::default(), error: None });
         };
         let source = String::from_utf8_lossy(&bytes).into_owned();
-        let reader = Includes {
-            ctx: ctx.clone(),
-            runtime: tokio::runtime::Handle::current(),
-        };
+        let reader = Includes::new(ctx, RepoName::MAIN, Root::Workspace);
         let file = tokio::task::spawn_blocking(move || module_file::evaluate_root(&source, Some(&reader)))
             .await
             .map_err(|error| SkyError::transient(error.to_string()))?;
@@ -60,26 +57,41 @@ impl Key for RootModuleKey {
     }
 }
 
-/// Reads files the root module includes through the graph.
+/// Reads the files a module includes, from its own repository, through
+/// the graph.
 struct Includes {
     ctx: Ctx,
     runtime: tokio::runtime::Handle,
+    repo: RepoName,
+    root: Root,
+}
+
+impl Includes {
+    /// A reader for the module whose repository is `repo`, found at `root`.
+    fn new(ctx: &Ctx, repo: RepoName, root: Root) -> Includes {
+        Includes {
+            ctx: ctx.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            repo,
+            root,
+        }
+    }
 }
 
 impl IncludeReader for Includes {
     fn read(&self, label: &str) -> anyhow::Result<String> {
-        let mapping = RepoMappingTable::new(RepoName::MAIN, Vec::new());
+        let mapping = RepoMappingTable::new(self.repo, Vec::new());
         let context = LabelContext {
-            package: PackageId::new(RepoName::MAIN, PathId::ROOT),
+            package: PackageId::new(self.repo, PathId::ROOT),
             mapping: &mapping,
             lenient: false,
         };
         let label = Label::parse(label, &context)?;
-        if !label.repo().is_main() {
-            anyhow::bail!("include() can only include files of the main repository");
+        if label.repo() != self.repo {
+            anyhow::bail!("include() can only include files of the module's own repository");
         }
         let path = label.package.path.join_path(PathId::parse(label.name.as_str())?);
-        let content = self.runtime.block_on(bazel_fs::read_file(&self.ctx, RootedPath::new(Root::Workspace, path)))?;
+        let content = self.runtime.block_on(bazel_fs::read_file(&self.ctx, RootedPath::new(self.root, path)))?;
         let Some(bytes) = content else {
             anyhow::bail!("include(): {label} doesn't exist");
         };
@@ -177,11 +189,12 @@ impl DepGraph {
         };
         for (usage_index, usage) in module.file.extension_usages.iter().enumerate() {
             let user = (index as u32, usage_index as u32);
-            let Some(extension) = self.extensions.iter().find(|extension| extension.users.contains(&user)) else {
+            let Some(extension) = self.extensions.iter().position(|extension| extension.users.contains(&user)) else {
                 continue;
             };
+            let overrides = self.repo_overrides(extension);
             for import in &usage.imports {
-                put(&import.apparent, RepoName::new(&format!("{}+{}", extension.prefix, import.exported)));
+                put(&import.apparent, self.imported_repo(extension, &import.exported, &overrides));
             }
         }
         for (call, repo) in module.file.repo_rules.iter().zip(repo_rule_repos(module)) {
@@ -199,18 +212,26 @@ impl DepGraph {
 
     /// How a module's repository sees others.
     pub fn module_mapping(&self, index: usize) -> RepoMappingTable {
+        self.mapping_of(index, true)
+    }
+
+    /// How a module's repository sees others, with or without the root
+    /// module's `override_repo`s applied to the repositories it imports
+    /// from extensions.
+    fn mapping_of(&self, index: usize, overridden: bool) -> RepoMappingTable {
         let module = &self.modules[index];
         let mut entries = base_entries(module);
         for (usage_index, usage) in module.file.extension_usages.iter().enumerate() {
             let Some(extension) = self
                 .extensions
                 .iter()
-                .find(|extension| extension.users.contains(&(index as u32, usage_index as u32)))
+                .position(|extension| extension.users.contains(&(index as u32, usage_index as u32)))
             else {
                 continue;
             };
+            let overrides = if overridden { self.repo_overrides(extension) } else { Vec::new() };
             for import in &usage.imports {
-                let repo = RepoName::new(&format!("{}+{}", extension.prefix, import.exported));
+                let repo = self.imported_repo(extension, &import.exported, &overrides);
                 entries.push((Symbol::intern(&import.apparent), repo));
             }
         }
@@ -218,6 +239,40 @@ impl DepGraph {
             entries.push((Symbol::intern(&call.name), repo));
         }
         RepoMappingTable::new(module.repo, entries)
+    }
+
+    /// The repositories the root module's `override_repo` and
+    /// `inject_repo` put in place of an extension's: each by the name the
+    /// extension knows it by, and the root module's repository that
+    /// replaces or joins it. Only the root module's count, as in Bazel.
+    pub fn repo_overrides(&self, extension: usize) -> Vec<(String, RepoName)> {
+        let Some(root) = self.modules.first() else {
+            return Vec::new();
+        };
+        let usages = self.extensions[extension].users.iter().filter(|(module, _)| *module == 0);
+        let pairs: Vec<&(String, String)> = usages
+            .flat_map(|(_, usage)| &root.file.extension_usages[*usage as usize].repo_overrides)
+            .collect();
+        if pairs.is_empty() {
+            return Vec::new();
+        }
+        let root_mapping = self.mapping_of(0, false);
+        let mut overrides = Vec::with_capacity(pairs.len());
+        for (exported, apparent) in pairs {
+            if let Some(repo) = root_mapping.resolve(apparent) {
+                overrides.push((exported.clone(), repo));
+            }
+        }
+        overrides
+    }
+
+    /// The repository a module sees when it imports `exported` from an
+    /// extension: the extension's own, unless the root module overrides it.
+    fn imported_repo(&self, extension: usize, exported: &str, overrides: &[(String, RepoName)]) -> RepoName {
+        match overrides.iter().find(|(name, _)| name == exported) {
+            Some((_, repo)) => *repo,
+            None => RepoName::new(&format!("{}+{}", self.extensions[extension].prefix, exported)),
+        }
     }
 }
 
@@ -705,12 +760,18 @@ async fn special_module(
     Ok(Some(Discovered { file, spec: Some(spec), registry: None }))
 }
 
+/// The MODULE.bazel of a module that doesn't come from a registry, which,
+/// as Bazel allows, may include files of its own repository.
 async fn read_module_file(ctx: &Ctx, root: Root, name: &str) -> Result<ModuleFile, SkyError> {
     let path = RootedPath::new(root, PathId::parse("MODULE.bazel").expect("a valid path"));
     let content = bazel_fs::read_file(ctx, path).await?;
     let source = content.as_deref().map(String::from_utf8_lossy).unwrap_or_default().into_owned();
-    let mut file = module_file::evaluate(&format!("@@{name}//:MODULE.bazel"), &source, false, None)
-        .map_err(|error| SkyError::new(format!("{name}: {error}")))?;
+    let file_name = format!("@@{name}//:MODULE.bazel");
+    let reader = Includes::new(ctx, canonical_name(name, "", false), root);
+    let file = tokio::task::spawn_blocking(move || module_file::evaluate(&file_name, &source, false, Some(&reader)))
+        .await
+        .map_err(|error| SkyError::transient(error.to_string()))?;
+    let mut file = file.map_err(|error| SkyError::new(format!("{name}: {error}")))?;
     if file.name.is_empty() {
         file.name = name.to_string();
     }
@@ -782,4 +843,59 @@ fn extensions(modules: &[ResolvedModule]) -> Result<Vec<ExtensionInfo>, SkyError
         }
     }
     Ok(extensions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn module(name: &str, repo: RepoName, deps: &[&str], source: &str) -> ResolvedModule {
+        let is_root = repo.is_main();
+        ResolvedModule {
+            name: name.to_string(),
+            version: String::new(),
+            repo,
+            self_name: name.to_string(),
+            deps: deps.iter().map(|dep| (dep.to_string(), canonical_name(dep, "", false))).collect(),
+            file: module_file::evaluate("MODULE.bazel", source, is_root, None).unwrap(),
+            spec: None,
+        }
+    }
+
+    #[test]
+    fn override_repo_replaces_an_extension_repo_for_every_module() {
+        let modules = vec![
+            module(
+                "app",
+                RepoName::MAIN,
+                &["lib", "rules_rust"],
+                r#"
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+use_repo(crate, "app_crates")
+override_repo(crate, crates = "app_crates")
+"#,
+            ),
+            module(
+                "lib",
+                canonical_name("lib", "", false),
+                &["rules_rust"],
+                r#"
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+use_repo(crate, "crates")
+"#,
+            ),
+            module("rules_rust", canonical_name("rules_rust", "", false), &[], ""),
+        ];
+        let extensions = extensions(&modules).unwrap();
+        let graph = DepGraph {
+            modules,
+            extensions,
+            direct_dep_mismatches: Vec::new(),
+            yanked: Vec::new(),
+        };
+        let app_crates = graph.module_mapping(0).resolve("app_crates").unwrap();
+        assert_eq!(app_crates.as_str(), "rules_rust++crate+app_crates");
+        assert_eq!(graph.module_mapping(1).resolve("crates"), Some(app_crates));
+        assert_eq!(graph.ordered_module_mapping(1)[0], ("crates".to_string(), app_crates));
+    }
 }

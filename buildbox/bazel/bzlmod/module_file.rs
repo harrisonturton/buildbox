@@ -386,7 +386,9 @@ impl ModuleContext<'_> {
 }
 
 /// Evaluate a MODULE.bazel file. Only the root module's dev dependencies
-/// and overrides are kept. `includes` reads files the root module includes.
+/// and overrides are kept. `includes` reads the files the module includes,
+/// and is only given for the root module and modules with non-registry
+/// overrides, which are the ones that may include files.
 pub fn evaluate(file_name: &str, source: &str, is_root: bool, includes: Option<&dyn IncludeReader>) -> anyhow::Result<ModuleFile> {
     let context = ModuleContext {
         file: RefCell::new(ModuleFile::default()),
@@ -773,13 +775,17 @@ fn module_functions(builder: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    fn include<'v>(#[starlark(require = pos)] label: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<NoneType> {
+    fn include<'v>(
+        #[starlark(require = pos)] label: &str,
+        #[starlark(require = named, default = false)] dev_dependency: bool,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
         let context = ModuleContext::get(eval)?;
-        if !context.is_root {
-            anyhow::bail!("include() can only be used in the root module");
+        if context.ignores(dev_dependency) {
+            return Ok(NoneType);
         }
         let Some(includes) = context.includes else {
-            anyhow::bail!("include() isn't available here");
+            anyhow::bail!("include() can only be used in the root module or in modules with non-registry overrides");
         };
         let source = includes.read(label)?;
         evaluate_into(label, &source, context)?;
@@ -990,6 +996,25 @@ include("//third_party:deps.MODULE.bazel")
         let file = evaluate("MODULE.bazel", &module, false, None).unwrap();
         assert!(file.deps.iter().all(|dep| dep.name != "devonly"));
         assert!(file.overrides.is_empty());
+    }
+
+    #[test]
+    fn overridden_modules_include_files() {
+        let file = evaluate("MODULE.bazel", MODULE, false, Some(&Includes)).unwrap();
+        assert!(file.deps.iter().any(|dep| dep.name == "included"));
+    }
+
+    #[test]
+    fn registry_modules_cant_include_files() {
+        let error = evaluate("MODULE.bazel", MODULE, false, None).unwrap_err();
+        assert!(error.to_string().contains("modules with non-registry overrides"), "{error}");
+    }
+
+    #[test]
+    fn other_modules_skip_dev_includes() {
+        let module = MODULE.replace(".MODULE.bazel\")", ".MODULE.bazel\", dev_dependency = True)");
+        let file = evaluate("MODULE.bazel", &module, false, None).unwrap();
+        assert!(file.deps.iter().all(|dep| dep.name != "included"));
     }
 
     #[test]

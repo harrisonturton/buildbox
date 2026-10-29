@@ -209,7 +209,8 @@ fn module_values<'v>(
 }
 
 /// How a repository an extension generated sees others: as the module
-/// defining the extension does, plus the extension's other repositories.
+/// defining the extension does, plus the extension's other repositories,
+/// and the repositories the root module overrides or injects into it.
 pub async fn extension_mapping(ctx: &Ctx, graph: &DepGraph, extension: usize, repo: RepoName) -> Result<RepoMappingTable, SkyError> {
     let info = &graph.extensions[extension];
     let Some((owner, _)) = graph.module(info.bzl.repo()) else {
@@ -220,6 +221,11 @@ pub async fn extension_mapping(ctx: &Ctx, graph: &DepGraph, extension: usize, re
     let mut entries = base.entries.clone();
     for (name, _) in &result.repos {
         entries.push((Symbol::intern(name), RepoName::new(&format!("{}+{name}", info.prefix))));
+    }
+    for (name, overriding) in graph.repo_overrides(extension) {
+        let name = Symbol::intern(&name);
+        entries.retain(|(existing, _)| *existing != name);
+        entries.push((name, overriding));
     }
     Ok(RepoMappingTable::new(repo, entries))
 }
