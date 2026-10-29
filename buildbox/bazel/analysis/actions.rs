@@ -401,8 +401,8 @@ fn transform_status_file<'v>(
 ) -> anyhow::Result<FileValue> {
     let heap = eval.heap();
     let (file, values, which): (_, &[(&str, &str)], _) = match status {
-        StatusFile::Stable => (crate::workspace_status::info_file(), &crate::workspace_status::STABLE_STATUS, "stable"),
-        StatusFile::Volatile => (crate::workspace_status::version_file(), &crate::workspace_status::VOLATILE_STATUS, "volatile"),
+        StatusFile::Stable => (crate::workspace_status::info_file(), &crate::workspace_status::TRANSLATED_STABLE, "stable"),
+        StatusFile::Volatile => (crate::workspace_status::version_file(), &crate::workspace_status::TRANSLATED_VOLATILE, "volatile"),
     };
     let status = heap.alloc(starlark::values::dict::AllocDict(values.iter().copied()));
     let substitutions = eval.eval_function(transform_func, &[status], &[]).map_err(|error| anyhow::anyhow!("{error}"))?;

@@ -10,7 +10,7 @@ use crate::written::Written;
 use bazel_analysis::conflicts::ActionConflictsKey;
 use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, Incompatibility};
 use bazel_analysis::settings::BuildSetting;
-use bazel_analysis::workspace_status::StatusValues;
+use bazel_analysis::workspace_status::{BuildInfo, StatusValues};
 use bazel_config::{AspectDescriptor, BuildOptions, ConfigId, FlagValue, LabelParser, NativeOption, OptionType, OptionValue};
 use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
@@ -258,12 +258,39 @@ pub async fn update_status(context: &CommandContext<'_>, workspace: &Workspace, 
         true => String::new(),
         false => run_status_command(context, command, out).await?,
     };
-    let values = StatusValues::new(options.get("embed_label").unwrap_or_default(), &output);
+    let info = BuildInfo {
+        embed_label: options.get("embed_label").unwrap_or_default().to_string(),
+        host: short_host_name(),
+        user: context.env.get("USER").cloned().unwrap_or_default(),
+        timestamp: build_timestamp(context),
+    };
+    let values = StatusValues::new(&info, &output);
     if let Some(events) = out.build_events() {
         events.workspace_status(&values);
     }
     workspace.set_status(values).await;
     Ok(())
+}
+
+/// The machine's host name, up to its first dot, as Bazel's stamping
+/// gives it.
+fn short_host_name() -> String {
+    let mut buffer = [0u8; 256];
+    // SAFETY: gethostname writes at most `buffer.len()` bytes into it.
+    let written = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if written != 0 {
+        return "localhost".to_string();
+    }
+    let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+    let name = String::from_utf8_lossy(&buffer[..end]).into_owned();
+    name.split('.').next().unwrap_or_default().to_string()
+}
+
+/// When the build is, in seconds since the epoch: the client's
+/// `SOURCE_DATE_EPOCH` if it sets one, as reproducible builds do, or now.
+fn build_timestamp(context: &CommandContext<'_>) -> u64 {
+    let given = context.env.get("SOURCE_DATE_EPOCH").and_then(|value| value.trim().parse().ok());
+    given.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_secs()).unwrap_or(0))
 }
 
 /// Run `--workspace_status_command` in the workspace, with the client's

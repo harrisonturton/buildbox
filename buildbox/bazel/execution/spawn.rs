@@ -408,6 +408,9 @@ fn local_key(request: &SpawnRequest) -> Fingerprint {
         path.clear();
         write!(path, "{tree_path}").expect("writing to a String can't fail");
         fingerprinter.u64(path.len() as u64).bytes(path.as_bytes());
+        if path == bazel_analysis::workspace_status::VOLATILE_PATH {
+            continue;
+        }
         fingerprinter.bytes(input.digest.to_cas().hash().as_bytes()).u64(input.digest.to_cas().size_bytes() as u64);
         fingerprinter.u64(input.executable as u64 | (input.is_directory as u64) << 1);
     }

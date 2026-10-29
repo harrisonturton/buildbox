@@ -98,6 +98,7 @@ rust_library(
         "//buildbox/skyframe",
         "@crates//:connectrpc",
         "@crates//:futures",
+        "@crates//:libc",
         "@crates//:regex",
         "@crates//:ring",
         "@crates//:serde_json",

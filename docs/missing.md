@@ -171,8 +171,9 @@ and Bazel's summaries work as in Bazel. Missing:
 - **Commands:** of `mod`'s subcommands only `dump_repo_mapping` works;
   `fetch` has no `--configure` or `--force`; there's no `vendor` or
   `sync`.
-- **Stamping:** the status files' host, user and time are fixed, and a
-  change to the volatile status reruns the actions that read it.
+- **Stamping:** `transform_info_file` and `transform_version_file`
+  run their functions in analysis, with fixed host, user and time, where
+  Bazel gives them the build's.
 - `flag_alias` in MODULE.bazel has no effect.
 
 ## 9. Query tooling
