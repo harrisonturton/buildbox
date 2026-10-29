@@ -18,6 +18,7 @@ rust_library(
         "//buildbox/actioncache",
         "//buildbox/cas",
         "//buildbox/executor",
+        "//buildbox/grpcclient",
         "//third_party/googleapis:bytestream_rust_connect",
         "//third_party/remoteapis:remote_execution_rust_connect",
         "@crates//:buffa",

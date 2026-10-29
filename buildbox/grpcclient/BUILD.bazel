@@ -1,0 +1,30 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "grpcclient",
+    srcs = [
+        "grpcclient.rs",
+        "tls.rs",
+    ],
+    crate_root = "grpcclient.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "@crates//:connectrpc",
+        "@crates//:http",
+        "@crates//:hyper",
+        "@crates//:hyper-util",
+        "@crates//:rustls",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:tokio-rustls",
+        "@crates//:tower",
+        "@crates//:webpki-roots",
+    ],
+)
+
+rust_test(
+    name = "grpcclient_test",
+    crate = ":grpcclient",
+)

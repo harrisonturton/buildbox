@@ -4,7 +4,7 @@ use crate::Endpoint;
 use async_trait::async_trait;
 use bytestream_rust_connect::google::bytestream::{ByteStreamClient, ReadRequest, WriteRequest};
 use cas::{BlobReader, BlobWriter, Cas, CasError, Digest, Usage};
-use connectrpc::client::HttpClient;
+use grpcclient::Channel;
 use remote_execution_rust_connect::build::bazel::remote::execution::v2::{
     BatchUpdateBlobsRequest, ContentAddressableStorageClient, FindMissingBlobsRequest, batch_update_blobs_request,
 };
@@ -37,8 +37,8 @@ const RETRIES: u32 = 5;
 #[derive(Clone)]
 pub struct RemoteCas {
     endpoint: Endpoint,
-    cas: ContentAddressableStorageClient<HttpClient>,
-    bytestream: ByteStreamClient<HttpClient>,
+    cas: ContentAddressableStorageClient<Channel>,
+    bytestream: ByteStreamClient<Channel>,
     requests: Arc<Semaphore>,
 }
 

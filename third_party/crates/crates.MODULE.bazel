@@ -138,6 +138,61 @@ crate.spec(
     version = "1",
 )
 
+# TLS for gRPC clients. connectrpc's client-tls feature would bring in rustls
+# with aws-lc-rs, which builds C with cmake, so bb makes TLS connections
+# itself with rustls on ring, trusting webpki-roots' Mozilla roots as Bazel
+# trusts its JDK's.
+crate.spec(
+    default_features = False,
+    features = [
+        "logging",
+        "ring",
+        "std",
+        "tls12",
+    ],
+    package = "rustls",
+    version = "0.23",
+)
+
+crate.spec(
+    default_features = False,
+    features = [
+        "logging",
+        "ring",
+        "tls12",
+    ],
+    package = "tokio-rustls",
+    version = "0.26",
+)
+
+crate.spec(
+    package = "webpki-roots",
+    version = "1",
+)
+
+crate.spec(
+    features = ["std"],
+    package = "rustls-pki-types",
+    version = "1",
+)
+
+# TLS streams as hyper's I/O, and the connector connectrpc dials them with.
+crate.spec(
+    features = ["tokio"],
+    package = "hyper-util",
+    version = "0.1",
+)
+
+crate.spec(
+    package = "tower",
+    version = "0.5",
+)
+
+crate.spec(
+    package = "hyper",
+    version = "1",
+)
+
 # The //bazel/connect codegen driver.
 crate.spec(
     package = "anyhow",

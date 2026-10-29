@@ -4,7 +4,7 @@ use crate::Endpoint;
 use actioncache::{ActionCache, ActionCacheError, Usage};
 use async_trait::async_trait;
 use cas::Digest;
-use connectrpc::client::HttpClient;
+use grpcclient::Channel;
 use remote_execution_rust_connect::build::bazel::remote::execution::v2::{
     ActionCacheClient, ActionResult, GetActionResultRequest, UpdateActionResultRequest,
 };
@@ -12,7 +12,7 @@ use remote_execution_rust_connect::build::bazel::remote::execution::v2::{
 /// A remote service's action cache.
 pub struct RemoteActionCache {
     endpoint: Endpoint,
-    client: ActionCacheClient<HttpClient>,
+    client: ActionCacheClient<Channel>,
 }
 
 impl RemoteActionCache {

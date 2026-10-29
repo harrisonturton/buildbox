@@ -62,7 +62,10 @@ opaque value is an error.
 - **Remote services are configured on the server**, not per build:
   `--remote_executor`, `--remote_cache`, `--disk_cache` and the other
   `--remote_*` options are errors unless left at their defaults.
-  bb's own action cache is shared by every workspace.
+  bb's own action cache is shared by every workspace. The server reaches
+  them over `grpc://` or TLS (`grpcs://`, or no scheme), trusting
+  Mozilla's root certificates; there's no way yet to trust another
+  certificate or present a client certificate for them.
 - **Execution requirements.** bb runs every action in a sandbox with the
   host's network. `requires-network` holds and `no-cache` is honoured, but
   `block-network` fails, and `no-sandbox`, `local`, `no-remote` and

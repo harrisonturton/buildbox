@@ -4,7 +4,7 @@ use crate::Endpoint;
 use async_trait::async_trait;
 use buffa::Message;
 use cas::Digest;
-use connectrpc::client::HttpClient;
+use grpcclient::Channel;
 use executor::{Action, ExecuteError, Executor};
 use remote_execution_rust_connect::build::bazel::remote::execution::v2::{
     ActionResult, ExecuteRequest, ExecuteResponse, ExecutionClient,
@@ -24,7 +24,7 @@ const DEADLINE_EXCEEDED: i32 = 4;
 /// CAS; the results' outputs are left there.
 pub struct RemoteExecutor {
     endpoint: Endpoint,
-    client: ExecutionClient<HttpClient>,
+    client: ExecutionClient<Channel>,
 }
 
 impl RemoteExecutor {

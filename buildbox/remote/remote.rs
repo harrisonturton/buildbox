@@ -12,50 +12,44 @@ pub use cas::RemoteCas;
 pub use executor::RemoteExecutor;
 pub use tiered::{TieredActionCache, TieredCas};
 
-use connectrpc::Protocol;
-use connectrpc::client::{ClientConfig, HttpClient};
+use connectrpc::client::ClientConfig;
+use grpcclient::{Channel, Target, TargetError, TlsError};
 
-/// Where a remote execution service is: `grpc://host:port`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Where a remote execution service is, `grpc://host:port` or
+/// `grpcs://host:port`, and the channel requests to it go over.
+#[derive(Clone, Debug)]
 pub struct Endpoint {
     pub uri: http::Uri,
-    pub tls: bool,
     /// The REAPI instance name requests name.
     pub instance_name: String,
+    channel: Channel,
 }
 
+/// Why a remote service can't be used.
 #[derive(Debug, thiserror::Error)]
 pub enum EndpointError {
-    #[error("invalid remote URL '{url}': {reason}")]
-    Invalid { url: String, reason: String },
+    #[error(transparent)]
+    Target(#[from] TargetError),
+    #[error(transparent)]
+    Tls(#[from] TlsError),
 }
 
 impl Endpoint {
     /// Parse a URL as Bazel's `--remote_executor` takes it. A URL without a
-    /// scheme means TLS, as in Bazel, which bb doesn't support yet.
+    /// scheme means TLS, as in Bazel.
     pub fn parse(url: &str, instance_name: &str) -> Result<Endpoint, EndpointError> {
-        let invalid = |reason: &str| EndpointError::Invalid {
-            url: url.to_string(),
-            reason: reason.to_string(),
-        };
-        let (scheme, rest) = url.split_once("://").unwrap_or(("grpcs", url));
-        let (http_scheme, tls) = match scheme {
-            "grpc" | "http" => ("http", false),
-            "grpcs" | "https" => return Err(invalid("bb doesn't support TLS yet; use grpc://")),
-            _ => return Err(invalid("the scheme must be grpc://")),
-        };
-        let uri: http::Uri = format!("{http_scheme}://{rest}").parse().map_err(|_| invalid("not a URL"))?;
+        let target = Target::parse(url)?;
+        let channel = Channel::new(&target, None)?;
         Ok(Endpoint {
-            uri,
-            tls,
+            uri: target.uri,
             instance_name: instance_name.to_string(),
+            channel,
         })
     }
 
     /// A client of the service, speaking gRPC.
-    pub(crate) fn client(&self) -> (HttpClient, ClientConfig) {
-        let http = HttpClient::plaintext_http2_only();
-        (http, ClientConfig::new(self.uri.clone()).with_protocol(Protocol::Grpc))
+    pub(crate) fn client(&self) -> (Channel, ClientConfig) {
+        (self.channel.clone(), self.channel.config())
     }
 
     /// A resource name of the instance, for ByteStream.
@@ -74,11 +68,11 @@ mod tests {
     #[test]
     fn parses_endpoints() {
         let plain = Endpoint::parse("grpc://localhost:8980", "").unwrap();
-        assert!(!plain.tls);
         assert_eq!(plain.uri.to_string(), "http://localhost:8980/");
         let named = Endpoint::parse("grpc://remote.example.com", "main").unwrap();
         assert_eq!(named.resource("blobs/x/1"), "main/blobs/x/1");
-        assert!(Endpoint::parse("remote.example.com", "").is_err());
+        let tls = Endpoint::parse("remote.example.com", "").unwrap();
+        assert_eq!(tls.uri.to_string(), "https://remote.example.com/");
         assert!(Endpoint::parse("ftp://x", "").is_err());
     }
 }
