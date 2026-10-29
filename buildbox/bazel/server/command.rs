@@ -5,11 +5,13 @@ use crate::running::RunningCommand;
 use crate::BazelServer;
 use crate::workspace;
 use bazel_bzlmod::command_overrides::CommandOverrides;
+use bazel_fetch::CredentialHelpers;
 use bazel_bzlmod::registry::Registries;
 use bazel_bzlmod::repo_env::RepoEnvironment;
 use bazel_loading::autoload::AutoloadSettings;
 use bazel_options::{ParsedOptions, RcFile};
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tracing::Instrument;
 
@@ -40,6 +42,7 @@ pub fn repo_environment(context: &CommandContext<'_>, options: &ParsedOptions) -
 pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Workspace, options: &ParsedOptions) -> Result<(), String> {
     check_lockfile_mode(options)?;
     let overrides = command_overrides(context, options)?;
+    workspace.credentials.set(credential_helpers(context, options)?);
     workspace.refresh(repo_environment(context, options)).await;
     let urls = |name: &str| options.all(name).into_iter().map(|url| url.trim_end_matches('/').to_string()).collect();
     let mirrors = options.all("module_mirrors").into_iter().flat_map(|list| list.split(',')).filter(|url| !url.is_empty());
@@ -63,6 +66,65 @@ fn check_lockfile_mode(options: &ParsedOptions) -> Result<(), String> {
         "refresh" | "error" => Err(format!("--lockfile_mode={mode} :: bb doesn't support --lockfile_mode={mode} yet")),
         _ => Err(format!("While parsing option --lockfile_mode={mode}: Not a valid Lockfile mode: '{mode}' (should be off, update, refresh or error)")),
     }
+}
+
+/// The credential helpers `--credential_helper` configures, as Bazel finds
+/// them: each `[scope=]path`, the path absolute, `%workspace%`-relative,
+/// or a name on the client's `PATH`.
+pub fn credential_helpers(context: &CommandContext<'_>, options: &ParsedOptions) -> Result<CredentialHelpers, String> {
+    let mut helpers = Vec::new();
+    for given in options.all("credential_helper") {
+        let parsing = |message: &str| format!("While parsing option --credential_helper={given}: {message}");
+        let (scope, path) = match given.split_once('=') {
+            Some((scope, path)) => (Some(scope), path),
+            None => (None, given),
+        };
+        if scope == Some("") {
+            return Err(parsing("Credential helper scope must not be empty"));
+        }
+        if path.is_empty() {
+            return Err(parsing("Credential helper path must not be empty"));
+        }
+        helpers.push((scope.map(str::to_string), helper_path(context, path)?));
+    }
+    let duration = |name: &str, default: &str| {
+        let text = options.get(name).unwrap_or(default);
+        bazel_options::convert_duration(text).map_err(|message| format!("While parsing option --{name}={text}: {message}"))
+    };
+    let env: Vec<(String, String)> = context.env.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+    Ok(CredentialHelpers::new(
+        helpers,
+        env,
+        context.workspace_root.clone(),
+        duration("credential_helper_timeout", "10s")?,
+        duration("credential_helper_cache_duration", "30m")?,
+    ))
+}
+
+/// Where a credential helper is, as Bazel's `CommandLinePathFactory` finds
+/// it.
+fn helper_path(context: &CommandContext<'_>, path: &str) -> Result<PathBuf, String> {
+    if path.split('/').any(|segment| segment == "..") {
+        return Err(format!("Path '{path}' must not contain any uplevel references ('..')"));
+    }
+    if let Some(relative) = path.strip_prefix("%workspace%/") {
+        return Ok(context.workspace_root.join(relative.trim_start_matches('/')));
+    }
+    if path.starts_with('/') {
+        return Ok(PathBuf::from(path));
+    }
+    if path.contains('/') {
+        return Err(format!("Path '{path}' must either be absolute or not contain any path separators"));
+    }
+    let search = context.env.get("PATH").cloned().unwrap_or_default();
+    for dir in search.split(':').filter(|dir| dir.starts_with('/')) {
+        let candidate = Path::new(dir).join(path);
+        let executable = candidate.metadata().is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
+        if executable {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("Could not find file with name '{path}' on PATH '{search}'"))
 }
 
 /// The overrides of repositories and modules the options give.

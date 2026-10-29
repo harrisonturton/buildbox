@@ -5,12 +5,14 @@
 //! kept in a cache addressed by their SHA-256, so each file is downloaded
 //! once per machine whatever workspace or repository asks for it.
 
+mod credentials;
 mod download;
 mod extract;
 mod integrity;
 mod netrc;
 mod patch;
 
+pub use credentials::CredentialHelpers;
 pub use download::{DownloadCache, DownloadError, RequestHeaders};
 pub use extract::{ArchiveType, ExtractError, extract};
 pub use integrity::{Integrity, IntegrityError};

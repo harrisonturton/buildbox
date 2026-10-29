@@ -29,7 +29,8 @@ pub fn stream(context: &CommandContext<'_>, command: &str, options: &ParsedOptio
         return Ok(None);
     };
     let upload_options = upload_options(options)?;
-    let headers = headers(options)?;
+    let mut headers = headers(options)?;
+    headers.extend(helper_headers(context, options, backend)?);
     let certificates = options.get("tls_certificate").filter(|path| !path.is_empty()).map(|path| context.working_directory.join(path));
     let service = BuildEventService::new(backend, certificates.as_deref(), &headers).map_err(|error| BesSetupError {
         message: error.to_string(),
@@ -100,6 +101,17 @@ fn headers(options: &ParsedOptions) -> Result<Vec<(String, String)>, BesSetupErr
         }
     }
     Ok(headers)
+}
+
+/// The headers the credential helper for the service gives, if any.
+fn helper_headers(context: &CommandContext<'_>, options: &ParsedOptions, backend: &str) -> Result<Vec<(String, String)>, BesSetupError> {
+    let setup_error = |message: String| BesSetupError {
+        message,
+        exit_code: exit::LOCAL_ENVIRONMENTAL_ERROR,
+    };
+    let helpers = crate::command::credential_helpers(context, options).map_err(setup_error)?;
+    let headers = helpers.headers(backend).map_err(setup_error)?;
+    Ok(headers.unwrap_or_default())
 }
 
 /// The keywords the stream carries, as Bazel gives them: the protocol, the

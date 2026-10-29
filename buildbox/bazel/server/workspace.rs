@@ -3,6 +3,7 @@
 use crate::written::Written;
 use bazel_analysis::workspace_status::{BuildStatus, StatusValues, WorkspaceStatusKey};
 use bazel_bzlmod::command_overrides::{CommandOverrides, CommandOverridesKey, CommandOverridesService};
+use bazel_bzlmod::config::CommandCredentials;
 use bazel_bzlmod::registry::{CommandRegistries, Registries, RegistriesKey};
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
 use bazel_execution::{Jobs, SourceDigestKey, TestKey};
@@ -43,6 +44,8 @@ pub struct Workspace {
     pub registries: Arc<CommandRegistries>,
     /// The repositories and modules the command's options replace or add.
     pub overrides: Arc<CommandOverridesService>,
+    /// The credential helpers downloads authenticate with.
+    pub credentials: Arc<CommandCredentials>,
     /// Which symbols are autoloaded, and where.
     pub autoloads: Arc<CommandAutoloads>,
     /// What builds wrote to the output tree.
@@ -177,6 +180,7 @@ impl Workspaces {
         let status = BuildStatus::new();
         let registries = CommandRegistries::new();
         let overrides = CommandOverridesService::new();
+        let credentials = CommandCredentials::new();
         let autoloads = CommandAutoloads::new();
         let progress = Progress::new();
         let jobs = Arc::new(Jobs::default());
@@ -189,6 +193,7 @@ impl Workspaces {
             .with(status.clone())
             .with(registries.clone())
             .with(overrides.clone())
+            .with(credentials.clone())
             .with(autoloads.clone())
             .with(progress.clone())
             .with(jobs.clone());
@@ -200,6 +205,7 @@ impl Workspaces {
             status,
             registries,
             overrides,
+            credentials,
             autoloads,
             written: Arc::default(),
             progress,

@@ -5,6 +5,7 @@ package(default_visibility = ["//visibility:private"])
 rust_library(
     name = "fetch",
     srcs = [
+        "credentials.rs",
         "download.rs",
         "extract.rs",
         "fetch.rs",
@@ -20,6 +21,7 @@ rust_library(
         "@crates//:data-encoding",
         "@crates//:flate2",
         "@crates//:ring",
+        "@crates//:serde_json",
         "@crates//:tar",
         "@crates//:thiserror",
         "@crates//:tracing",

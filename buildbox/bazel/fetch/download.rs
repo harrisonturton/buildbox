@@ -1,6 +1,7 @@
 //! Downloading files into a content-addressed cache.
 
 use crate::integrity::{HashAlgorithm, Hasher, Integrity};
+use crate::credentials::{CredentialHelpers, Headers};
 use crate::netrc::{Netrc, url_host};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -30,6 +31,10 @@ pub enum DownloadError {
 
     #[error("{0}")]
     All(String),
+
+    /// A credential helper failed.
+    #[error("{0}")]
+    Credentials(String),
 }
 
 fn io(context: impl Into<String>) -> impl FnOnce(std::io::Error) -> DownloadError {
@@ -62,11 +67,13 @@ impl RequestHeaders {
 /// Files downloaded before, by SHA-256, laid out as Bazel's repository
 /// cache is: `content_addressable/sha256/<hash>/file`.
 ///
-/// Requests send the credentials of a `.netrc` file, if given one.
+/// Requests send the headers a credential helper gives for their URL, or
+/// else the credentials of a `.netrc` file, if given one.
 #[derive(Clone, Debug)]
 pub struct DownloadCache {
     dir: PathBuf,
     netrc: Arc<Netrc>,
+    credentials: Arc<CredentialHelpers>,
 }
 
 impl DownloadCache {
@@ -74,14 +81,23 @@ impl DownloadCache {
         DownloadCache {
             dir: dir.into(),
             netrc: Arc::default(),
+            credentials: Arc::default(),
         }
     }
 
     /// The same cache, downloading with `netrc`'s credentials.
     pub fn with_netrc(&self, netrc: Netrc) -> DownloadCache {
         DownloadCache {
-            dir: self.dir.clone(),
             netrc: Arc::new(netrc),
+            ..self.clone()
+        }
+    }
+
+    /// The same cache, downloading with the headers `credentials` give.
+    pub fn with_credentials(&self, credentials: Arc<CredentialHelpers>) -> DownloadCache {
+        DownloadCache {
+            credentials,
+            ..self.clone()
         }
     }
 
@@ -115,10 +131,15 @@ impl DownloadCache {
         let mut failures = Vec::new();
         let mut all_missing = true;
         for url in urls {
+            let helped = self.credentials.headers(url).map_err(DownloadError::Credentials)?;
             let request = Request {
                 url,
                 headers: &headers.headers,
-                authorization: headers.authorization(url, &self.netrc),
+                authorization: match helped {
+                    Some(_) => None,
+                    None => headers.authorization(url, &self.netrc),
+                },
+                credentials: helped.unwrap_or_default(),
             };
             match self.download_one(&request, integrity, dest) {
                 Ok(result) => return Ok(result),
@@ -213,6 +234,9 @@ struct Request<'a> {
     url: &'a str,
     headers: &'a [(String, String)],
     authorization: Option<String>,
+    /// The headers a credential helper gave, which take the place of
+    /// `authorization`.
+    credentials: Headers,
 }
 
 /// Download the request's URL into `out`, returning its SHA-256 and its
@@ -238,6 +262,9 @@ fn fetch_into(request: &Request<'_>, out: &mut File, algorithm: HashAlgorithm) -
     }
     if let Some(authorization) = &request.authorization {
         call = call.set("Authorization", authorization);
+    }
+    for (name, value) in &request.credentials {
+        call = call.set(name, value);
     }
     let response = match call.call() {
         Ok(response) => response,
