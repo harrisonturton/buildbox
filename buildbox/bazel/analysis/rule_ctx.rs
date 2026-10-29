@@ -225,25 +225,49 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<String> {
         let state = RuleState::get(eval)?;
-        let mut substitutions = Vec::new();
-        if let Some(dict) = DictRef::from_value(additional_substitutions) {
-            for (key, value) in dict.iter() {
-                substitutions.push((key.to_str(), crate::args::stringify(value)));
-            }
+        expand_make_variables(state, attribute_name, command, &string_pairs(additional_substitutions))
+    }
+
+    /// `resolve_command(*, command = '', attribute = None,
+    /// expand_locations = False, make_variables = None, tools = [],
+    /// label_dict = {}, execution_requirements = {})`: the tools' files,
+    /// and the command line that runs `command` with Bash, as Bazel's
+    /// `CommandHelper` makes it.
+    fn resolve_command<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = named, default = "")] command: &str,
+        #[starlark(require = named)] attribute: Option<Value<'v>>,
+        #[starlark(require = named, default = false)] expand_locations: bool,
+        #[starlark(require = named)] make_variables: Option<Value<'v>>,
+        #[starlark(require = named)] tools: Option<Value<'v>>,
+        #[starlark(require = named)] label_dict: Option<Value<'v>>,
+        #[starlark(require = named)] execution_requirements: Option<Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let _ = execution_requirements;
+        let state = RuleState::get(eval)?;
+        let heap = eval.heap();
+        let attribute = attribute.and_then(|value| value.unpack_str()).unwrap_or_default();
+        let (mut inputs, mut locations) = resolved_tools(state, tools)?;
+        locations.extend(label_files(label_dict)?);
+        let mut command = command.to_string();
+        if expand_locations {
+            command = state.expand(&escape_non_locations(&command), &locations, LocationStyle::Exec)?;
         }
-        let mut lookup = |name: &str, argument: Option<&str>| -> anyhow::Result<String> {
-            if argument.is_some() {
-                anyhow::bail!("{attribute_name}: $({name} ...) can't be expanded here");
-            }
-            if let Some((_, value)) = substitutions.iter().find(|(key, _)| key == name) {
-                return Ok(value.clone());
-            }
-            match state.make_variable(name) {
-                Some(value) => Ok(value.to_string()),
-                None => Err(anyhow::anyhow!("{attribute_name}: $({name}) not defined")),
+        if let Some(variables) = make_variables.filter(|value| !value.is_none()) {
+            command = expand_make_variables(state, attribute, &command, &string_pairs(variables))?;
+        }
+        let argv = match command.len() <= MAX_COMMAND_LENGTH {
+            true => vec![SHELL.to_string(), "-c".to_string(), command],
+            false => {
+                let script = command_script(state, &command)?;
+                inputs.push(script);
+                vec![SHELL.to_string(), script.exec_path.to_string()]
             }
         };
-        crate::expand::expand(command, &mut lookup)
+        let inputs = heap.alloc(AllocList(inputs.into_iter().map(|artifact| heap.alloc(FileValue(artifact)))));
+        let argv = heap.alloc(AllocList(argv.iter().map(|argument| heap.alloc(argument.as_str()))));
+        Ok(heap.alloc(AllocTuple([inputs, argv, heap.alloc(AllocList::EMPTY)])))
     }
 
     /// `coverage_instrumented(target = None)`: coverage isn't collected.
@@ -280,33 +304,109 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
         Ok(label_of(default.and_then(|default| default.field("label"))) == Some(label))
     }
 
-    /// `resolve_tools(*, tools = [])`: the tools' files and runfiles as a
-    /// depset, and their input manifests (none).
-    fn resolve_tools<'v>(
-        #[starlark(this)] _this: Value<'v>,
-        #[starlark(require = named)] tools: Option<Value<'v>>,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<Value<'v>> {
-        let heap = eval.heap();
-        let mut direct = Vec::new();
-        for item in tools.and_then(bazel_starlark::convert::items).unwrap_or_default() {
-            let Some(target) = TargetValue::from_value(item) else {
-                continue;
-            };
-            direct.extend(actions::files(target.default_info("files"), "files")?.into_iter().map(|artifact| heap.alloc(FileValue(artifact))));
-        }
-        let inputs = heap.alloc(Depset {
-            direct,
-            transitive: Vec::new(),
-            order: Order::Default,
-        });
-        let manifests = heap.alloc(AllocList::EMPTY);
-        Ok(heap.alloc(AllocTuple([inputs, manifests])))
+    /// `resolve_tools(*, tools = [])`, which Bazel 9 disallows, as
+    /// `--incompatible_disallow_ctx_resolve_tools` does by default.
+    fn resolve_tools<'v>(#[starlark(this)] _this: Value<'v>, #[starlark(require = named)] tools: Option<Value<'v>>) -> anyhow::Result<Value<'v>> {
+        let _ = tools;
+        anyhow::bail!(
+            "Pass an executable or tools argument to ctx.actions.run or ctx.actions.run_shell instead of calling ctx.resolve_tools.\nUse --noincompatible_disallow_ctx_resolve_tools to temporarily disable this check."
+        )
     }
 }
 
 /// Escape every `$` in `text` that doesn't start a location function, so
 /// only those are expanded.
+/// The shell commands run with, as Bazel's `sh` toolchain gives it.
+const SHELL: &str = "/bin/bash";
+
+/// The longest command Bazel passes to `bash -c`; longer ones go in a
+/// script.
+const MAX_COMMAND_LENGTH: usize = 64000;
+
+/// Write a script running `command`, for a command too long to pass to
+/// `bash -c`, as Bazel's `CommandHelper` does.
+fn command_script(state: &RuleState, command: &str) -> anyhow::Result<Artifact> {
+    let index = state.actions.borrow().len();
+    let script = state.declare(&format!("{}.resolve_command_{index}.script.sh", state.label.name), false)?;
+    state.register(crate::action::Action {
+        mnemonic: intern::Symbol::intern("FileWrite"),
+        progress_message: String::new(),
+        inputs: crate::inputs::InputSet::default(),
+        runfiles: Vec::new(),
+        outputs: vec![script],
+        kind: crate::action::ActionKind::Write {
+            content: command.to_string(),
+            executable: true,
+            from_args: false,
+        },
+    })?;
+    Ok(script)
+}
+
+/// The files of `tools`, with their executables, which actions taking
+/// them as inputs run with their runfiles, and what `$(location)` expands
+/// each tool's label to.
+fn resolved_tools(state: &RuleState, tools: Option<Value<'_>>) -> anyhow::Result<(Vec<Artifact>, Vec<(Label, Vec<Artifact>)>)> {
+    let mut inputs = Vec::new();
+    let mut locations = Vec::new();
+    for item in tools.and_then(bazel_starlark::convert::items).unwrap_or_default() {
+        let Some(target) = TargetValue::from_value(item) else {
+            continue;
+        };
+        let files = actions::files(target.default_info("files"), "files")?;
+        inputs.extend(files.iter().copied());
+        let executable = target.default_info("executable").and_then(FileValue::artifact);
+        match executable {
+            Some(executable) => {
+                state.resolve_tool(executable);
+                inputs.push(executable);
+                locations.push((target.label, vec![executable]));
+            }
+            None => locations.push((target.label, files)),
+        }
+    }
+    inputs.dedup();
+    Ok((inputs, locations))
+}
+
+/// The files of a dict of labels to lists of files.
+fn label_files(value: Option<Value<'_>>) -> anyhow::Result<Vec<(Label, Vec<Artifact>)>> {
+    let Some(dict) = value.and_then(DictRef::from_value) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for (key, files) in dict.iter() {
+        let label = key.downcast_ref::<LabelValue>().map(|label| label.0).ok_or_else(|| anyhow::anyhow!("label_dict: keys must be labels"))?;
+        out.push((label, actions::files(Some(files), "label_dict")?));
+    }
+    Ok(out)
+}
+
+/// The entries of a dict of strings.
+fn string_pairs(value: Value<'_>) -> Vec<(String, String)> {
+    let Some(dict) = DictRef::from_value(value) else {
+        return Vec::new();
+    };
+    dict.iter().map(|(key, value)| (key.to_str(), crate::args::stringify(value))).collect()
+}
+
+/// Expand make variables in `command`, `substitutions` first.
+fn expand_make_variables(state: &RuleState, attribute: &str, command: &str, substitutions: &[(String, String)]) -> anyhow::Result<String> {
+    let mut lookup = |name: &str, argument: Option<&str>| -> anyhow::Result<String> {
+        if argument.is_some() {
+            anyhow::bail!("{attribute}: $({name} ...) can't be expanded here");
+        }
+        if let Some((_, value)) = substitutions.iter().find(|(key, _)| key == name) {
+            return Ok(value.clone());
+        }
+        match state.make_variable(name) {
+            Some(value) => Ok(value.to_string()),
+            None => Err(anyhow::anyhow!("{attribute}: $({name}) not defined")),
+        }
+    };
+    crate::expand::expand(command, &mut lookup)
+}
+
 fn escape_non_locations(text: &str) -> String {
     const FUNCTIONS: &[&str] = &["location", "locations", "execpath", "execpaths", "rootpath", "rootpaths", "rlocationpath", "rlocationpaths"];
     let mut out = String::with_capacity(text.len());

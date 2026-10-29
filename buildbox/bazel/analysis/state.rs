@@ -13,7 +13,7 @@ use bazel_starlark::EvalContext;
 use intern::PathId;
 use starlark::eval::Evaluator;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 /// The state of analyzing one rule, which the builtins of rule
@@ -37,6 +37,10 @@ pub struct RuleState {
     /// The runfiles trees of the executables of dependencies, which actions
     /// that run them need.
     pub tool_runfiles: RefCell<HashMap<Artifact, Arc<RunfilesTree>>>,
+    /// The executables `resolve_command` gave, which
+    /// actions that take them as inputs run with their runfiles, as the
+    /// runfiles Bazel gives with them.
+    pub resolved_tools: RefCell<HashSet<Artifact>>,
     /// The input sets of the depsets actions read.
     pub input_sets: RefCell<InputSets>,
     /// Make variables, such as `$(BINDIR)`, by name.
@@ -71,6 +75,7 @@ impl RuleState {
             actions: RefCell::new(Vec::new()),
             declared: RefCell::new(Vec::new()),
             tool_runfiles: RefCell::new(HashMap::new()),
+            resolved_tools: RefCell::new(HashSet::new()),
             input_sets: RefCell::new(InputSets::default()),
             make_variables,
             locations: Vec::new(),
@@ -181,6 +186,13 @@ impl RuleState {
     pub fn add_tool(&self, executable: Artifact, runfiles: &Runfiles<'_>) {
         let tree = runfiles_tree(executable, runfiles);
         self.tool_runfiles.borrow_mut().insert(executable, tree);
+    }
+
+    /// Record that `resolve_command` gave `executable`.
+    pub fn resolve_tool(&self, executable: Artifact) {
+        if self.tool_runfiles.borrow().contains_key(&executable) {
+            self.resolved_tools.borrow_mut().insert(executable);
+        }
     }
 
     /// Expand `$(location)` functions and make variables in `text`.

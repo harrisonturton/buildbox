@@ -110,6 +110,21 @@ impl Tools {
         Ok(())
     }
 
+    /// The runfiles of the executables among `inputs` that
+    /// `resolve_command` gave.
+    fn add_resolved(&mut self, inputs: &InputSet, state: &RuleState) {
+        let resolved = state.resolved_tools.borrow();
+        if resolved.is_empty() {
+            return;
+        }
+        let tool_runfiles = state.tool_runfiles.borrow();
+        inputs.for_each(|artifact| {
+            if resolved.contains(&artifact) {
+                self.runfiles.extend(tool_runfiles.get(&artifact).cloned());
+            }
+        });
+    }
+
     /// An executable file: with its runfiles, if it's a dependency's.
     fn add_file(&mut self, artifact: Artifact, state: &RuleState) {
         self.inputs.push(artifact);
@@ -305,6 +320,7 @@ impl<'v> SpawnArgs<'v> {
             None => InputSet::default(),
         };
         tools.add_list(self.tools, state)?;
+        tools.add_resolved(&declared, state);
         let primary = primary_input(self.inputs, &tools);
         let mut arguments = command;
         let mut direct = Vec::new();
