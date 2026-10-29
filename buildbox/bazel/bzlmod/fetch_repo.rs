@@ -68,6 +68,7 @@ impl Key for FetchSpecKey {
             RepoSpec::Git(git) => fetch_git(ctx, &config, self.repo, git).await,
             RepoSpec::HostPlatform => host_platform(&config).await,
             RepoSpec::RepoRule(rule) => crate::repo_rule::fetch(ctx, self.repo, rule).await,
+            RepoSpec::Override(spec) => crate::repo_rule::fetch_override(ctx, self.repo, spec).await,
         }
     }
 }

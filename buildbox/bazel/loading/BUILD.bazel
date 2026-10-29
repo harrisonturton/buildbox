@@ -8,6 +8,7 @@ rust_library(
         "autoload.rs",
         "builtins.rs",
         "bzl.rs",
+        "dir_loader.rs",
         "loading.rs",
         "package.rs",
         "printed.rs",

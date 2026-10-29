@@ -1,18 +1,21 @@
 //! `repository_ctx`, and running repository rules.
 
 use crate::attrs::{AttrContext, apply_schema};
+use crate::bootstrap::BootstrapBzlKey;
 use crate::config::BzlmodConfig;
 use crate::fetch_repo::{FetchedRepo, RepoFetchKey, fetch_into, repo_dir};
 use crate::graph_access::GraphAccess;
 use crate::io::{HasIo, IoState};
 use crate::path_value::PathValue;
 use crate::repo_env::ClientEnv;
-use crate::repo_spec::RepoRuleSpec;
+use crate::repo_spec::{OverrideSpec, RepoRuleSpec};
 use crate::star_value::StarValue;
+use crate::typecheck::SchemaAttr;
 use allocative::Allocative;
 use bazel_fs::{FileContentKey, Root, RootedPath};
-use bazel_label::{RepoMappingTable, RepoName};
+use bazel_label::{Label, LabelContext, PackageId, RepoMappingTable, RepoName};
 use bazel_loading::{BzlLoadKey, BzlModule, RepoMappingKey};
+use bazel_starlark::attr_module::Attribute;
 use bazel_starlark::repo_api::RepositoryRule;
 use bazel_starlark::{EvalContext, FileKind};
 use intern::{PathId, Symbol};
@@ -105,16 +108,69 @@ fn repo_methods(builder: &mut MethodsBuilder) {
 
 /// Fetch a repository by running its repository rule.
 pub async fn fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec) -> Result<FetchedRepo, SkyError> {
-    let config = ctx.global::<BzlmodConfig>()?;
     let module = ctx.compute(&BzlLoadKey::for_bzlmod(spec.bzl)).await?;
     let mappings = mappings(ctx, &module, spec.base_repo).await?;
-    let inputs = main_repo_inputs(ctx, spec).await?;
     let definer = defining_repo_dir(ctx, spec).await?;
+    let loaded = LoadedRule { module, mappings, identity: definer };
+    run_fetch(ctx, repo, spec, loaded).await
+}
+
+/// Fetch a module's repository as the root module's override defines it,
+/// with `@bazel_tools`'s rule, loaded without the dependency graph.
+pub async fn fetch_override(ctx: &Ctx, repo: RepoName, spec: &OverrideSpec) -> Result<FetchedRepo, SkyError> {
+    let config = ctx.global::<BzlmodConfig>()?;
+    let module = ctx.compute(&BootstrapBzlKey(spec.rule.bzl)).await?;
+    let mappings = crate::bootstrap::mappings(&spec.root_repo_name);
+    let bazel_tools = config.bazel_tools.as_ref().map(|dir| dir.display().to_string()).unwrap_or_default();
+    let identity = format!("{bazel_tools}\n{:?}\n{:?}", spec.root_repo_name, spec.workspace);
+    let loaded = LoadedRule { module, mappings, identity };
+    run_fetch(ctx, repo, &spec.rule, loaded).await
+}
+
+/// Check an override's attributes against its rule's schema, as Bazel
+/// does before it fetches anything, failing with Bazel's error.
+pub async fn check_override(ctx: &Ctx, spec: &OverrideSpec) -> Result<(), SkyError> {
+    let module = ctx.compute(&BootstrapBzlKey(spec.rule.bzl)).await?;
+    let rule = &spec.rule;
+    let Ok((value, _)) = module.module.get_any_visibility(&rule.rule) else {
+        return Err(SkyError::new(format!("{} doesn't export '{}'", rule.bzl, rule.rule)));
+    };
+    let Some(repository_rule) = RepositoryRule::from_value(value.value()) else {
+        return Err(SkyError::new(format!("{}%{} isn't a repository rule", rule.bzl, rule.rule)));
+    };
+    let mut schema = Vec::with_capacity(repository_rule.attrs.len());
+    for (name, descriptor) in &repository_rule.attrs {
+        if let Some(attribute) = Attribute::from_value(*descriptor) {
+            schema.push(SchemaAttr { name, ty: attribute.ty, mandatory: attribute.mandatory });
+        }
+    }
+    let call = format!("call to '{}' repo rule", rule.rule);
+    let Err(message) = crate::typecheck::check(&call, &schema, &rule.attrs) else {
+        return Ok(());
+    };
+    let error = format!("Error in <toplevel>: {message}");
+    Err(SkyError::new(bazel_loading::with_reported(&format!("<builtin>: {error}"), &error)))
+}
+
+/// A repository rule's loaded `.bzl` file, the mappings it runs with, and
+/// what identifies the rule's definition besides the spec.
+struct LoadedRule {
+    module: Arc<BzlModule>,
+    mappings: HashMap<RepoName, Arc<RepoMappingTable>>,
+    identity: String,
+}
+
+/// Run a loaded repository rule, unless the repository it would make with
+/// the same inputs was made before.
+async fn run_fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec, loaded: LoadedRule) -> Result<FetchedRepo, SkyError> {
+    let config = ctx.global::<BzlmodConfig>()?;
+    let LoadedRule { module, mappings, identity } = loaded;
+    let inputs = main_repo_inputs(ctx, spec, &mappings).await?;
     let env_inputs = crate::repo_env::declared(ctx, &rule_environ(&module, spec)).await?;
     let environment = ctx.global::<ClientEnv>()?.current();
     let stable_spec = format!("{spec:?}");
     let local = local_inputs(&module, spec);
-    let dest = repo_dir(&config, repo, &[stable_spec.as_bytes(), definer.as_bytes(), &inputs, env_inputs.as_bytes(), local.as_bytes()].concat());
+    let dest = repo_dir(&config, repo, &[stable_spec.as_bytes(), identity.as_bytes(), &inputs, env_inputs.as_bytes(), local.as_bytes()].concat());
     let access = GraphAccess::new(ctx.clone());
     let downloads = config.downloads_for(ctx)?;
     let spec = spec.clone();
@@ -195,9 +251,15 @@ async fn defining_repo_dir(ctx: &Ctx, spec: &RepoRuleSpec) -> Result<String, Sky
 /// The contents of the main repository's files that the rule's attributes
 /// name, such as a `build_file`. Repositories are shared between
 /// workspaces, so these must be part of what identifies the repository.
-async fn main_repo_inputs(ctx: &Ctx, spec: &RepoRuleSpec) -> Result<Vec<u8>, SkyError> {
+async fn main_repo_inputs(ctx: &Ctx, spec: &RepoRuleSpec, mappings: &HashMap<RepoName, Arc<RepoMappingTable>>) -> Result<Vec<u8>, SkyError> {
+    let empty = RepoMappingTable::new(spec.base_repo, Vec::new());
+    let base = LabelContext {
+        package: PackageId::new(spec.base_repo, PathId::ROOT),
+        mapping: mappings.get(&spec.base_repo).map(|mapping| &**mapping).unwrap_or(&empty),
+        lenient: false,
+    };
     let mut labels = Vec::new();
-    collect_main_labels(&spec.attrs.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(), spec.base_repo, &mut labels);
+    collect_main_labels(&spec.attrs.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(), &base, &mut labels);
     let mut fingerprinter = Fingerprinter::new();
     for path in labels {
         let content = ctx.compute(&FileContentKey(RootedPath::new(Root::Workspace, path))).await?;
@@ -206,19 +268,15 @@ async fn main_repo_inputs(ctx: &Ctx, spec: &RepoRuleSpec) -> Result<Vec<u8>, Sky
     Ok(fingerprinter.finish().as_bytes().to_vec())
 }
 
-fn collect_main_labels(values: &[StarValue], base: RepoName, out: &mut Vec<PathId>) {
+/// The files of the main repository that `values` name, as labels or as
+/// label strings relative to `base`.
+fn collect_main_labels(values: &[StarValue], base: &LabelContext<'_>, out: &mut Vec<PathId>) {
     for value in values {
         match value {
-            StarValue::Label(label) if label.repo().is_main() => {
-                if let Ok(name) = PathId::parse(label.name.as_str()) {
-                    out.push(label.package.path.join_path(name));
-                }
-            }
-            StarValue::String(text) if base.is_main() && (text.starts_with("//") || text.starts_with("@//")) => {
-                if let Ok(label) = bazel_label::Label::parse_canonical(text.trim_start_matches('@')) {
-                    if let Ok(name) = PathId::parse(label.name.as_str()) {
-                        out.push(label.package.path.join_path(name));
-                    }
+            StarValue::Label(label) => push_main_file(label, out),
+            StarValue::String(text) if text.starts_with("//") || text.starts_with('@') => {
+                if let Ok(label) = Label::parse(text, base) {
+                    push_main_file(&label, out);
                 }
             }
             StarValue::List(items) => collect_main_labels(items, base, out),
@@ -230,6 +288,16 @@ fn collect_main_labels(values: &[StarValue], base: RepoName, out: &mut Vec<PathI
             }
             _ => {}
         }
+    }
+}
+
+/// Add the file `label` names, if it's in the main repository.
+fn push_main_file(label: &Label, out: &mut Vec<PathId>) {
+    if !label.repo().is_main() {
+        return;
+    }
+    if let Ok(name) = PathId::parse(label.name.as_str()) {
+        out.push(label.package.path.join_path(name));
     }
 }
 

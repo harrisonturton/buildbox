@@ -186,6 +186,12 @@ pub fn split_reported(message: &str) -> (&str, &str) {
     message.rsplit_once(REPORTED_SEPARATOR).unwrap_or(("", message))
 }
 
+/// A message of an error `reported` as it happened, then `last`, which it
+/// led to.
+pub fn with_reported(reported: &str, last: &str) -> String {
+    format!("{reported}{REPORTED_SEPARATOR}{last}")
+}
+
 /// An error with its last error, which the others led to, reworded by
 /// `reword`, as each layer that the error fails gives its own reason.
 pub fn reworded(error: &SkyError, reword: impl FnOnce(&str) -> String) -> SkyError {

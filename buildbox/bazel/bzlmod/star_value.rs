@@ -68,6 +68,19 @@ impl StarValue {
         }
     }
 
+    /// The name of the value's Starlark type, as errors give it.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            StarValue::None => "NoneType",
+            StarValue::Bool(_) => "bool",
+            StarValue::Int(_) => "int",
+            StarValue::String(_) => "string",
+            StarValue::Label(_) => "Label",
+            StarValue::List(_) => "list",
+            StarValue::Dict(_) => "dict",
+        }
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             StarValue::String(s) => Some(s),

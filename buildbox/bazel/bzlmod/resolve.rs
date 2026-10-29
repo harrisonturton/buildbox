@@ -7,20 +7,22 @@ use crate::module_file::{self, BazelDep, IncludeReader, ModuleFile, ModuleFileEr
 use crate::fetch_repo::read_label_patch;
 use crate::registry::{self, Registries, RegistriesKey, RegistryFileKey, RegistryLookup, RegistryModule, RegistryModuleKey};
 use crate::selection::{self, DepSpec, Interim, ModuleKey, MultipleVersions, Selection};
-use crate::repo_spec::{ArchiveSpec, GitSpec, RepoSpec};
-use bazel_fs::{Root, RootedPath, Workspace};
+use crate::repo_spec::{OverrideSpec, RepoRuleSpec, RepoSpec};
+use crate::star_value::StarValue;
+use bazel_fs::{Root, RootedPath, WorkspaceRootKey};
 use bazel_label::{Label, LabelContext, PackageId, RepoMapping, RepoMappingTable, RepoName};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
 use skyframe::{encoded_value, Ctx, Key, SkyError};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// Modules whose repositories keep their module name as their canonical
 /// name, as Bazel's do.
 pub const WELL_KNOWN_MODULES: [&str; 3] = ["bazel_tools", "platforms", "local_config_platform"];
 
 /// What to do when no Bazel installation provides `@bazel_tools`.
-const NO_BAZEL_TOOLS: &str =
+pub(crate) const NO_BAZEL_TOOLS: &str =
     "no @bazel_tools found: run `bazel version` once so Bazel installs itself, or set BB_BAZEL_TOOLS to an installed Bazel's embedded_tools directory";
 
 /// The root module's MODULE.bazel, with the files it includes, or why it
@@ -447,7 +449,7 @@ async fn discovery_round(
                 next.push(dep_key);
             }
         }
-        for (key, found) in next.iter().zip(fetch_modules(ctx, config, registries, overrides, &next, &parents).await?) {
+        for (key, found) in next.iter().zip(fetch_modules(ctx, config, registries, root, overrides, &next, &parents).await?) {
             modules.insert(key.clone(), found);
             order.push(key.clone());
         }
@@ -462,6 +464,7 @@ async fn fetch_modules(
     ctx: &Ctx,
     config: &BzlmodConfig,
     registries: &Registries,
+    root: &ModuleFile,
     overrides: &HashMap<String, Override>,
     keys: &[ModuleKey],
     parents: &HashMap<ModuleKey, ModuleKey>,
@@ -469,7 +472,7 @@ async fn fetch_modules(
     let mut found: Vec<Option<Discovered>> = Vec::with_capacity(keys.len());
     let mut registry_keys = Vec::new();
     for key in keys {
-        let special = special_module(ctx, config, &key.name, overrides).await?;
+        let special = special_module(ctx, config, root, &key.name, overrides).await?;
         if special.is_none() {
             let selected_registries = match overrides.get(&key.name) {
                 Some(Override::SingleVersion { registry, .. }) if !registry.is_empty() => vec![registry.clone()],
@@ -701,6 +704,7 @@ fn add_override_patches(spec: &mut RepoSpec, override_: Option<&Override>) {
 async fn special_module(
     ctx: &Ctx,
     config: &BzlmodConfig,
+    root: &ModuleFile,
     name: &str,
     overrides: &HashMap<String, Override>,
 ) -> Result<Option<Discovered>, SkyError> {
@@ -719,45 +723,74 @@ async fn special_module(
     };
     let spec = match override_ {
         Override::LocalPath { path } => {
-            let workspace = ctx.global::<Workspace>()?;
+            let workspace = ctx.compute(&WorkspaceRootKey).await?;
             RepoSpec::Local {
-                path: workspace.root.join(path).display().to_string(),
+                path: Path::new(&workspace.0).join(path).display().to_string(),
             }
         }
-        Override::Archive {
-            urls,
-            integrity,
-            strip_prefix,
-            archive_type,
-            patches,
-            patch_cmds,
-            patch_strip,
-        } => RepoSpec::Archive(ArchiveSpec {
-            urls: urls.clone(),
-            integrity: integrity.clone(),
-            strip_prefix: strip_prefix.clone(),
-            archive_type: archive_type.clone(),
-            patches: Vec::new(),
-            patch_strip: 0,
-            local_patches: patches.clone(),
-            local_patch_strip: *patch_strip,
-            patch_cmds: patch_cmds.clone(),
-            overlay: Vec::new(),
-            module_file: None,
-        }),
-        Override::Git(source) => RepoSpec::Git(GitSpec {
-            source: source.clone(),
-            registry_patches: Vec::new(),
-            registry_patch_strip: 0,
-            module_file: None,
-        }),
+        Override::Archive { attrs } => override_spec(ctx, root, name, OverrideRule::HTTP_ARCHIVE, attrs).await?,
+        Override::Git { attrs } => override_spec(ctx, root, name, OverrideRule::GIT_REPOSITORY, attrs).await?,
         Override::SingleVersion { .. } | Override::MultipleVersion { .. } => return Ok(None),
     };
+    if let RepoSpec::Override(override_spec) = &spec {
+        crate::repo_rule::check_override(ctx, override_spec).await?;
+    }
     let repo = canonical_name(name, "", false);
     let fetched = ctx.compute(&FetchSpecKey { repo, spec: spec.clone() }).await;
     let fetched = fetched.map_err(|error| error.context("error during computation of main repo mapping"))?;
     let file = read_module_file(ctx, Root::Dir(fetched.dir), name).await?;
     Ok(Some(Discovered { file, spec: Some(spec), registry: None }))
+}
+
+/// One of `@bazel_tools`'s rules that overrides fetch modules with.
+struct OverrideRule {
+    bzl: &'static str,
+    name: &'static str,
+    /// The attributes that pin what the rule fetches, any of which makes it
+    /// declare the repository reproducible.
+    pins: &'static [&'static str],
+}
+
+impl OverrideRule {
+    const GIT_REPOSITORY: OverrideRule = OverrideRule {
+        bzl: crate::bootstrap::GIT_BZL,
+        name: "git_repository",
+        pins: &["commit"],
+    };
+    const HTTP_ARCHIVE: OverrideRule = OverrideRule {
+        bzl: crate::bootstrap::HTTP_BZL,
+        name: "http_archive",
+        pins: &["integrity", "sha256"],
+    };
+
+    /// Whether `attrs` pin what the rule fetches, so it's the same in every
+    /// workspace.
+    fn pinned(&self, attrs: &[(String, StarValue)]) -> bool {
+        let pinning = |(name, value): &(String, StarValue)| self.pins.contains(&name.as_str()) && value.as_str().is_some_and(|text| !text.is_empty());
+        attrs.iter().any(pinning)
+    }
+}
+
+/// The spec of the repository of module `name` that the root module
+/// overrides with `rule` and `attrs`. A repository that isn't pinned is
+/// fetched for this workspace alone.
+async fn override_spec(ctx: &Ctx, root: &ModuleFile, name: &str, rule: OverrideRule, attrs: &[(String, StarValue)]) -> Result<RepoSpec, SkyError> {
+    let workspace = match rule.pinned(attrs) {
+        true => None,
+        false => Some(ctx.compute(&WorkspaceRootKey).await?.0.clone()),
+    };
+    let bzl = Label::parse_canonical(rule.bzl).map_err(|error| SkyError::new(error.to_string()))?;
+    Ok(RepoSpec::Override(OverrideSpec {
+        rule: RepoRuleSpec {
+            bzl,
+            rule: rule.name.to_string(),
+            attrs: attrs.to_vec(),
+            base_repo: RepoName::MAIN,
+            original_name: name.to_string(),
+        },
+        root_repo_name: root.own_repo_name().to_string(),
+        workspace,
+    }))
 }
 
 /// The MODULE.bazel of a module that doesn't come from a registry, which,

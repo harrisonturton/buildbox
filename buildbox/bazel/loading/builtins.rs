@@ -3,17 +3,17 @@
 //! `.bzl` file.
 
 use crate::blocking;
-use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName};
+use crate::dir_loader::DirLoader;
+use bazel_label::{Label, RepoMappingTable, RepoName};
 use bazel_packages::RuleClass;
 use bazel_starlark::rule_value::StarlarkRule;
-use bazel_starlark::{BZL_GLOBALS, EvalContext, FileKind, Loads, StarlarkBuiltins};
-use intern::{PathId, Symbol};
+use bazel_starlark::{BZL_GLOBALS, StarlarkBuiltins};
+use intern::Symbol;
 use skycodec::{Decode, Encode, Fingerprint};
 use skyframe::{Ctx, Key, SkyError, Storage, Value};
 use starlark::environment::{FrozenModule, Globals};
 use starlark::values::dict::DictRef;
 use starlark::values::{FrozenValue, OwnedFrozenValue, ValueLike};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -97,11 +97,7 @@ impl Key for BuiltinsKey {
 }
 
 fn evaluate(dir: &Path, mapping: RepoMappingTable) -> anyhow::Result<Builtins> {
-    let loader = Loader {
-        dir: dir.to_path_buf(),
-        mapping: Arc::new(mapping),
-        modules: RefCell::new(HashMap::new()),
-    };
+    let loader = DirLoader::new("builtins", dir.to_path_buf(), mapping);
     let exports = loader.load(builtins_label("exports.bzl")?)?;
     let rules = dict_entries(&exports, "exported_rules")?;
     let toplevels: Vec<(String, FrozenValue)> = dict_entries(&exports, "exported_toplevels")?
@@ -193,42 +189,4 @@ pub fn builtins_mapping(bazel_tools: &RepoMappingTable) -> RepoMappingTable {
     let mut entries = bazel_tools.entries.clone();
     entries.push((Symbol::intern(BUILTINS_REPO), RepoName::new(BUILTINS_REPO)));
     RepoMappingTable::new(RepoName::new(BUILTINS_REPO), entries)
-}
-
-/// Loads builtins' `.bzl` files straight from disk: they never change, so
-/// they don't need keys of their own.
-struct Loader {
-    dir: PathBuf,
-    mapping: Arc<RepoMappingTable>,
-    modules: RefCell<HashMap<Label, FrozenModule>>,
-}
-
-impl Loader {
-    fn load(&self, label: Label) -> anyhow::Result<FrozenModule> {
-        if let Some(module) = self.modules.borrow().get(&label) {
-            return Ok(module.clone());
-        }
-        let path = self.dir.join(label.package.path.join_path(PathId::parse(label.name.as_str())?).to_string());
-        let source = std::fs::read_to_string(&path).map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;
-        let name = bazel_starlark::heap_name("builtins", label, Fingerprint::of(source.as_bytes()));
-        let ast = bazel_starlark::parse(label, source)?;
-        let context = LabelContext {
-            package: label.package,
-            mapping: &*self.mapping,
-            lenient: false,
-        };
-        let mut loaded = Vec::new();
-        for load in bazel_starlark::loads(&ast) {
-            let target = Label::parse(&load, &context)?;
-            loaded.push((load, self.load(target)?));
-        }
-        let loads = Loads {
-            modules: loaded.iter().map(|(load, module)| (load.clone(), module)).collect(),
-        };
-        let mut eval_context = EvalContext::new(FileKind::Bzl, label);
-        eval_context.mappings.insert(RepoName::new(BUILTINS_REPO), self.mapping.clone());
-        let module = bazel_starlark::eval_bzl(ast, &BZL_GLOBALS, &loads, eval_context, name).0?;
-        self.modules.borrow_mut().insert(label, module.clone());
-        Ok(module)
-    }
 }

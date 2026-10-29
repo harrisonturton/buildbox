@@ -315,6 +315,28 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, SkyError> 
     }
 }
 
+/// The directory of the workspace a graph is for, as a value keys can
+/// depend on, so that what they compute from it isn't shared with other
+/// workspaces.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct WorkspaceRoot(pub String);
+
+encoded_value!(WorkspaceRoot);
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Encode, Decode)]
+pub struct WorkspaceRootKey;
+
+impl Key for WorkspaceRootKey {
+    type Value = WorkspaceRoot;
+    const KIND: &'static str = "WORKSPACE_ROOT";
+    const EXTERNAL: bool = true;
+
+    async fn compute(&self, ctx: &Ctx) -> Result<WorkspaceRoot, SkyError> {
+        let workspace = ctx.global::<Workspace>()?;
+        Ok(WorkspaceRoot(workspace.root.display().to_string()))
+    }
+}
+
 /// The services a graph's filesystem keys need.
 pub fn workspace(root: impl Into<PathBuf>) -> Arc<Workspace> {
     Arc::new(Workspace { root: root.into() })

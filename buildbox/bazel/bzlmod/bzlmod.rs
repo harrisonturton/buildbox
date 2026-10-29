@@ -8,6 +8,7 @@
 //! use it.
 
 pub mod attrs;
+pub mod bootstrap;
 pub mod config;
 pub mod extension;
 pub mod fetch_repo;
@@ -26,6 +27,7 @@ pub mod resolver;
 pub mod selection;
 pub mod spec;
 pub mod star_value;
+pub mod typecheck;
 pub mod version;
 
 pub use config::BzlmodConfig;

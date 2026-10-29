@@ -19,6 +19,9 @@ pub enum RepoSpec {
     Builtin { dir: String },
     /// A repository rule, run with the given attributes.
     RepoRule(RepoRuleSpec),
+    /// A module's repository as the root module's `git_override` or
+    /// `archive_override` defines it.
+    Override(OverrideSpec),
     /// `@local_config_platform`, describing this machine's platform.
     HostPlatform,
 }
@@ -78,4 +81,20 @@ pub struct RepoRuleSpec {
     /// The name the rule was called with, which `repository_ctx.original_name`
     /// gives.
     pub original_name: String,
+}
+
+/// `@bazel_tools`'s `git_repository` or `http_archive`, run with an
+/// override's attributes before the dependency graph exists.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct OverrideSpec {
+    /// The rule, with attributes relative to the main repository.
+    pub rule: RepoRuleSpec,
+    /// The name the root module gives its own repository, which labels in
+    /// the attributes may use.
+    pub root_repo_name: String,
+    /// The workspace the repository is fetched for, if what it fetches may
+    /// change from one fetch to the next, such as the latest commit of a
+    /// branch. Bazel shares only repositories that can't change between
+    /// workspaces, and fetches the others once for each.
+    pub workspace: Option<String>,
 }

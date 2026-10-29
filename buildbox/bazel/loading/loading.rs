@@ -8,13 +8,15 @@
 pub mod autoload;
 mod builtins;
 mod bzl;
+mod dir_loader;
 mod package;
 mod printed;
 mod recursive;
 mod rule_class;
 
 pub use builtins::{BUILTINS_REPO, Builtins, BuiltinsDir, BuiltinsKey, builtins_mapping};
-pub use bzl::{BzlContext, BzlLoadKey, BzlModule, bzl_key_for_build, mappings, reworded, split_reported};
+pub use bzl::{BzlContext, BzlLoadKey, BzlModule, bzl_key_for_build, mappings, reworded, split_reported, with_reported};
+pub use dir_loader::DirLoader;
 
 pub use package::{BuildModuleKey, LoadedPackage, missing_target_suggestion, PackageKey, PackageLookup, PackageLookupKey, build_file_path, display as display_package, no_such_target, target_location, target_location_in};
 pub use printed::{SourceText, SourceTextKey, error_paths, read_source, report_printed, source_path};

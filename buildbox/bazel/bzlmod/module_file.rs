@@ -12,7 +12,9 @@ use starlark::syntax::AstModule;
 use starlark::values::none::NoneType;
 use starlark::values::tuple::UnpackTuple;
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, StringValue, Value, ValueLike, starlark_value};
+use bazel_label::{Label, LabelContext, PackageId, RepoMappingTable, RepoName};
 use bazel_packages::PackageError;
+use intern::{PathId, Symbol};
 use std::cell::RefCell;
 use std::fmt;
 use std::sync::LazyLock;
@@ -38,6 +40,13 @@ pub struct ModuleFile {
     /// Warnings about the root module's file: the line and column of the
     /// call each is about, and what it says.
     pub warnings: Vec<(u32, u32, String)>,
+}
+
+impl ModuleFile {
+    /// The name the module's repository has for itself.
+    pub fn own_repo_name(&self) -> &str {
+        self.repo_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -111,19 +120,12 @@ pub enum Override {
         versions: Vec<String>,
         registry: String,
     },
-    /// An archive, as `http_archive` fetches it.
-    Archive {
-        urls: Vec<String>,
-        /// A subresource integrity, or a SHA-256 in hex.
-        integrity: String,
-        strip_prefix: String,
-        archive_type: String,
-        patches: Vec<String>,
-        patch_cmds: Vec<String>,
-        patch_strip: i64,
-    },
-    /// A commit of a Git repository, as `git_repository` fetches it.
-    Git(GitSource),
+    /// An archive, as `@bazel_tools`'s `http_archive` fetches it with the
+    /// override's attributes.
+    Archive { attrs: Vec<(String, StarValue)> },
+    /// A Git repository, as `@bazel_tools`'s `git_repository` fetches it
+    /// with the override's attributes.
+    Git { attrs: Vec<(String, StarValue)> },
     LocalPath {
         path: String,
     },
@@ -136,8 +138,8 @@ impl Override {
     }
 }
 
-/// What to fetch of a Git repository, and how to patch it, as
-/// `git_repository`'s attributes say.
+/// What to fetch of a registry module's Git repository, and how to patch
+/// it, as `git_repository`'s attributes say.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct GitSource {
     pub remote: String,
@@ -154,167 +156,52 @@ pub struct GitSource {
     pub patch_strip: i64,
 }
 
-/// The attributes `git_repository` has.
-const GIT_REPOSITORY_ATTRS: &[&str] = &[
-    "branch",
-    "build_file",
-    "build_file_content",
-    "canonical_id",
-    "commit",
-    "init_submodules",
-    "patch_args",
-    "patch_cmds",
-    "patch_cmds_win",
-    "patch_strip",
-    "patch_tool",
-    "patches",
-    "recursive_init_submodules",
-    "remote",
-    "remote_module_file_integrity",
-    "remote_module_file_urls",
-    "remote_patch_strip",
-    "remote_patches",
-    "shallow_since",
-    "sparse_checkout_file",
-    "sparse_checkout_patterns",
-    "strip_prefix",
-    "tag",
-    "verbose",
-    "workspace_file",
-    "workspace_file_content",
-];
-
-/// The attributes of `git_repository` bb implements for `git_override`.
-/// `patch_cmds_win` and `verbose` change nothing here, as in Bazel off
-/// Windows.
-const GIT_OVERRIDE_ATTRS: &[&str] = &[
-    "branch",
-    "canonical_id",
-    "commit",
-    "init_submodules",
-    "patch_args",
-    "patch_cmds",
-    "patch_cmds_win",
-    "patch_strip",
-    "patches",
-    "recursive_init_submodules",
-    "remote",
-    "shallow_since",
-    "strip_prefix",
-    "tag",
-    "verbose",
-];
-
-/// The attributes `http_archive` has.
-const HTTP_ARCHIVE_ATTRS: &[&str] = &[
-    "add_prefix",
-    "auth_patterns",
-    "build_file",
-    "build_file_content",
-    "canonical_id",
-    "files",
-    "integrity",
-    "netrc",
-    "patch_args",
-    "patch_cmds",
-    "patch_cmds_win",
-    "patch_strip",
-    "patch_tool",
-    "patches",
-    "remote_file_integrity",
-    "remote_file_urls",
-    "remote_module_file_integrity",
-    "remote_module_file_urls",
-    "remote_patch_strip",
-    "remote_patches",
-    "sha256",
-    "strip_components",
-    "strip_prefix",
-    "type",
-    "url",
-    "urls",
-    "workspace_file",
-    "workspace_file_content",
-];
-
-/// The attributes of `http_archive` bb implements for `archive_override`.
-const ARCHIVE_OVERRIDE_ATTRS: &[&str] = &[
-    "canonical_id",
-    "integrity",
-    "patch_args",
-    "patch_cmds",
-    "patch_cmds_win",
-    "patch_strip",
-    "patches",
-    "sha256",
-    "strip_prefix",
-    "type",
-    "url",
-    "urls",
-];
-
-/// The attributes an override forwards to its repository rule, checked
-/// against those the rule has and those bb implements.
-struct Forwarded<'v> {
-    attrs: SmallMap<StringValue<'v>, Value<'v>>,
+/// The attributes an override forwards to its repository rule. As in
+/// Bazel, they're checked against the rule's schema only when the module's
+/// repository is fetched.
+fn forwarded_attrs(kwargs: SmallMap<StringValue<'_>, Value<'_>>) -> anyhow::Result<Vec<(String, StarValue)>> {
+    let mut attrs = Vec::with_capacity(kwargs.len());
+    for (name, value) in kwargs {
+        attrs.push((name.as_str().to_string(), StarValue::from_value(value)?));
+    }
+    Ok(attrs)
 }
 
-impl<'v> Forwarded<'v> {
-    fn check(attrs: SmallMap<StringValue<'v>, Value<'v>>, function: &str, rule: &str, known: &[&str], supported: &[&str]) -> anyhow::Result<Forwarded<'v>> {
-        for name in attrs.keys() {
-            let name = name.as_str();
-            if !known.contains(&name) {
-                anyhow::bail!("in call to '{rule}' repo rule, unknown attribute '{name}' provided");
-            }
-            if !supported.contains(&name) {
-                anyhow::bail!("{function}: bb doesn't support {rule}'s '{name}' yet");
-            }
-        }
-        Ok(Forwarded { attrs })
+/// Check that an override's patches are labels of the main repository, as
+/// the module that gives them, named `module_repo`, writes them.
+fn check_patches(patches: &[String], module_repo: &str) -> anyhow::Result<()> {
+    let mut entries = Vec::new();
+    if !module_repo.is_empty() {
+        entries.push((Symbol::intern(module_repo), RepoName::MAIN));
     }
-
-    fn get(&self, name: &str) -> Option<Value<'v>> {
-        self.attrs.iter().find(|(key, _)| key.as_str() == name).map(|(_, value)| *value)
-    }
-
-    fn string(&self, name: &str) -> anyhow::Result<String> {
-        match self.get(name) {
-            None => Ok(String::new()),
-            Some(value) => value.unpack_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("'{name}' must be a string")),
+    let mapping = RepoMappingTable::new(RepoName::MAIN, entries);
+    let context = LabelContext {
+        package: PackageId::new(RepoName::MAIN, PathId::ROOT),
+        mapping: &mapping,
+        lenient: true,
+    };
+    for patch in patches {
+        let label = Label::parse(patch, &context).map_err(|error| anyhow::anyhow!("invalid label \"{patch}\" in 'patches': {error}"))?;
+        if !label.repo().is_main() {
+            let name = patch.trim_start_matches('@').split("//").next().unwrap_or_default();
+            anyhow::bail!("invalid label in 'patches': only patches in the main repository can be applied, not from '@{name}'");
         }
     }
+    Ok(())
+}
 
-    fn strings(&self, name: &str) -> anyhow::Result<Vec<String>> {
-        match self.get(name) {
-            None => Ok(Vec::new()),
-            Some(value) => bazel_starlark::convert::strings(value).ok_or_else(|| anyhow::anyhow!("'{name}' must be a list of strings")),
-        }
+/// The `patches` an override gives, which must be a list of strings.
+fn override_patches(attrs: &[(String, StarValue)]) -> anyhow::Result<Vec<String>> {
+    let Some((_, value)) = attrs.iter().find(|(name, _)| name == "patches") else {
+        return Ok(Vec::new());
+    };
+    let items = value.as_list().ok_or_else(|| anyhow::anyhow!("for patches, got {}, want sequence", value.type_name()))?;
+    let mut patches = Vec::with_capacity(items.len());
+    for item in items {
+        let patch = item.as_str().ok_or_else(|| anyhow::anyhow!("at index {} of patches, got element of type {}, want string", patches.len(), item.type_name()))?;
+        patches.push(patch.to_string());
     }
-
-    fn bool(&self, name: &str) -> anyhow::Result<bool> {
-        match self.get(name) {
-            None => Ok(false),
-            Some(value) => value.unpack_bool().ok_or_else(|| anyhow::anyhow!("'{name}' must be a bool")),
-        }
-    }
-
-    /// The strip of the patches: `patch_strip`, or `patch_args` if it's
-    /// just `-pN`, as Bazel applies patches itself only then.
-    fn patch_strip(&self) -> anyhow::Result<i64> {
-        let strip = match self.get("patch_strip") {
-            None => 0,
-            Some(value) => value.unpack_i32().ok_or_else(|| anyhow::anyhow!("'patch_strip' must be an int"))? as i64,
-        };
-        let args = self.strings("patch_args")?;
-        match args.as_slice() {
-            [] => Ok(strip),
-            [arg] => match arg.strip_prefix("-p").and_then(|count| count.parse().ok()) {
-                Some(count) => Ok(count),
-                None => anyhow::bail!("bb doesn't support patch_args other than -pN yet"),
-            },
-            _ => anyhow::bail!("bb doesn't support patch_args other than -pN yet"),
-        }
-    }
+    Ok(patches)
 }
 
 /// Whether a `bazel_compatibility` entry is a comparison and a version of
@@ -839,26 +726,9 @@ fn module_functions(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let attrs = Forwarded::check(kwargs, "archive_override", "http_archive", HTTP_ARCHIVE_ATTRS, ARCHIVE_OVERRIDE_ATTRS)?;
-        let mut urls = attrs.strings("urls")?;
-        let url = attrs.string("url")?;
-        if !url.is_empty() {
-            urls.insert(0, url);
-        }
-        let integrity = match attrs.string("integrity")? {
-            integrity if integrity.is_empty() => attrs.string("sha256")?,
-            integrity => integrity,
-        };
-        let override_ = Override::Archive {
-            urls,
-            integrity,
-            strip_prefix: attrs.string("strip_prefix")?,
-            archive_type: attrs.string("type")?,
-            patches: attrs.strings("patches")?,
-            patch_cmds: attrs.strings("patch_cmds")?,
-            patch_strip: attrs.patch_strip()?,
-        };
-        add_override(eval, module_name, override_)
+        let attrs = forwarded_attrs(kwargs)?;
+        check_override_patches(eval, &attrs)?;
+        add_override(eval, module_name, Override::Archive { attrs })
     }
 
     /// Fetch a module from a Git repository, with `git_repository`'s
@@ -868,24 +738,9 @@ fn module_functions(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: SmallMap<StringValue<'v>, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let attrs = Forwarded::check(kwargs, "git_override", "git_repository", GIT_REPOSITORY_ATTRS, GIT_OVERRIDE_ATTRS)?;
-        let source = GitSource {
-            remote: attrs.string("remote")?,
-            commit: attrs.string("commit")?,
-            tag: attrs.string("tag")?,
-            branch: attrs.string("branch")?,
-            shallow_since: attrs.string("shallow_since")?,
-            init_submodules: attrs.bool("init_submodules")?,
-            recursive_init_submodules: attrs.bool("recursive_init_submodules")?,
-            strip_prefix: attrs.string("strip_prefix")?,
-            patches: attrs.strings("patches")?,
-            patch_cmds: attrs.strings("patch_cmds")?,
-            patch_strip: attrs.patch_strip()?,
-        };
-        if source.remote.is_empty() {
-            anyhow::bail!("git_override: missing value for mandatory attribute 'remote' in 'git_repository' rule");
-        }
-        add_override(eval, module_name, Override::Git(source))
+        let attrs = forwarded_attrs(kwargs)?;
+        check_override_patches(eval, &attrs)?;
+        add_override(eval, module_name, Override::Git { attrs })
     }
 
     fn local_path_override<'v>(
@@ -900,6 +755,14 @@ fn module_functions(builder: &mut GlobalsBuilder) {
         let _ = kwargs;
         Ok(NoneType)
     }
+}
+
+/// Check that the patches of an override in the module being evaluated
+/// are in the main repository.
+fn check_override_patches(eval: &Evaluator<'_, '_, '_>, attrs: &[(String, StarValue)]) -> anyhow::Result<()> {
+    let context = ModuleContext::get(eval)?;
+    let module_repo = context.file.borrow().own_repo_name().to_string();
+    check_patches(&override_patches(attrs)?, &module_repo)
 }
 
 fn add_override(eval: &mut Evaluator<'_, '_, '_>, module_name: &str, override_: Override) -> anyhow::Result<NoneType> {
@@ -1015,6 +878,39 @@ include("//third_party:deps.MODULE.bazel")
         let module = MODULE.replace(".MODULE.bazel\")", ".MODULE.bazel\", dev_dependency = True)");
         let file = evaluate("MODULE.bazel", &module, false, None).unwrap();
         assert!(file.deps.iter().all(|dep| dep.name != "included"));
+    }
+
+    #[test]
+    fn git_and_archive_overrides_keep_their_attributes_as_given() {
+        let module = r##"
+module(name = "app", repo_name = "my_app")
+git_override(module_name = "a", remote = "https://a", build_file_content = "# empty", patches = ["@my_app//:a.patch"], patch_strip = 1, unknown = True)
+archive_override(module_name = "b", urls = ["https://b"], files = {"x": "//:x"})
+"##;
+        let file = evaluate("MODULE.bazel", module, true, None).unwrap();
+        let Override::Git { attrs } = &file.overrides[0].1 else {
+            panic!("expected a git_override, got {:?}", file.overrides[0]);
+        };
+        let names: Vec<&str> = attrs.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["remote", "build_file_content", "patches", "patch_strip", "unknown"]);
+        let Override::Archive { attrs } = &file.overrides[1].1 else {
+            panic!("expected an archive_override, got {:?}", file.overrides[1]);
+        };
+        let files = StarValue::Dict(vec![(StarValue::String("x".into()), StarValue::String("//:x".into()))]);
+        assert_eq!(attrs[1], ("files".to_string(), files));
+    }
+
+    #[test]
+    fn override_patches_must_be_in_the_main_repository() {
+        let module = r#"git_override(module_name = "a", remote = "https://a", patches = ["@other//:a.patch"])"#;
+        let error = evaluate("MODULE.bazel", module, true, None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("invalid label in 'patches': only patches in the main repository can be applied, not from '@other'"),
+            "{error:?}"
+        );
+        let module = r#"archive_override(module_name = "a", urls = ["https://a"], patches = "//:a.patch")"#;
+        let error = evaluate("MODULE.bazel", module, true, None).unwrap_err();
+        assert!(format!("{error:#}").contains("for patches, got string, want sequence"), "{error:?}");
     }
 
     #[test]

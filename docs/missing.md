@@ -206,10 +206,10 @@ rather than misbehaving. Still missing:
   - `.7z`, `.deb` and `.ar` archives can't be extracted (`fetch/extract.rs`).
   - `execute(quiet = False)` doesn't show the output, and
     `report_progress` isn't shown.
-- **Overrides:** `git_override` and `archive_override` fail on the
-  attributes bb doesn't implement, such as `build_file` and
-  `sparse_checkout_patterns`. A `git_override` of a branch or tag is
-  fetched once and kept.
+- **Overrides:** `git_override` and `archive_override` run
+  `@bazel_tools`'s own `git_repository` and `http_archive`, so they take
+  every attribute Bazel does. As in Bazel, a `git_override` of a branch or
+  tag is fetched once and kept until the repository is refetched.
 - **Commands:** of `mod`'s subcommands only `dump_repo_mapping` works;
   `fetch` has no `--configure` or `--force`; there's no `vendor` or
   `sync`.

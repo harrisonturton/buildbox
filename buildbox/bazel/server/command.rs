@@ -94,7 +94,11 @@ pub async fn main_mapping(context: &CommandContext<'_>, session: &skyframe::Sess
         Ok(mapping) => std::sync::Arc::new(mapping.0.clone()),
         Err(error) => {
             report_module_file_error(context, session, out).await;
-            out.error(&main_mapping_error(error.message())).await;
+            let (reported, last) = bazel_loading::split_reported(error.message());
+            if !reported.is_empty() {
+                out.error(reported).await;
+            }
+            out.error(&main_mapping_error(last)).await;
             return Err(exit::EXTERNAL_DEPS_ERROR);
         }
     };

@@ -6,6 +6,7 @@ rust_library(
     name = "bzlmod",
     srcs = [
         "attrs.rs",
+        "bootstrap.rs",
         "bzlmod.rs",
         "config.rs",
         "extension.rs",
@@ -25,6 +26,7 @@ rust_library(
         "selection.rs",
         "spec.rs",
         "star_value.rs",
+        "typecheck.rs",
         "version.rs",
     ],
     crate_name = "bazel_bzlmod",
