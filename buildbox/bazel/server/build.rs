@@ -1,6 +1,7 @@
 //! `bb build`: analyze targets, run the actions that build their files,
 //! and write those files to the output tree.
 
+use crate::build_events::TargetAttrs;
 use crate::command::{CommandContext, exit, working_package};
 use crate::output::Output;
 use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey, output_groups};
@@ -44,6 +45,8 @@ pub fn build_spec() -> OptionSpec {
         ("output_groups", Multi),
         ("aspects", Multi),
         ("aspects_parameters", Multi),
+        ("build_event_json_file", Value),
+        ("build_event_binary_file", Value),
         ("verbose_failures", Bool),
         ("jobs", Jobs),
         ("test_output", Value),
@@ -225,6 +228,9 @@ pub async fn update_status(context: &CommandContext<'_>, workspace: &Workspace, 
         false => run_status_command(context, command, out).await?,
     };
     let values = StatusValues::new(options.get("embed_label").unwrap_or_default(), &output);
+    if let Some(events) = out.build_events() {
+        events.workspace_status(&values);
+    }
     workspace.set_status(values).await;
     Ok(())
 }
@@ -303,6 +309,7 @@ pub async fn parse(context: &CommandContext<'_>, command: &str, args: &[String],
                 return Err(exit::COMMAND_LINE_ERROR);
             }
             out.configure(&options).await;
+            crate::build_events::start(context, command, args, &options, out).await?;
             Ok(options)
         }
         Err(error) => {
@@ -348,6 +355,9 @@ pub async fn run_command(
     let tracker = workspace.progress.track();
     out.track(tracker).await;
     let exec_root = crate::commands::output_base_for(context.server, &context.workspace_root).join("execroot/_main");
+    if let Some(events) = out.build_events() {
+        events.workspace_info(&exec_root);
+    }
     out.set_exec_root(exec_root).await;
     let (analyzed, head_starts) = futures::channel::mpsc::unbounded();
     let execute_actions = options.flag("build", true);
@@ -427,6 +437,11 @@ async fn analyze_and_build(
         Err(error) => return Err(aspects_failed(options, &requested, &labels, &main_mapping, error.message(), out).await),
     };
     let (analyzed, failed) = analyze(session, &labels, config, &main_mapping, analyzed, out).await;
+    if let Some(events) = out.build_events() {
+        for (label, target) in &analyzed {
+            events.target_configured(&bazel_query::display_label(*label, &main_mapping), target);
+        }
+    }
     let (applied, failed_aspects) = apply_aspects(session, &analyzed, &aspects, &main_mapping, out).await;
     let incompatible = report_explicitly_incompatible(&analyzed, &explicit, &main_mapping, out).await;
     if let Some(first) = failed.first().filter(|_| !keep_going) {
@@ -481,6 +496,9 @@ async fn analyze_and_build(
     for ((label, target), top) in analyzed.into_iter().zip(&target_tops) {
         let files = built_files(top.as_deref(), &built_by_path);
         unbuilt += usize::from(files.is_none());
+        if let Some(events) = out.build_events().filter(|_| execute_actions) {
+            events.target_completed(&bazel_query::display_label(label, &main_mapping), &target, files.as_deref(), &exec_root);
+        }
         targets.push((label, target, files.unwrap_or_default()));
     }
     let mut built_aspects = Vec::new();
@@ -1006,11 +1024,32 @@ async fn targets(
         Purpose::Query => labels,
         Purpose::Build | Purpose::Test => filter_by_tags(&universe, labels, options, purpose).await,
     };
+    if let Some(events) = out.build_events() {
+        events.patterns_expanded(expanded_targets(&universe, &labels, main_mapping).await);
+    }
     Ok(Requested {
         labels,
         explicit,
         patterns_failed: !skipped.is_empty(),
     })
+}
+
+/// The targets the patterns expanded to, as build events name them, with
+/// what the events say of them.
+async fn expanded_targets(universe: &Universe<&Session>, labels: &[Label], mapping: &RepoMappingTable) -> Vec<(String, TargetAttrs)> {
+    let mut expanded = Vec::with_capacity(labels.len());
+    for &label in labels {
+        let shown = bazel_query::display_label(label, mapping);
+        let attrs = match universe.target(label).await {
+            Ok(target) => match target.target() {
+                Target::Rule(rule) => TargetAttrs::of(Some(rule), is_test_kind(target.package().rule_class(rule).kind.as_str())),
+                _ => TargetAttrs::default(),
+            },
+            Err(_) => TargetAttrs::default(),
+        };
+        expanded.push((shown, attrs));
+    }
+    expanded
 }
 
 /// The targets to build of those the patterns name: those

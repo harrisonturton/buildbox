@@ -1,0 +1,83 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("//bazel/connect:defs.bzl", "rust_connect_library")
+
+package(default_visibility = ["//visibility:private"])
+
+proto_library(
+    name = "action_cache_proto",
+    srcs = ["src/main/protobuf/action_cache.proto"],
+    strip_import_prefix = "/third_party/bazelapis",
+)
+
+proto_library(
+    name = "option_filters_proto",
+    srcs = ["src/main/protobuf/option_filters.proto"],
+    strip_import_prefix = "/third_party/bazelapis",
+)
+
+proto_library(
+    name = "command_line_proto",
+    srcs = ["src/main/protobuf/command_line.proto"],
+    strip_import_prefix = "/third_party/bazelapis",
+    deps = [":option_filters_proto"],
+)
+
+proto_library(
+    name = "failure_details_proto",
+    srcs = ["src/main/protobuf/failure_details.proto"],
+    strip_import_prefix = "/third_party/bazelapis",
+    deps = ["@protobuf//:descriptor_proto"],
+)
+
+proto_library(
+    name = "strategy_policy_proto",
+    srcs = ["src/main/protobuf/strategy_policy.proto"],
+    strip_import_prefix = "/third_party/bazelapis",
+)
+
+proto_library(
+    name = "invocation_policy_proto",
+    srcs = ["src/main/protobuf/invocation_policy.proto"],
+    strip_import_prefix = "/third_party/bazelapis",
+    deps = [":strategy_policy_proto"],
+)
+
+proto_library(
+    name = "package_load_metrics_proto",
+    srcs = ["src/main/java/com/google/devtools/build/lib/packages/metrics/package_load_metrics.proto"],
+    strip_import_prefix = "/third_party/bazelapis",
+    deps = ["@protobuf//:duration_proto"],
+)
+
+proto_library(
+    name = "build_event_stream_proto",
+    srcs = ["src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto"],
+    strip_import_prefix = "/third_party/bazelapis",
+    deps = [
+        ":action_cache_proto",
+        ":command_line_proto",
+        ":failure_details_proto",
+        ":invocation_policy_proto",
+        ":package_load_metrics_proto",
+        "@protobuf//:any_proto",
+        "@protobuf//:duration_proto",
+        "@protobuf//:timestamp_proto",
+    ],
+)
+
+# The Build Event Protocol's messages and those they refer to, which must
+# resolve within one crate.
+rust_connect_library(
+    name = "build_event_stream_rust_connect",
+    protos = [
+        ":action_cache_proto",
+        ":build_event_stream_proto",
+        ":command_line_proto",
+        ":failure_details_proto",
+        ":invocation_policy_proto",
+        ":option_filters_proto",
+        ":package_load_metrics_proto",
+        ":strategy_policy_proto",
+    ],
+    visibility = ["//buildbox:__subpackages__"],
+)

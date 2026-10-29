@@ -172,6 +172,7 @@ pub mod exit {
     pub const PARTIAL_ANALYSIS_FAILURE: i32 = 3;
     pub const ANALYSIS_FAILURE: i32 = 7;
     pub const INTERRUPTED: i32 = 8;
+    pub const LOCAL_ENVIRONMENTAL_ERROR: i32 = 36;
     pub const INTERNAL_ERROR: i32 = 37;
     /// The modules or repositories the build depends on couldn't be
     /// resolved or fetched.
@@ -249,7 +250,7 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         invocation_id: crate::invocation::new_invocation_id(),
     };
 
-    match command.as_str() {
+    let code = match command.as_str() {
         "query" => crate::queries::query(&context, args, out).await,
         "cquery" => crate::queries::cquery(&context, args, out).await,
         "aquery" => crate::queries::aquery(&context, args, out).await,
@@ -264,7 +265,9 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         "fetch" => crate::fetch::fetch(&context, args, out).await,
         "mod" => crate::modcmd::mod_command(&context, args, out).await,
         other => unsupported(other, out).await,
-    }
+    };
+    crate::build_events::finish(code, out).await;
+    code
 }
 
 /// The commands Bazel has that bb doesn't support yet.
@@ -301,6 +304,7 @@ pub async fn interrupted(command: &RunningCommand, out: &Output) -> i32 {
         }
         _ => out.error(&format!("{name} interrupted")).await,
     }
+    crate::build_events::finish(exit::INTERRUPTED, out).await;
     exit::INTERRUPTED
 }
 

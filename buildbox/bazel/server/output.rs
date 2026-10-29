@@ -1,6 +1,7 @@
 //! A command's output, streamed back to the client, as Bazel's UI shows
 //! it: messages, and the progress bar beneath them.
 
+use crate::build_events::BuildEvents;
 use bazel_options::ParsedOptions;
 use bazel_progress::{Event, Snapshot, Tracker};
 use bazel_rust_connect::buildbox::bazel::v1::{EnvironmentVariable, Exec, RunResponse, run_response};
@@ -29,6 +30,8 @@ const MORE_ERRORS: &str = "\nERROR: ";
 #[derive(Clone)]
 pub struct Output {
     ui: Arc<Mutex<Ui>>,
+    /// The command's build events, if it writes them.
+    events: Arc<std::sync::Mutex<Option<Arc<BuildEvents>>>>,
 }
 
 /// What's been written, and what the progress bar shows.
@@ -69,7 +72,7 @@ impl Output {
         };
         let ui = Arc::new(Mutex::new(ui));
         tokio::spawn(refresh_until_dropped(Arc::downgrade(&ui)));
-        Output { ui }
+        Output { ui, events: Arc::default() }
     }
 
     /// Set how output looks from a command's `--color`, `--curses`,
@@ -116,12 +119,34 @@ impl Output {
         ui.refresh().await;
     }
 
+    /// Write the command's build events, recording what it prints.
+    pub fn set_build_events(&self, events: Arc<BuildEvents>) {
+        *self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(events);
+    }
+
+    /// The command's build events, if it writes them.
+    pub fn build_events(&self) -> Option<Arc<BuildEvents>> {
+        self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    /// Stop writing build events, for the command to finish them.
+    pub fn take_build_events(&self) -> Option<Arc<BuildEvents>> {
+        self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+    }
+
+    fn record(&self, stdout: &str, stderr: &str) {
+        if let Some(events) = self.build_events() {
+            events.printed(stdout, stderr);
+        }
+    }
+
     pub async fn stdout(&self, text: &str) {
         self.stdout_bytes(text.as_bytes()).await;
     }
 
     /// Output for stdout that may not be text, such as a binary proto.
     pub async fn stdout_bytes(&self, bytes: &[u8]) {
+        self.record(&String::from_utf8_lossy(bytes), "");
         let mut ui = self.ui.lock().await;
         ui.show_events().await;
         ui.write_stdout(bytes).await;
@@ -129,6 +154,7 @@ impl Output {
 
     /// Output for stderr as it is, such as what an action printed.
     pub async fn stderr(&self, text: &str) {
+        self.record("", text);
         let mut ui = self.ui.lock().await;
         ui.show_events().await;
         ui.write_stderr(text).await;
@@ -145,6 +171,7 @@ impl Output {
             return;
         }
         for error in message.split(MORE_ERRORS) {
+            self.record("", &format!("ERROR: {error}\n"));
             ui.write_message(Kind::Error, error).await;
         }
     }
@@ -158,6 +185,13 @@ impl Output {
     }
 
     async fn message(&self, kind: Kind, message: &str) {
+        let prefix = match kind {
+            Kind::Error => "ERROR",
+            Kind::Warning => "WARNING",
+            Kind::Info => "INFO",
+            Kind::Debug => "DEBUG",
+        };
+        self.record("", &format!("{prefix}: {message}\n"));
         let mut ui = self.ui.lock().await;
         ui.show_events().await;
         ui.write_message(kind, message).await;

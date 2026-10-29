@@ -172,9 +172,14 @@ rather than misbehaving. Still missing:
 
 ## 7. Build reporting and observability
 
-- No Build Event Protocol (`--bes_backend`, `--build_event_json_file`,
-  `--build_event_binary_file`), which CI integrations and build-results
-  services depend on.
+- **Build Event Protocol.** `--build_event_json_file` and
+  `--build_event_binary_file` write Bazel's events for the command line,
+  options, patterns, configurations, targets and their files, test results
+  and summaries, and the outcome (`server/build_events.rs`). Missing are
+  `--bes_backend` and the other `--bes_*` options, `--build_event_text_file`,
+  structured command lines, action events, progress events while the
+  command runs (bb posts one at the end), and source files in a target's
+  named sets of files.
 - No execution log (`--execution_log_*`), no `--profile` JSON trace and
   no `analyze-profile`, no `--explain`, and no `--announce_rc`.
 - `dump` prints bb's own engine statistics; Bazel's `--action_cache`,

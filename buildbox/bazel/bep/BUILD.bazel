@@ -1,0 +1,26 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "bep",
+    srcs = [
+        "bep.rs",
+        "events.rs",
+    ],
+    crate_name = "bazel_bep",
+    crate_root = "bep.rs",
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//third_party/bazelapis:build_event_stream_rust_connect",
+        "@crates//:buffa",
+        "@crates//:buffa-types",
+        "@crates//:serde_json",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "bep_test",
+    crate = ":bep",
+)

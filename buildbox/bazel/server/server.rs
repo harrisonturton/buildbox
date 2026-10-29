@@ -7,6 +7,7 @@
 //! server lock.
 
 mod build;
+mod build_events;
 mod build_id;
 mod command;
 mod commands;

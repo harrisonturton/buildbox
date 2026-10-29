@@ -23,6 +23,7 @@ rust_library(
     name = "server",
     srcs = [
         "build.rs",
+        "build_events.rs",
         "build_id.rs",
         "command.rs",
         "commands.rs",
@@ -73,6 +74,7 @@ rust_library(
     deps = [
         ":bazel_rust_connect",
         "//buildbox/bazel/analysis",
+        "//buildbox/bazel/bep",
         "//buildbox/bazel/bzlmod",
         "//buildbox/bazel/config",
         "//buildbox/bazel/execution",

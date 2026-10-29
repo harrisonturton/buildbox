@@ -90,6 +90,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     let keep_going = options.flag("test_keep_going", true);
     let results = run_tests(context, &session, &tests, &built, epoch, &output_mode, keep_going, out).await;
     report_summaries(&results, &built, out).await;
+    post_test_summaries(&results, &built, epoch, out);
     drop(session);
 
     let failed = results.iter().filter(|(_, result)| !passed(result)).count();
@@ -302,6 +303,7 @@ async fn run_tests(
         if let Ok(test) = &result {
             write_logs(context.server.backend(), built, key, test).await;
             report_test(key, test, built, epoch, output_mode, out).await;
+            post_test_results(key, test, built, epoch, out);
         }
         match &result {
             Err(message) if !message.is_empty() => out.error(message).await,
@@ -441,6 +443,99 @@ async fn write_logs(backend: Option<&Arc<Backend>>, built: &Built, key: &TestKey
         if let Err(error) = backend.cas.materialize(&digest.to_cas(), &path, false).await {
             tracing::warn!("failed to write {}: {error}", path.display());
         }
+    }
+}
+
+/// Post the build events of each attempt at a test's run, if the command
+/// writes them.
+fn post_test_results(key: &TestKey, result: &TestResult, built: &Built, epoch: u64, out: &Output) {
+    let Some(events) = out.build_events() else {
+        return;
+    };
+    let label = bazel_query::display_label(key.target.label, &built.main_mapping);
+    let config = key.target.config.get();
+    let cached = result.cached || result.epoch < epoch;
+    let attempt = |number: usize, status: TestStatus, exit_code: i32, duration_ms: u64, outputs: Vec<bazel_bep::events::proto::File>| bazel_bep::events::TestAttempt {
+        label: &label,
+        configuration: &config.digest,
+        run: key.run.run as i32 + 1,
+        shard: key.run.shard as i32 + 1,
+        attempt: number as i32,
+        status: event_status(status),
+        cached,
+        start: std::time::SystemTime::now() - std::time::Duration::from_millis(duration_ms),
+        duration_ms,
+        exit_code,
+        outputs,
+        strategy: "linux-sandbox",
+    };
+    for (index, failed) in result.failed_attempts.iter().enumerate() {
+        let outputs = attempt_outputs(&attempt_log(built, key, index, "log"), failed.xml.map(|_| attempt_log(built, key, index, "xml")));
+        events.post(bazel_bep::events::test_result(attempt(index + 1, failed.status, failed.exit_code, failed.duration_ms, outputs)));
+    }
+    let dir = testlogs_dir(built, key);
+    let outputs = attempt_outputs(&dir.join("test.log"), result.xml.map(|_| dir.join("test.xml")));
+    let last = result.failed_attempts.len() + 1;
+    events.post(bazel_bep::events::test_result(attempt(last, result.status, result.exit_code, result.duration_ms, outputs)));
+}
+
+/// The files an attempt at a test leaves, as build events name them.
+fn attempt_outputs(log: &std::path::Path, xml: Option<PathBuf>) -> Vec<bazel_bep::events::proto::File> {
+    let mut outputs = vec![bazel_bep::events::file_at("test.log", log)];
+    if let Some(xml) = xml {
+        outputs.push(bazel_bep::events::file_at("test.xml", &xml));
+    }
+    outputs
+}
+
+fn event_status(status: TestStatus) -> bazel_bep::events::TestStatus {
+    match status {
+        TestStatus::Passed => bazel_bep::events::TestStatus::Passed,
+        TestStatus::Flaky => bazel_bep::events::TestStatus::Flaky,
+        TestStatus::Failed => bazel_bep::events::TestStatus::Failed,
+        TestStatus::TimedOut => bazel_bep::events::TestStatus::TimedOut,
+    }
+}
+
+/// Post the build event summarizing each test's runs, if the command
+/// writes them.
+fn post_test_summaries(results: &[(TestKey, Result<Arc<TestResult>, String>)], built: &Built, epoch: u64, out: &Output) {
+    let Some(events) = out.build_events() else {
+        return;
+    };
+    for summary in summaries(results) {
+        let first = summary.runs[0].0;
+        let label = bazel_query::display_label(summary.label, &built.main_mapping);
+        let config = first.target.config.get();
+        let mut passed = Vec::new();
+        let mut failed = Vec::new();
+        for (key, result) in &summary.runs {
+            let Ok(result) = result else {
+                continue;
+            };
+            let log = bazel_bep::events::file_at("", &testlogs_dir(built, key).join("test.log"));
+            match result.status {
+                TestStatus::Passed | TestStatus::Flaky => passed.push(log),
+                TestStatus::Failed | TestStatus::TimedOut => failed.push(log),
+            }
+        }
+        let total_ms: u64 = summary.times_ms().iter().sum();
+        let now = std::time::SystemTime::now();
+        events.post(bazel_bep::events::test_summary(bazel_bep::events::Summary {
+            label: &label,
+            configuration: &config.digest,
+            status: summary.status().map(event_status).unwrap_or(bazel_bep::events::TestStatus::NoStatus),
+            total_runs: summary.runs.len() as i32,
+            runs: first.run.runs.max(1) as i32,
+            shards: first.run.shards as i32,
+            attempts: summary.attempts() as i32,
+            cached: summary.cached(epoch) as i32,
+            passed,
+            failed,
+            first_start: now - std::time::Duration::from_millis(total_ms),
+            last_stop: now,
+            total_duration_ms: total_ms,
+        }));
     }
 }
 
