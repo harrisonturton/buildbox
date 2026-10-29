@@ -42,6 +42,7 @@ impl Key for ConditionKey {
         let kind = package.0.rule_class(rule).kind;
         match kind.as_str() {
             "alias" => self.alias(ctx, rule).await,
+            "label_flag" | "label_setting" => self.label_setting(ctx).await,
             "config_setting" => config_setting(ctx, self.label, rule, &self.config.get()).await,
             "constraint_value" => {
                 let matches = target_platform_has(ctx, &self.config.get(), self.label).await?;
@@ -56,6 +57,23 @@ impl Key for ConditionKey {
 }
 
 impl ConditionKey {
+    /// A `label_flag` or `label_setting` is the condition its value names,
+    /// as it forwards that target's providers.
+    async fn label_setting(&self, ctx: &Ctx) -> Result<Condition, SkyError> {
+        let Some(setting) = crate::settings::build_setting(ctx, self.label).await? else {
+            return Err(SkyError::new(format!("{} is not a valid select() condition", self.label)));
+        };
+        let config = self.config.get();
+        let bazel_config::FlagValue::Label(actual) = setting.value(&config.options) else {
+            return Err(SkyError::new(format!("{}: label setting has no label", self.label)));
+        };
+        let key = ConditionKey {
+            label: *actual,
+            config: self.config,
+        };
+        Ok(*ctx.compute(&key).await?)
+    }
+
     async fn alias(&self, ctx: &Ctx, rule: &Rule) -> Result<Condition, SkyError> {
         let actual = rule.attr(Symbol::intern("actual")).cloned().unwrap_or(AttrValue::None);
         let AttrValue::Label(actual) = resolve_value(ctx, &actual, self.config).await? else {

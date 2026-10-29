@@ -418,7 +418,8 @@ pub(crate) enum Setup {
 /// configurations of its dependencies and its toolchains.
 pub(crate) async fn setup(ctx: &Ctx, key: ConfiguredTargetKey, rule: &Rule, class_ref: &RuleClassRef, class: Arc<RuleClass>) -> Result<Setup, SkyError> {
     let label = key.label;
-    let attrs = resolve_attrs(ctx, rule, &class, key.config).await?;
+    let mut attrs = resolve_attrs(ctx, rule, &class, key.config).await?;
+    set_label_flag_value(&mut attrs, &class, label, &key.config.get());
     if let Some(constraint) = unsatisfied_constraint(ctx, &attrs, key.config).await? {
         return Ok(Setup::Incompatible(Incompatibility { chain: vec![key], constraint }));
     }
@@ -593,6 +594,22 @@ pub(crate) fn attr_labels(attrs: &[(Symbol, AttrValue)], name: &str) -> Vec<Labe
     match attrs.iter().find(|(attr, _)| *attr == name) {
         Some((_, AttrValue::LabelList(labels))) => labels.clone(),
         _ => Vec::new(),
+    }
+}
+
+/// For a `label_flag` or `label_setting`: the label the configuration
+/// sets it to, if it sets one, in place of its default, so it forwards
+/// that target's providers.
+fn set_label_flag_value(attrs: &mut [(Symbol, AttrValue)], class: &RuleClass, label: Label, config: &bazel_config::BuildConfiguration) {
+    if !matches!(class.kind.as_str(), "label_flag" | "label_setting") {
+        return;
+    }
+    let Some(bazel_config::FlagValue::Label(value)) = config.options.flag(label) else {
+        return;
+    };
+    let name = Symbol::intern("build_setting_default");
+    if let Some((_, default)) = attrs.iter_mut().find(|(attr, _)| *attr == name) {
+        *default = AttrValue::Label(*value);
     }
 }
 
