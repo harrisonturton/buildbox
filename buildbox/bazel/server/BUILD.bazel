@@ -29,6 +29,7 @@ rust_library(
         "command.rs",
         "commands.rs",
         "fetch.rs",
+        "mod_graph.rs",
         "modcmd.rs",
         "help.rs",
         "invocation.rs",

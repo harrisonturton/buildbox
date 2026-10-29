@@ -13,6 +13,7 @@ mod build_id;
 mod command;
 mod commands;
 mod fetch;
+mod mod_graph;
 mod modcmd;
 mod help;
 mod invocation;

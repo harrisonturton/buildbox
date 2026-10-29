@@ -169,7 +169,9 @@ and Bazel's summaries work as in Bazel. Missing:
   `@bazel_tools`'s own `git_repository` and `http_archive`, so they take
   every attribute Bazel does. As in Bazel, a `git_override` of a branch or
   tag is fetched once and kept until the repository is refetched.
-- **Commands:** of `mod`'s subcommands only `dump_repo_mapping` works;
+- **Commands:** of `mod`'s subcommands, `graph`, `deps` and
+  `dump_repo_mapping` work, the first two with text output and without
+  `--verbose`, `--include_unused`, `--from` or extension options;
   `fetch` has no `--configure` or `--force`; there's no `vendor` or
   `sync`.
 - **Stamping:** `transform_info_file` and `transform_version_file`
