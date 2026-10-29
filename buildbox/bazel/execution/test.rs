@@ -189,6 +189,8 @@ pub struct TestSettings {
     /// Whether undeclared outputs are zipped, as
     /// `--zip_undeclared_test_outputs` says.
     pub zip_outputs: bool,
+    /// `--run_under`: the command and its options that tests run under.
+    pub run_under: Vec<String>,
 }
 
 impl Key for TestKey {
@@ -490,6 +492,8 @@ struct TestSpec {
     exclusive: bool,
     /// The properties of the platform it runs on.
     platform: Vec<(String, String)>,
+    /// The command it runs under, and its options.
+    run_under: Vec<String>,
 }
 
 impl TestSpec {
@@ -557,6 +561,7 @@ impl TestSpec {
             },
             exclusive: tagged(&["exclusive", "exclusive-if-local"]),
             platform: target.test.as_ref().map(|test| test.exec_properties.clone()).unwrap_or_default(),
+            run_under: settings.run_under.clone(),
         })
     }
 
@@ -596,6 +601,28 @@ impl TestSpec {
         names.into_iter().map(|name| self.path(name)).collect()
     }
 
+    /// What comes between test-setup.sh and the test's arguments: the
+    /// test's path in its runfiles, after `--run_under`'s command and
+    /// options if there are some. As Bazel runs them, a command without a
+    /// `/`, which may be a shell builtin or on `PATH`, runs in a shell, and
+    /// the test's path is written so it isn't looked up on `PATH`.
+    fn run_under_arguments(&self) -> Vec<String> {
+        let path = self.executable.short_path();
+        let Some(command) = self.run_under.first() else {
+            return vec![path];
+        };
+        let mut arguments = Vec::new();
+        if !command.contains('/') {
+            arguments.extend(["/bin/bash", "-c", "\"$@\"", "/bin/bash"].map(str::to_string));
+        }
+        arguments.extend(self.run_under.iter().cloned());
+        arguments.push(match path.contains('/') {
+            true => path,
+            false => format!("./{path}"),
+        });
+        arguments
+    }
+
     fn srcdir(&self) -> String {
         format!("{}.runfiles", self.executable.exec_path)
     }
@@ -620,7 +647,8 @@ impl TestSpec {
         let mapping = repo_mapping(ctx, &self.runfiles).await?;
         inputs.insert(TreePath::Text(format!("{srcdir}/_repo_mapping")), blob_input(ctx, mapping.as_bytes()).await?);
 
-        let mut arguments = vec![setup.exec_path.to_string(), self.executable.short_path()];
+        let mut arguments = vec![setup.exec_path.to_string()];
+        arguments.extend(self.run_under_arguments());
         arguments.extend(self.args.iter().cloned());
         Ok(SpawnRequest {
             inputs,

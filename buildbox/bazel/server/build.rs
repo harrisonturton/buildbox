@@ -62,6 +62,7 @@ pub fn build_spec() -> OptionSpec {
         ("bes_upload_mode", Value),
         ("build_request_id", Value),
         ("tls_certificate", Value),
+        ("run_under", Value),
         ("verbose_failures", Bool),
         ("jobs", Jobs),
         ("test_output", Value),
@@ -270,6 +271,22 @@ pub async fn update_status(context: &CommandContext<'_>, workspace: &Workspace, 
     }
     workspace.set_status(values).await;
     Ok(())
+}
+
+/// `--run_under`'s command and options, as Bazel tokenizes them, or none.
+/// A label, which Bazel builds and runs, isn't supported yet.
+pub fn run_under(options: &ParsedOptions) -> Result<Vec<String>, String> {
+    let Some(given) = options.get("run_under").filter(|given| !given.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let words = bazel_analysis::shell::tokenize(given).map_err(|error| format!("While parsing option --run_under={given}: Not a valid command prefix {error}"))?;
+    let Some(command) = words.first() else {
+        return Err(format!("While parsing option --run_under={given}: Empty command"));
+    };
+    if command.starts_with("//") || command.starts_with('@') {
+        return Err(format!("--run_under={given} :: bb doesn't support a label in --run_under yet"));
+    }
+    Ok(words)
 }
 
 /// The machine's host name, up to its first dot, as Bazel's stamping

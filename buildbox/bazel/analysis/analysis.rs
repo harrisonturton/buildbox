@@ -40,7 +40,7 @@ mod python;
 mod repo_mapping;
 mod rule_ctx;
 mod shared;
-mod shell;
+pub mod shell;
 mod runfiles;
 pub mod settings;
 mod state;

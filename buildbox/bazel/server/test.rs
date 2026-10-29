@@ -120,6 +120,7 @@ fn test_settings(context: &CommandContext<'_>, options: &ParsedOptions) -> Resul
             _ => CacheResults::Auto,
         },
         zip_outputs: options.flag("zip_undeclared_test_outputs", false),
+        run_under: build::run_under(options)?,
     })
 }
 

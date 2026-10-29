@@ -124,7 +124,8 @@ Filtering, sharding, `--runs_per_test`, flaky retries, timeouts,
 undeclared outputs, `test.xml` (generated when a test doesn't write one)
 and Bazel's summaries work as in Bazel. Missing:
 
-- `--run_under` and `--test_strategy`; `--test_summary=detailed` and
+- `--run_under` takes a command, but not a label to build and run under;
+  `--test_strategy` is missing, and `--test_summary=detailed` and
   `testcase`, which list test cases, are errors.
 - **Coverage.** There's no `coverage` command, no LCOV collection or
   merging; `coverage_common` behaves as Bazel's does with coverage off.

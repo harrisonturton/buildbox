@@ -40,6 +40,7 @@ pub async fn run(context: &CommandContext<'_>, args: &[String], out: &Output) ->
         return exit::BUILD_FAILURE;
     }
     build::completed(0, out).await;
+    let given_args = program_args.len();
     let argv = match command_line(&built, &pattern, program_args) {
         Ok(argv) => argv,
         Err(message) => {
@@ -47,10 +48,25 @@ pub async fn run(context: &CommandContext<'_>, args: &[String], out: &Output) ->
             return exit::COMMAND_LINE_ERROR;
         }
     };
-    let mut shown: Vec<String> = argv.iter().map(|arg| shell_quote(arg)).collect();
+    let run_under = match build::run_under(&options) {
+        Ok(run_under) => run_under,
+        Err(message) => {
+            out.error(&message).await;
+            return exit::COMMAND_LINE_ERROR;
+        }
+    };
+    let mut shown: Vec<String> = argv[..argv.len() - given_args].iter().map(|arg| shell_quote(arg)).collect();
     shown[0] = shown_executable(&built, &options);
-    out.info(&format!("Running command line: {}", shown.join(" "))).await;
+    if given_args > 0 {
+        shown.push("<args omitted>".to_string());
+    }
     let working_directory = PathBuf::from(format!("{}.runfiles/_main", argv[0]));
+    let prefix = options.get("run_under").filter(|_| !run_under.is_empty());
+    let (argv, shown) = match prefix {
+        None => (argv, shown.join(" ")),
+        Some(prefix) => under(prefix, &argv, &shown),
+    };
+    out.info(&format!("Running command line: {shown}")).await;
     out.exec(argv, &working_directory, environment(context, &built, &options)).await;
     exit::SUCCESS
 }
@@ -89,6 +105,16 @@ fn command_line(built: &Built, pattern: &str, program_args: Vec<String>) -> Resu
     argv.extend(target.args.iter().cloned());
     argv.extend(program_args);
     Ok(argv)
+}
+
+/// A command line run under `--run_under`'s command, as Bazel runs it: by
+/// the shell, the command written as given before the quoted arguments;
+/// and as it's shown.
+fn under(prefix: &str, argv: &[String], shown: &[String]) -> (Vec<String>, String) {
+    let quoted: Vec<String> = argv.iter().map(|arg| shell_quote(arg)).collect();
+    let script = format!("{prefix} {}", quoted.join(" "));
+    let shown = format!("{prefix} {}", shown.join(" "));
+    (vec!["/bin/bash".to_string(), "-c".to_string(), script], shown)
 }
 
 /// Variables `bazel run` always clears, since runfiles libraries would
