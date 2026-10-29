@@ -44,6 +44,9 @@ pub struct SpawnRequest {
     pub description: String,
     /// The properties of the platform it must run on, sorted by name.
     pub platform: Vec<(String, String)>,
+    /// The inputs that are tools of the persistent worker it runs in, if it
+    /// runs in one.
+    pub tools: BTreeSet<TreePath>,
 }
 
 /// Where an input goes in an action's input tree. Actions hold one for each
@@ -123,7 +126,7 @@ struct Prepared {
 /// command.
 async fn prepare(backend: &Backend, inputs: BTreeMap<TreePath, Input>, request: &SpawnRequest) -> Result<Prepared, SkyError> {
     let span = tracing::info_span!("input_tree", inputs = inputs.len());
-    let tree = input_tree(backend, &inputs, &request.output_directories).instrument(span).await?;
+    let tree = input_tree(backend, &inputs, &request.output_directories, &request.tools).instrument(span).await?;
     let command = command_proto(request);
     let command_bytes = command.encode_to_vec();
     let command_digest = cas::Digest::of_bytes(&command_bytes);
@@ -170,9 +173,6 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
     let shown = progress(ctx).map(|progress| progress.action_started(action_key.progress_id(), generated_by, description(action, owner)));
     let _turn = crate::jobs::job_turn(ctx).await?;
     let _staged = backend.stage().await?;
-    if let Some(shown) = &shown {
-        shown.running(backend.runners.run);
-    }
     let inputs = match inputs(ctx, action).await {
         Ok(inputs) => inputs,
         Err(NotReady::MissingInputs(labels)) => {
@@ -183,10 +183,25 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
     };
     let (output_files, output_directories) = output_paths(action);
     let arguments = arguments(backend, spawn, &inputs).await?;
+    let env = sorted_env(&spawn.env);
+    let mut platform = spawn.platform.clone();
+    let mut tools = BTreeSet::new();
+    let mut in_worker = false;
+    if backend.persistent_workers {
+        if let Some(worker) = worker(spawn, &arguments, &env, &inputs) {
+            platform.extend(worker.properties);
+            platform.sort();
+            tools = worker.tools;
+            in_worker = true;
+        }
+    }
+    if let Some(shown) = &shown {
+        shown.running(backend.runners.running(in_worker));
+    }
     let request = SpawnRequest {
         inputs,
         arguments,
-        env: sorted_env(&spawn.env),
+        env,
         output_files,
         output_directories,
         cacheable: !spawn.execution_info.iter().any(|(key, _)| key == "no-cache"),
@@ -194,7 +209,8 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
         write_cache: true,
         timeout: None,
         description: description(action, owner),
-        platform: spawn.platform.clone(),
+        platform,
+        tools,
     };
     let local = ctx.global::<LocalActionCache>().ok().filter(|_| request.cacheable);
     let key = local.as_ref().map(|_| local_key(&request));
@@ -225,11 +241,60 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
     if let (Some(local), Some(key)) = (&local, key) {
         local.0.insert(key, &result.encode_to_vec());
     }
-    finish(shown, backend.runners.name(spawned.cached));
+    finish(shown, backend.runners.name(spawned.cached, in_worker));
     if !spawned.cached {
         report_output(ctx, backend, action_key, action, result).await;
     }
     checked_outputs(ctx, backend, action_key, action, result).await
+}
+
+/// How a spawn runs in a persistent worker: the platform properties that
+/// say so, as Bazel's remote execution gives them, and its tools.
+struct Worker {
+    properties: Vec<(String, String)>,
+    tools: BTreeSet<TreePath>,
+}
+
+/// How a spawn runs in a persistent worker, if it can: when it supports
+/// workers, as its execution requirements say, and its last argument is a
+/// flagfile, as Bazel requires. Its tools are the files of its tools'
+/// runfiles trees, and the inputs its other arguments name, such as its
+/// program; the worker's key, as Bazel's `persistentWorkerKey`, is a hash
+/// of them with those arguments and the environment.
+fn worker(spawn: &Spawn, arguments: &[String], env: &[(String, String)], inputs: &BTreeMap<TreePath, Input>) -> Option<Worker> {
+    let requirement = |name: &str| spawn.execution_info.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str());
+    let supported = requirement("supports-workers") == Some("1") || requirement("supports-multiplex-workers") == Some("1");
+    if !supported || !arguments.last().is_some_and(|last| is_flagfile(last)) {
+        return None;
+    }
+    let startup: HashSet<&str> = arguments.iter().filter(|argument| !is_flagfile(argument)).map(String::as_str).collect();
+    let tools: BTreeSet<TreePath> = inputs
+        .keys()
+        .filter(|path| matches!(path, TreePath::Runfile(..)) || startup.contains(path.to_string().as_str()))
+        .cloned()
+        .collect();
+    let mut fingerprinter = Fingerprinter::new();
+    for tool in &tools {
+        let digest = inputs[tool].digest.to_cas();
+        fingerprinter.bytes(tool.to_string().as_bytes()).bytes(digest.hash().as_bytes());
+    }
+    for argument in arguments.iter().filter(|argument| !is_flagfile(argument)) {
+        fingerprinter.u64(argument.len() as u64).bytes(argument.as_bytes());
+    }
+    for (name, value) in env {
+        fingerprinter.bytes(name.as_bytes()).bytes(b"=").bytes(value.as_bytes());
+    }
+    let mut properties = vec![("persistentWorkerKey".to_string(), fingerprinter.finish().to_string())];
+    if requirement("requires-worker-protocol") == Some("json") {
+        properties.push(("persistentWorkerProtocol".to_string(), "json".to_string()));
+    }
+    Some(Worker { properties, tools })
+}
+
+/// Whether an argument names a flagfile, whose arguments a persistent
+/// worker is sent: `@file`, or `--flagfile=file`.
+fn is_flagfile(argument: &str) -> bool {
+    (argument.starts_with('@') && !argument.starts_with("@@")) || argument.starts_with("--flagfile=") || argument.starts_with("-flagfile=")
 }
 
 /// The command's arguments, with those made from directories expanded into
@@ -534,7 +599,7 @@ static REPO_MAPPING: LazyLock<PathId> = LazyLock::new(|| PathId::parse("_repo_ma
 /// other actions are spliced in from their `Tree`s. The action's output
 /// directories are in it, empty, as Bazel gives them, since tools expect
 /// them to exist and workers don't create them.
-async fn input_tree(backend: &Backend, inputs: &BTreeMap<TreePath, Input>, output_directories: &[String]) -> Result<crate::inputs::MerkleTree, SkyError> {
+async fn input_tree(backend: &Backend, inputs: &BTreeMap<TreePath, Input>, output_directories: &[String], tools: &BTreeSet<TreePath>) -> Result<crate::inputs::MerkleTree, SkyError> {
     let mut tree = InputTree::default();
     let mut blobs = Vec::new();
     if !output_directories.is_empty() {
@@ -559,6 +624,9 @@ async fn input_tree(backend: &Backend, inputs: &BTreeMap<TreePath, Input>, outpu
             }
         };
         added.map_err(SkyError::new)?;
+    }
+    for tool in tools {
+        tree.mark_tool(&tool.to_string()).map_err(SkyError::new)?;
     }
     let mut merkle = tree.finish();
     merkle.blobs.extend(blobs);

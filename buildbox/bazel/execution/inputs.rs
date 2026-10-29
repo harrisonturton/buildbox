@@ -2,8 +2,8 @@
 
 use crate::digest::BlobDigest;
 use buffa::Message;
-use remote_execution_rust_connect::build::bazel::remote::execution::v2::{Directory, DirectoryNode, FileNode};
-use std::collections::BTreeMap;
+use remote_execution_rust_connect::build::bazel::remote::execution::v2::{Directory, DirectoryNode, FileNode, NodeProperties, NodeProperty};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A tree of files being built up, which becomes a Merkle tree of
 /// `Directory` messages.
@@ -15,6 +15,8 @@ pub struct InputTree {
 #[derive(Default)]
 struct Dir {
     files: BTreeMap<String, (BlobDigest, bool)>,
+    /// The files that are tools a persistent worker runs.
+    tools: BTreeSet<String>,
     dirs: BTreeMap<String, Dir>,
     /// Directories already in the CAS, by the digest of their `Directory`.
     subtrees: BTreeMap<String, BlobDigest>,
@@ -40,6 +42,17 @@ impl InputTree {
             }
         }
         dir.files.insert(name.to_string(), (digest, executable));
+        Ok(())
+    }
+
+    /// Mark a file added before as a tool, of a persistent worker, as
+    /// Bazel marks them for remote executors.
+    pub fn mark_tool(&mut self, path: &str) -> Result<(), String> {
+        let (dir, name) = self.parent(path)?;
+        if !dir.files.contains_key(name) {
+            return Err(format!("tool '{path}' isn't an input file"));
+        }
+        dir.tools.insert(name.to_string());
         Ok(())
     }
 
@@ -76,12 +89,28 @@ impl InputTree {
     }
 }
 
+/// The node property that marks a file as a persistent worker's tool.
+fn tool_property() -> buffa::MessageField<NodeProperties, buffa::Inline<NodeProperties>> {
+    NodeProperties {
+        properties: vec![NodeProperty {
+            name: "bazel_tool_input".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .into()
+}
+
 /// Encode a directory and those beneath it, returning its digest.
 fn encode(dir: Dir, blobs: &mut Vec<(cas::Digest, Vec<u8>)>) -> cas::Digest {
     let files = dir
         .files
         .into_iter()
         .map(|(name, (digest, executable))| FileNode {
+            node_properties: match dir.tools.contains(&name) {
+                true => tool_property(),
+                false => Default::default(),
+            },
             name,
             digest: digest.to_cas().to_proto().into(),
             is_executable: executable,

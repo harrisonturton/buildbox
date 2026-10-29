@@ -73,10 +73,15 @@ opaque value is an error.
   There are no spawn strategies (`--spawn_strategy`, `--strategy`). A test
   rule's `testing.ExecutionInfo` is ignored; tests take their requirements
   from tags alone.
-- **Persistent workers.** There are no persistent or multiplex workers
-  (`supports-workers` is passed through but unused). Java, Kotlin, Scala
-  and TypeScript builds work, but their compile actions are much slower,
-  and each prints the JVM's startup warnings.
+- **Persistent workers.** Actions that support workers run in them,
+  locally and, with `remote_persistent_workers` set in the server's
+  config, on remote executors that read Bazel's `persistentWorkerKey`
+  platform property (`executor/workers.rs`). Workers run in a directory
+  of their own and in the action's container, up to four for each key,
+  and are stopped after ten idle minutes. Multiplex workers are sent one
+  request at a time, as singleplex workers are. There's no worker
+  sandboxing, `--worker_max_instances`, `--worker_extra_flag` or other
+  worker option, and no `--worker_quit_after_build`.
 
 ## 3. Configurations
 
@@ -240,6 +245,5 @@ like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
 
 ## Suggested order
 
-1. Persistent workers (section 2).
-2. `map_each` over directories (section 4).
-3. Apple (section 1).
+1. `map_each` over directories (section 4).
+2. Apple (section 1).

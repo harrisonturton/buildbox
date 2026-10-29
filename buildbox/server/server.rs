@@ -246,7 +246,8 @@ fn build_backend(config: &Config, cas: Arc<dyn Cas>, action_cache: Arc<dyn Actio
             Arc::new(remote::RemoteExecutor::new(endpoint)),
             Runners::REMOTE,
             max_staged,
-        ));
+        )
+        .with_persistent_workers(config.remote_persistent_workers));
     }
     if let Some(url) = &config.remote_cache {
         tracing::info!("caching Bazel actions in {url}");

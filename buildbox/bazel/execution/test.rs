@@ -11,7 +11,7 @@ use bazel_packages::{AttrValue, Target};
 use intern::Symbol;
 use skycodec::{Decode, Encode};
 use skyframe::{Compute, Ctx, Key, SkyError, encoded_value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -281,7 +281,7 @@ async fn run_attempt(ctx: &Ctx, backend: &Backend, key: &TestKey, test: &TestSpe
         Err(error) if error.message().contains("timed out") => return Ok(timed_out(duration_ms)),
         Err(error) => return Err(error),
     };
-    finish(shown, backend.runners.name(spawned.cached));
+    finish(shown, backend.runners.name(spawned.cached, false));
     let result = spawned.result;
     let mut log = log_digest(backend, &result).await?;
     let outputs = output_digests(&result, &test.dir);
@@ -356,6 +356,7 @@ async fn generate_xml(ctx: &Ctx, backend: &Backend, test: &TestSpec, log: BlobDi
         timeout: None,
         description: format!("Generating test.xml for {}", test.name()),
         platform: test.platform.clone(),
+        tools: BTreeSet::new(),
     };
     let spawned = execute(backend, request).await?;
     let file = spawned.result.output_files.iter().find(|file| file.path == xml_path);
@@ -665,6 +666,7 @@ impl TestSpec {
             timeout: Some(self.timeout),
             description: format!("Testing {}", self.name()),
             platform: self.platform.clone(),
+            tools: BTreeSet::new(),
         })
     }
 

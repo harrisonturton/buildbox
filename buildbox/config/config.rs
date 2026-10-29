@@ -79,6 +79,12 @@ pub struct Config {
 
     /// The REAPI instance name of the remote service.
     pub remote_instance_name: String,
+
+    /// Whether actions Bazel would run in persistent workers are sent to the
+    /// remote executor marked for its workers, as Bazel's
+    /// `--experimental_remote_mark_tool_inputs` sends them. Executors that
+    /// don't support them may not run actions so marked.
+    pub remote_persistent_workers: bool,
 }
 
 /// Where and how actions run. Actions choose an environment by name.
@@ -127,6 +133,7 @@ pub struct Settings {
     pub remote_executor: Option<String>,
     pub remote_cache: Option<String>,
     pub remote_instance_name: Option<String>,
+    pub remote_persistent_workers: Option<bool>,
 }
 
 impl Settings {
@@ -148,6 +155,7 @@ impl Settings {
             remote_executor: overrides.remote_executor.or(self.remote_executor),
             remote_cache: overrides.remote_cache.or(self.remote_cache),
             remote_instance_name: overrides.remote_instance_name.or(self.remote_instance_name),
+            remote_persistent_workers: overrides.remote_persistent_workers.or(self.remote_persistent_workers),
         }
     }
 
@@ -308,6 +316,7 @@ fn resolve(settings: Settings, env: &Environment) -> Result<Config, ConfigError>
         remote_executor: settings.remote_executor,
         remote_cache: settings.remote_cache,
         remote_instance_name: settings.remote_instance_name.unwrap_or_default(),
+        remote_persistent_workers: settings.remote_persistent_workers.unwrap_or(false),
     })
 }
 
@@ -461,6 +470,7 @@ mod tests {
                 remote_executor: None,
                 remote_cache: None,
                 remote_instance_name: String::new(),
+                remote_persistent_workers: false,
             }
         );
     }

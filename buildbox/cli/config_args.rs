@@ -77,6 +77,7 @@ impl ConfigArgs {
             remote_executor: None,
             remote_cache: None,
             remote_instance_name: None,
+            remote_persistent_workers: None,
         };
         config::load(self.config.as_deref(), overrides, &Environment::from_process())
     }
