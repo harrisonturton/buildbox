@@ -17,7 +17,7 @@ use persist::PersistedMap;
 use skycodec::{Fingerprint, Fingerprinter};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{self, Write};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tracing::Instrument;
 
 /// How much of an action's output an error message shows.
@@ -479,6 +479,9 @@ async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<TreePath, Input>,
         for (path, artifact) in &tree.entries {
             paths.insert(TreePath::Runfile(tree.dir, *path), input_of(artifact));
         }
+        let mapping = bazel_analysis::repo_mapping_manifest(ctx, tree.entries.iter().map(|(_, artifact)| *artifact), None).await.map_err(NotReady::Failed)?;
+        let mapping = crate::action_key::blob_input(ctx, mapping.as_bytes()).await.map_err(NotReady::Failed)?;
+        paths.insert(TreePath::Runfile(tree.dir, *REPO_MAPPING), mapping);
     }
     let has_empty = action.runfiles.iter().any(|tree| !tree.empty.is_empty());
     if has_empty {
@@ -491,6 +494,11 @@ async fn inputs(ctx: &Ctx, action: &Action) -> Result<BTreeMap<TreePath, Input>,
     }
     Ok(paths)
 }
+
+/// Where a runfiles tree has its repository mapping manifest, which
+/// runfiles libraries read to find files by their repositories' apparent
+/// names.
+static REPO_MAPPING: LazyLock<PathId> = LazyLock::new(|| PathId::parse("_repo_mapping").expect("a valid path"));
 
 /// The input tree's `Directory` messages. Directories that are outputs of
 /// other actions are spliced in from their `Tree`s. The action's output
