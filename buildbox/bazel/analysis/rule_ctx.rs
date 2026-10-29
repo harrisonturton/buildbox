@@ -240,7 +240,7 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
             }
             match state.make_variable(name) {
                 Some(value) => Ok(value.to_string()),
-                None => Err(anyhow::anyhow!("{attribute_name}: $({name}) is not defined")),
+                None => Err(anyhow::anyhow!("{attribute_name}: $({name}) not defined")),
             }
         };
         crate::expand::expand(command, &mut lookup)

@@ -13,7 +13,7 @@ use bazel_starlark::EvalContext;
 use intern::PathId;
 use starlark::eval::Evaluator;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock};
 
 /// The state of analyzing one rule, which the builtins of rule
@@ -61,7 +61,7 @@ pub struct RuleState {
 
 impl RuleState {
     pub fn new(label: Label, kind: Symbol, config: Arc<BuildConfiguration>, mapping: Arc<RepoMappingTable>, main_mapping: Arc<RepoMappingTable>) -> RuleState {
-        let make_variables = default_make_variables(&config);
+        let make_variables = make_variables(&config, &config.cpu, Vec::new());
         RuleState {
             label,
             kind,
@@ -80,12 +80,6 @@ impl RuleState {
             toolchain_types: Vec::new(),
             attribute_errors: RefCell::new(Vec::new()),
         }
-    }
-
-    /// Set a make variable every rule has.
-    pub fn set_make_variable(&mut self, name: &str, value: &str) {
-        self.make_variables.retain(|(variable, _)| variable != name);
-        self.make_variables.push((name.to_string(), value.to_string()));
     }
 
     /// The state of the rule `eval` is analyzing.
@@ -211,7 +205,7 @@ impl RuleState {
                 }
                 return match self.make_variable(name) {
                     Some(value) => Ok(value.to_string()),
-                    None => Err(anyhow::anyhow!("$({name}) is not defined")),
+                    None => Err(anyhow::anyhow!("$({name}) not defined")),
                 };
             };
             let label = self.parse_label(argument)?;
@@ -296,17 +290,20 @@ pub fn action_execution_info(requirements: Vec<(String, String)>, tags: &[(Strin
     info
 }
 
-/// The make variables every rule has, from its configuration.
-fn default_make_variables(config: &BuildConfiguration) -> Vec<(String, String)> {
+/// The make variables a rule sees, as Bazel's
+/// `ConfigurationMakeVariableContext` gives them: the configuration's, for
+/// a target CPU of `target_cpu`, then those of the rule's toolchains, then
+/// `--define`s, each taking precedence over those before.
+pub fn make_variables(config: &BuildConfiguration, target_cpu: &str, toolchains: Vec<(String, String)>) -> Vec<(String, String)> {
     let bin_dir = config.bin_dir();
-    let mut variables = vec![
-        ("COMPILATION_MODE".to_string(), config.compilation_mode.clone()),
-        ("BINDIR".to_string(), bin_dir.clone()),
-        ("GENDIR".to_string(), bin_dir),
-        ("TARGET_CPU".to_string(), config.cpu.clone()),
-    ];
+    let mut variables: BTreeMap<String, String> = BTreeMap::new();
+    variables.insert("COMPILATION_MODE".to_string(), config.compilation_mode.clone());
+    variables.insert("BINDIR".to_string(), bin_dir.clone());
+    variables.insert("GENDIR".to_string(), bin_dir);
+    variables.insert("TARGET_CPU".to_string(), target_cpu.to_string());
+    variables.extend(toolchains);
     if let Ok(OptionValue::Assignments(defines)) = config.options.get("define") {
         variables.extend(defines.iter().cloned());
     }
-    variables
+    variables.into_iter().collect()
 }

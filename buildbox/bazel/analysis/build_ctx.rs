@@ -32,11 +32,11 @@ use bazel_starlark::provider::ProviderInstance;
 use starlark::collections::SmallMap;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use starlark::values::dict::AllocDict;
+use starlark::values::dict::{AllocDict, DictRef};
 use starlark::values::list::AllocList;
 use starlark::values::structs::AllocStruct;
 use starlark::values::{Heap, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// An analyzed dependency.
@@ -268,11 +268,11 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     if let Some(AttrValue::StringList(tags)) = input.attr("tags") {
         state.tag_execution_info = crate::state::tag_execution_info(tags);
     }
-    state.set_make_variable("TARGET_CPU", &input.target_cpu);
     let prepared = Prepared {
         deps: dep_values(module, input)?,
         outputs: predeclare(input, &state)?,
     };
+    state.make_variables = crate::state::make_variables(&input.config, &input.target_cpu, template_variables(input, &prepared));
     state.locations = locations(input, &prepared)?;
     let fields = ctx_fields(input, &state, &prepared, heap)?;
     let ctx = heap.alloc(RuleCtx {
@@ -523,6 +523,42 @@ fn substitute_template(template: &str, input: &RuleInput) -> String {
         out = out.replace(&pattern, &value);
     }
     out
+}
+
+/// The make variables a rule's toolchains define with
+/// `TemplateVariableInfo`: those of the targets in its `toolchains`
+/// attribute, then those of its resolved toolchains, the first definition
+/// of each winning, as Bazel looks them up.
+fn template_variables(input: &RuleInput, prepared: &Prepared<'_>) -> Vec<(String, String)> {
+    let mut variables = Vec::new();
+    for target in prepared.targets(input, "toolchains") {
+        if let Some(info) = TargetValue::from_value(target).and_then(|target| target.provider(TEMPLATE_VARIABLE_INFO)) {
+            variables.extend(template_variable_info(info));
+        }
+    }
+    let resolved = input.toolchains.resolved.iter().filter_map(|(_, toolchain)| toolchain.as_ref()?.providers().ok());
+    for providers in resolved {
+        if let Some(info) = providers.get().and_then(|target| target.provider(TEMPLATE_VARIABLE_INFO)) {
+            variables.extend(template_variable_info(info));
+        }
+    }
+    let mut seen = HashSet::new();
+    variables.retain(|(name, _)| seen.insert(name.clone()));
+    variables
+}
+
+/// The provider toolchains define make variables with.
+const TEMPLATE_VARIABLE_INFO: &str = "TemplateVariableInfo";
+
+/// The variables of a `TemplateVariableInfo`.
+fn template_variable_info(info: Value<'_>) -> Vec<(String, String)> {
+    let Some(variables) = ProviderInstance::from_value(info).and_then(|info| info.field("variables")) else {
+        return Vec::new();
+    };
+    let Some(dict) = DictRef::from_value(variables) else {
+        return Vec::new();
+    };
+    dict.iter().filter_map(|(name, value)| Some((name.unpack_str()?.to_string(), value.unpack_str()?.to_string()))).collect()
 }
 
 /// What `$(location)` expands each label to: an executable target's
