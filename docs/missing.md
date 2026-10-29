@@ -1,6 +1,6 @@
 # What bb is missing compared with Bazel
 
-This lists what Bazel 9.3.1 has and bb doesn't, as of 2026-10-28. It's
+This lists what Bazel 9.3.1 has and bb doesn't, as of 2026-10-29. It's
 ordered roughly by how many real repositories each gap blocks, and leaves
 out differences in wording and output that only a careful diff would see.
 Paths are relative to `buildbox/bazel/`.
@@ -8,10 +8,11 @@ Paths are relative to `buildbox/bazel/`.
 Much is already done and isn't listed: loading, Bzlmod resolution,
 Starlark rules and aspects (attached, propagated, required and top-level
 with `--aspects`), Starlark transitions and splits, toolchain resolution
-with optional toolchains and `target_settings`, incompatible-target
-skipping, analysis tests, `select()` and `config_setting`, visibility and
-dependency checks, `query`/`cquery`/`aquery` and their outputs, real C++,
-Java and Python builtins, remote caching and execution, and `build`,
+with optional toolchains, `target_settings` and exec groups,
+incompatible-target skipping, analysis tests, `select()` and
+`config_setting`, visibility and dependency checks, `query`/`cquery`/`aquery` and their outputs, real C++,
+Java and Python builtins, autoloads for repositories written for Bazel 8,
+remote caching and execution, the Build Event Protocol, and `build`,
 `test`, `run`, `fetch` and `clean`.
 
 ## 1. Platform-specific rule sets: Apple and Android
@@ -85,10 +86,6 @@ Configurations are made of native options and Starlark flags
 defaults and parsing; a `config_setting` or transition on any other fails
 rather than misbehaving. Still missing:
 
-- `config.none()` is treated as `config.target()`
-  (`starlark/rule_value.rs`).
-- `--host_action_env` has no effect: exec configurations copy the target's
-  `--action_env` (`analysis/transition.rs`).
 - Builtins' `incompatible_*` and `experimental_*` getters on opaque values
   return `false` (`starlark/opaque.rs`), except
   `incompatible_enable_proto_toolchain_resolution`. A flag Bazel 9 turns
@@ -107,66 +104,28 @@ rather than misbehaving. Still missing:
   to `add_all` get its path instead of its files.
 - **Unresolved symlinks.** `ctx.actions.symlink(target_path = ...)` fails,
   and `declare_symlink` declares an ordinary file (`analysis/actions.rs`).
-- **Action conflicts** are only checked within one rule
-  (`analysis/state.rs`). Two targets generating the same path, or one
-  generating a file inside another's directory, aren't reported; the last
-  to be written wins.
-- **Toolchain Make variables.** Nothing outside the C++ rules reads
-  `TemplateVariableInfo`, so `toolchains = [...]` on a genrule or Starlark
-  rule doesn't define `$(PYTHON3)`, `$(JAVA)` and the like. `ctx.var` has
-  only `COMPILATION_MODE`, `BINDIR`, `GENDIR`, `TARGET_CPU` and `--define`s
-  (`analysis/state.rs`).
-- **Param files.** Arguments only move to a param file with
-  `use_always = True`; Bazel also moves them once the command line passes
-  `--min_param_file_size`, so very long command lines can fail. The
-  `flag_per_line` format is written like `multiline`.
-- `ctx.resolve_command` is missing (`ctx.resolve_tools` works).
 - `starlark_doc_extract` has no implementation, which breaks stardoc.
-- `platform` targets return no providers, so `dep[PlatformInfo]` on one
-  fails (`analysis/native.rs`).
 
 ## 5. Runfiles, and the environment of `run` and `test`
 
-- **`args` and `env` aren't expanded.** `bazel run` and `bazel test` pass
-  a rule's `args` and `env` through as written (`server/run.rs`,
-  `execution/test.rs`); Bazel expands `$(location)`, `$(rootpath)` and
-  Make variables in them, and splits `args` as a shell would.
-- **`env_inherit`** (`RunEnvironmentInfo.inherited_environment`) is
-  ignored, and `bazel run` applies neither it nor `environment`: the binary
-  gets the client's environment and `BUILD_*_DIRECTORY`.
-- **Tools' runfiles in actions** have no `_repo_mapping` or `MANIFEST`, so
-  runfiles libraries under Bzlmod (Python and shell launchers used as
-  tools) can fail to find files (`execution/spawn.rs`). The runfiles trees
-  of tests and of `bazel run` do have them.
+`args` and `env` are expanded and `RunEnvironmentInfo` applied as in
+Bazel, and runfiles trees, tools' included, have Bazel's layout and
+`_repo_mapping`. Missing:
+
 - `FilesToRunProvider`'s `runfiles_manifest` and `repo_mapping_manifest`
   are always `None` (`analysis/runfiles.rs`).
-- Where two runfiles have the same path, bb keeps the first by label;
-  Bazel prefers `root_symlinks`, then `symlinks`, then files.
 - `--nobuild_runfile_links` is accepted but runfiles links are always
   built. `--noenable_runfiles` and `--nobuild_runfile_manifests` are
   errors.
 
 ## 6. The test runner
 
-`--test_filter`, `--test_arg`, `--test_env`, `--test_timeout`,
-`--test_tag_filters`, `--build_tag_filters`, `--build_tests_only`,
-`--cache_test_results`, `exclusive`, timeouts by size, `test.log` and
-`test.xml` work as in Bazel. Missing:
+Filtering, sharding, `--runs_per_test`, flaky retries, timeouts,
+undeclared outputs, `test.xml` (generated when a test doesn't write one)
+and Bazel's summaries work as in Bazel. Missing:
 
-- **Sharding.** `shard_count` has no effect: nothing sets
-  `TEST_TOTAL_SHARDS`, `TEST_SHARD_INDEX` or `TEST_SHARD_STATUS_FILE`, and
-  `--test_sharding_strategy` isn't implemented.
-- **Undeclared outputs.** `TEST_UNDECLARED_OUTPUTS_DIR`,
-  `TEST_PREMATURE_EXIT_FILE` and the other output files are set, but only
-  `test.xml` is collected (`execution/test.rs`): there's no
-  `test.outputs/outputs.zip`, and a test that exits early with status 0
-  passes.
-- **Options:** `--runs_per_test`, `--flaky_test_attempts`,
-  `--test_size_filters`, `--test_timeout_filters`, `--test_lang_filters`,
-  `--test_summary`, `--test_verbose_timeout_warnings` (though bb prints
-  Bazel's hint to use it), `--test_keep_going`, `--test_strategy` and
-  `--run_under`. `--test_output=streamed` behaves like `summary`, and
-  invalid values aren't rejected.
+- `--run_under` and `--test_strategy`; `--test_summary=detailed` and
+  `testcase`, which list test cases, are errors.
 - **Coverage.** There's no `coverage` command, no LCOV collection or
   merging; `coverage_common` behaves as Bazel's does with coverage off.
 - bb's action cache outlives `clean`, so tests that passed before it are
@@ -281,13 +240,10 @@ like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
 
 ## Suggested order
 
-1. Expanding `args` and `env`, toolchain Make variables, and `_repo_mapping`
-   in tools' runfiles (sections 4 and 5): small, and common in real
-   repositories.
-2. Cross-target action conflicts and directory expansion in `Args`
-   (section 4).
-3. The remote platform (section 2).
-4. Test sharding, undeclared outputs and the remaining test options
-   (section 6).
-6. The lockfile (section 8).
-7. Apple (section 1), which needs most of the above first.
+1. Directories on command lines (section 4): silently wrong results for
+   rules that pass tree artifacts to `Args`.
+2. `--override_repository` and `--override_module`, credential helpers,
+   and repository rules' `getenv` and `watch` (section 8).
+3. The lockfile (section 8).
+4. The remote platform (section 2).
+5. Apple (section 1).
