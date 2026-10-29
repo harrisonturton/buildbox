@@ -110,7 +110,8 @@ pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) 
         let _ = std::fs::remove_dir_all(dest);
         return Err(SkyError::transient(message));
     }
-    if !BOUNDARY_FILES.iter().any(|name| dest.join(name).exists()) {
+    let symlinked = dest.is_symlink();
+    if !symlinked && !BOUNDARY_FILES.iter().any(|name| dest.join(name).exists()) {
         let _ = std::fs::write(dest.join("REPO.bazel"), b"");
     }
     std::fs::write(&marker, b"").map_err(|error| SkyError::transient(format!("failed to write {}: {error}", marker.display())))?;

@@ -76,6 +76,20 @@ impl IoState {
     }
 }
 
+/// Remove whatever is at `path`, so a symlink can be made there, as
+/// `local_repository` makes the repository's own directory one: a
+/// directory and its contents, or a file or symlink, which isn't followed.
+fn remove_existing(path: &Path) -> anyhow::Result<()> {
+    let Ok(metadata) = path.symlink_metadata() else {
+        return Ok(());
+    };
+    let removed = match metadata.is_dir() {
+        true => std::fs::remove_dir_all(path),
+        false => std::fs::remove_file(path),
+    };
+    removed.map_err(|error| anyhow::anyhow!("failed to replace {}: {error}", path.display()))
+}
+
 /// A path with `.` and `..` resolved lexically, as Bazel resolves the
 /// paths repository rules give.
 fn normalize(path: &Path) -> PathBuf {
@@ -390,7 +404,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         if let Some(parent) = link.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let _ = std::fs::remove_file(&link);
+        remove_existing(&link)?;
         std::os::unix::fs::symlink(&target, &link).map_err(|error| anyhow::anyhow!("failed to link {}: {error}", link.display()))?;
         Ok(NoneType)
     }
