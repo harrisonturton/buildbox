@@ -18,6 +18,10 @@ use std::time::{Duration, Instant};
 /// The script Bazel runs every test under.
 const TEST_SETUP: &str = "@@bazel_tools//tools/test:test-setup.sh";
 
+/// The script that writes a `test.xml` from the log of a test that didn't
+/// write one.
+const GENERATE_XML: &str = "@@bazel_tools//tools/test:generate-xml.sh";
+
 /// Counts commands, so a test result can tell whether this command ran it.
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
@@ -301,7 +305,10 @@ async fn run_attempt(ctx: &Ctx, backend: &Backend, key: &TestKey, test: &TestSpe
         log = Some(append_to_log(backend, log, note).await?);
     }
     let undeclared = undeclared_outputs(&result, &test.path(UNDECLARED_OUTPUTS));
-    let xml = outputs.iter().find(|(path, _)| path == "test.xml").map(|(_, digest)| *digest);
+    let mut xml = outputs.iter().find(|(path, _)| path == "test.xml").map(|(_, digest)| *digest);
+    if let (None, Some(log)) = (xml, log) {
+        xml = generate_xml(ctx, backend, test, log, duration_ms, result.exit_code).await?;
+    }
     let kept = outputs.into_iter().filter(|(path, _)| !INTERNAL_OUTPUTS.contains(&path.as_str())).collect();
     Ok(Ran {
         status,
@@ -316,6 +323,52 @@ async fn run_attempt(ctx: &Ctx, backend: &Backend, key: &TestKey, test: &TestSpe
         undeclared,
         cached: spawned.cached,
     })
+}
+
+/// Write a `test.xml` from the log of a test that didn't write one, as
+/// Bazel does in an action of its own, from the test's environment, how
+/// long it ran and how it exited.
+async fn generate_xml(ctx: &Ctx, backend: &Backend, test: &TestSpec, log: BlobDigest, duration_ms: u64, exit_code: i32) -> Result<Option<BlobDigest>, SkyError> {
+    let script = Artifact::source(Label::parse_canonical(GENERATE_XML).map_err(|error| SkyError::new(error.to_string()))?);
+    let log_path = test.path("test.log");
+    let xml_path = test.path("test.xml");
+    let mut inputs = BTreeMap::new();
+    inputs.insert(TreePath::Exec(script.exec_path), input(ctx, script).await?);
+    inputs.insert(TreePath::Text(log_path.clone()), digest_input(log));
+    let mut env = test.environment();
+    env.push(("TEST_NAME".to_string(), test.name()));
+    if !test.run.is_sharded() {
+        env.push(("TEST_SHARD_INDEX".to_string(), "0".to_string()));
+        env.push(("TEST_TOTAL_SHARDS".to_string(), "0".to_string()));
+    }
+    env.sort();
+    let request = SpawnRequest {
+        inputs,
+        arguments: vec![script.exec_path.to_string(), log_path, xml_path.clone(), (duration_ms / 1000).to_string(), exit_code.to_string()],
+        env,
+        output_files: vec![xml_path.clone()],
+        output_directories: Vec::new(),
+        cacheable: true,
+        read_cache: true,
+        write_cache: true,
+        timeout: None,
+        description: format!("Generating test.xml for {}", test.name()),
+    };
+    let spawned = execute(backend, request).await?;
+    let file = spawned.result.output_files.iter().find(|file| file.path == xml_path);
+    let digest = file.and_then(|file| file.digest.as_option()).and_then(|digest| cas::Digest::from_proto(digest).ok());
+    Ok(digest.map(|digest| BlobDigest::from_cas(&digest)))
+}
+
+/// An input that's a blob already in the CAS.
+fn digest_input(digest: BlobDigest) -> crate::action_key::Input {
+    crate::action_key::Input {
+        digest,
+        executable: false,
+        is_directory: false,
+        source: None,
+        tree: None,
+    }
 }
 
 /// What Bazel says when a sharded test didn't touch
