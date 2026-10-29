@@ -15,7 +15,7 @@ use bazel_execution::{ActionKey, OutputFile};
 use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName, TargetPattern};
 use bazel_loading::RepoMappingKey;
 use bazel_options::{OptionKind, OptionSpec, ParsedOptions};
-use bazel_packages::{AttrValue, Target, is_test_kind, passes_tag_filters};
+use bazel_packages::{AttrValue, Target, TestFilter, is_test_kind, passes_tag_filters};
 use bazel_query::{QueryOptions, TargetSet, Universe};
 use bazel_ui::Phase;
 use futures::StreamExt;
@@ -54,8 +54,13 @@ pub fn build_spec() -> OptionSpec {
         ("flaky_test_attempts", Multi),
         ("test_sharding_strategy", Value),
         ("zip_undeclared_test_outputs", Bool),
+        ("test_summary", Value),
+        ("test_keep_going", Bool),
         ("test_timeout", Value),
         ("test_tag_filters", Value),
+        ("test_size_filters", Value),
+        ("test_timeout_filters", Value),
+        ("test_lang_filters", Value),
         ("build_tag_filters", Value),
         ("build_tests_only", Bool),
         ("cache_test_results", TriState),
@@ -82,8 +87,10 @@ pub fn build_spec() -> OptionSpec {
 /// its own.
 pub fn command_spec(command: &str) -> OptionSpec {
     let mut options = build_spec().options();
-    if command == "run" {
-        options.push(("run_env", OptionKind::Multi));
+    match command {
+        "run" => options.push(("run_env", OptionKind::Multi)),
+        "test" => options.push(("test_verbose_timeout_warnings", OptionKind::Bool)),
+        _ => {}
     }
     OptionSpec::new(&options)
 }
@@ -291,6 +298,10 @@ pub async fn parse(context: &CommandContext<'_>, command: &str, args: &[String],
     let all_args = bazel_options::command_args(&context.rc, command, args);
     match bazel_options::parse(&all_args, &command_spec(command), &context.rc, command) {
         Ok(options) => {
+            if let Err(message) = parse_test_filter(&options) {
+                out.error(&message).await;
+                return Err(exit::COMMAND_LINE_ERROR);
+            }
             out.configure(&options).await;
             Ok(options)
         }
@@ -1018,8 +1029,9 @@ async fn filter_by_tags(universe: &Universe<&Session>, labels: Vec<Label>, optio
             continue;
         };
         let rule = target.target().as_rule();
-        let is_test = rule.is_some_and(|rule| is_test_kind(target.package().rule_class(rule).kind.as_str()));
-        let tested = is_test && passes_test_filters(rule, options);
+        let kind = rule.map(|rule| target.package().rule_class(rule).kind);
+        let is_test = kind.is_some_and(|kind| is_test_kind(kind.as_str()));
+        let tested = is_test && test_filter(options).passes(rule, kind.map(|kind| kind.as_str()).unwrap_or_default());
         let built = match tests_only {
             true => tested,
             false => passes_tag_filters(rule, build_filters) || (purpose == Purpose::Test && tested),
@@ -1031,9 +1043,15 @@ async fn filter_by_tags(universe: &Universe<&Session>, labels: Vec<Label>, optio
     selected
 }
 
-/// Whether a test passes `--test_tag_filters`.
-pub fn passes_test_filters(rule: Option<&bazel_packages::Rule>, options: &ParsedOptions) -> bool {
-    passes_tag_filters(rule, options.get("test_tag_filters").unwrap_or_default())
+/// The tests the test filters select, or why the filters are invalid.
+pub fn parse_test_filter(options: &ParsedOptions) -> Result<TestFilter, String> {
+    let value = |name: &str| options.get(name).unwrap_or_default();
+    TestFilter::new(value("test_tag_filters"), value("test_size_filters"), value("test_timeout_filters"), value("test_lang_filters"))
+}
+
+/// The tests the test filters select, which [`parse`] checked.
+pub fn test_filter(options: &ParsedOptions) -> TestFilter {
+    parse_test_filter(options).unwrap_or_default()
 }
 
 /// The targets the command line's patterns name.

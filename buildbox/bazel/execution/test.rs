@@ -79,26 +79,6 @@ pub struct Attempt {
     pub duration_ms: u64,
 }
 
-impl TestResult {
-    /// Whether it passed in much less time than its timeout allows, or
-    /// nearly timed out, so its size or timeout could be better, as Bazel
-    /// judges: outside of half the next shorter timeout and 90% of its own.
-    pub fn wrong_size(&self) -> bool {
-        let seconds = self.duration_ms / 1000;
-        let (shorter, longest) = match self.timeout_seconds {
-            60 => (0, false),
-            300 => (60, false),
-            900 => (300, false),
-            _ => (900, true),
-        };
-        let max = match longest {
-            true => 365 * 24 * 60 * 60,
-            false => self.timeout_seconds * 9 / 10,
-        };
-        seconds < shorter / 2 || seconds >= max
-    }
-}
-
 encoded_value!(TestResult);
 
 /// Runs a test target, with the command's [`TestSettings`].

@@ -10,6 +10,7 @@ use bazel_execution::{Backend, CacheResults, TestKey, TestResult, TestRun, TestS
 use bazel_loading::PackageKey;
 use bazel_options::ParsedOptions;
 use bazel_packages::Target;
+use futures::StreamExt;
 use std::collections::{BTreeMap, HashMap};
 use bazel_label::Label;
 use skyframe::Session;
@@ -34,6 +35,13 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     };
     let settings = match test_settings(context, &options) {
         Ok(settings) => settings,
+        Err(message) => {
+            out.error(&message).await;
+            return exit::COMMAND_LINE_ERROR;
+        }
+    };
+    let report = match SummaryReport::parse(&options) {
+        Ok(report) => report,
         Err(message) => {
             out.error(&message).await;
             return exit::COMMAND_LINE_ERROR;
@@ -79,7 +87,8 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     }
     let session = retry_failures(&workspace, session, &tests, &options).await;
     let output_mode = options.get("test_output").unwrap_or("summary").to_string();
-    let results = run_tests(context, &session, &tests, &built, epoch, &output_mode, out).await;
+    let keep_going = options.flag("test_keep_going", true);
+    let results = run_tests(context, &session, &tests, &built, epoch, &output_mode, keep_going, out).await;
     report_summaries(&results, &built, out).await;
     drop(session);
 
@@ -87,7 +96,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     keep_results(&workspace, &results).await;
     build::report_stats(started, out).await;
     build::completed(failed, out).await;
-    summarize(&results, &skipped, &built, epoch, out).await;
+    summarize(&results, &skipped, &built, epoch, &report, out).await;
     match failed {
         0 => exit::SUCCESS,
         _ => TESTS_FAILED,
@@ -167,7 +176,7 @@ async fn select_tests(
         .filter(|(_, target, _)| target.is_test && target.incompatible.is_none())
         .map(|(label, target, _)| ConfiguredTargetKey { label: *label, config: target.config })
         .collect();
-    let selected = filter_tests(session, &candidates, options).await;
+    let selected = filter_tests(session, &candidates, built, options).await;
     if selected.is_empty() && !candidates.is_empty() {
         out.warning("All specified test targets were excluded by filters").await;
     }
@@ -239,18 +248,17 @@ async fn keep_results(workspace: &Workspace, results: &[(TestKey, Result<Arc<Tes
     workspace.failed_tests.extend(failures.map(|(key, _)| key.clone()));
 }
 
-/// The tests among `candidates` that `--test_tag_filters` selects.
-async fn filter_tests(session: &Session, candidates: &[ConfiguredTargetKey], options: &ParsedOptions) -> Vec<ConfiguredTargetKey> {
-    if options.get("test_tag_filters").unwrap_or_default().is_empty() {
-        return candidates.to_vec();
-    }
+/// The tests among `candidates` that the test filters select.
+async fn filter_tests(session: &Session, candidates: &[ConfiguredTargetKey], built: &Built, options: &ParsedOptions) -> Vec<ConfiguredTargetKey> {
+    let filter = build::test_filter(options);
     let mut selected = Vec::new();
     for candidate in candidates {
         let Ok(package) = session.evaluate(&PackageKey(candidate.label.package)).await else {
             continue;
         };
         let rule = package.0.target(candidate.label.name).and_then(Target::as_rule);
-        if build::passes_test_filters(rule, options) {
+        let kind = built_target(built, *candidate).map(|target| target.kind.as_str()).unwrap_or_default();
+        if filter.passes(rule, kind) {
             selected.push(*candidate);
         }
     }
@@ -281,9 +289,13 @@ async fn run_tests(
     built: &Built,
     epoch: u64,
     output_mode: &str,
+    keep_going: bool,
     out: &Output,
 ) -> Vec<(TestKey, Result<Arc<TestResult>, String>)> {
-    let results = session.evaluate_many(tests).await;
+    let results = match keep_going {
+        true => session.evaluate_many(tests).await,
+        false => until_failure(session, tests).await,
+    };
     let mut reported = Vec::with_capacity(tests.len());
     for (key, result) in tests.iter().zip(results) {
         let result = result.map_err(|error| error.message().to_string());
@@ -291,12 +303,83 @@ async fn run_tests(
             write_logs(context.server.backend(), built, key, test).await;
             report_test(key, test, built, epoch, output_mode, out).await;
         }
-        if let Err(message) = &result {
-            out.error(message).await;
+        match &result {
+            Err(message) if !message.is_empty() => out.error(message).await,
+            _ => {}
         }
         reported.push((key.clone(), result));
     }
+    if !keep_going {
+        report_aborted(session, &context.workspace_root, &reported, built, out).await;
+    }
     reported
+}
+
+/// Run tests until one fails, as `--notest_keep_going` asks: those still
+/// running then are cancelled and have no status, as those not yet run.
+async fn until_failure(session: &Session, tests: &[TestKey]) -> Vec<Result<Arc<TestResult>, skyframe::SkyError>> {
+    let mut results: Vec<Option<Result<Arc<TestResult>, skyframe::SkyError>>> = tests.iter().map(|_| None).collect();
+    let mut running: futures::stream::FuturesUnordered<_> = tests.iter().enumerate().map(|(index, test)| async move { (index, session.evaluate(test).await) }).collect();
+    while let Some((index, result)) = running.next().await {
+        let failed = !matches!(&result, Ok(result) if matches!(result.status, TestStatus::Passed | TestStatus::Flaky));
+        results[index] = Some(result);
+        if failed {
+            break;
+        }
+    }
+    drop(running);
+    results.into_iter().map(|result| result.unwrap_or_else(|| Err(skyframe::SkyError::new("")))).collect()
+}
+
+/// Report that a test failed and `--notest_keep_going` stopped the rest,
+/// as Bazel does.
+async fn report_aborted(session: &Session, workspace: &std::path::Path, results: &[(TestKey, Result<Arc<TestResult>, String>)], built: &Built, out: &Output) {
+    let failed = results.iter().find(|(_, result)| matches!(result, Ok(result) if !matches!(result.status, TestStatus::Passed | TestStatus::Flaky)));
+    let Some((key, _)) = failed else {
+        return;
+    };
+    let failed = format!("Testing {} failed: Test failed, aborting", test_name(key, built));
+    let message = match bazel_loading::target_location_in(session, workspace, key.target.label).await {
+        Some(location) => format!("{location}: {failed}"),
+        None => failed,
+    };
+    out.error(&message).await;
+    out.error("Test failed, aborting").await;
+}
+
+/// How `--test_summary` and `--test_verbose_timeout_warnings` say to
+/// report tests' results.
+struct SummaryReport {
+    /// Whether to list every test, rather than only those that didn't
+    /// pass.
+    all_tests: bool,
+    /// Whether to list tests that passed without running.
+    cached_tests: bool,
+    /// Whether to list tests at all.
+    listed: bool,
+    verbose_timeouts: bool,
+}
+
+impl SummaryReport {
+    fn parse(options: &ParsedOptions) -> Result<SummaryReport, String> {
+        let verbose_timeouts = options.flag("test_verbose_timeout_warnings", false);
+        let format = options.get("test_summary").unwrap_or("short");
+        let (listed, all_tests, cached_tests) = match format {
+            "short" => (true, true, true),
+            "short_uncached" => (true, true, false),
+            "terse" => (true, false, false),
+            "none" => (false, false, false),
+            "detailed" | "detailed_uncached" | "testcase" => {
+                return Err(format!("--test_summary={format} isn't supported by bb yet: it lists test cases"));
+            }
+            _ => return Err(format!("While parsing option --test_summary={format}: Not a valid test summary format: '{format}'")),
+        };
+        match options.get("test_output").unwrap_or("summary") {
+            "summary" | "errors" | "all" | "streamed" => {}
+            other => return Err(format!("While parsing option --test_output={other}: Not a valid test output format: '{other}'")),
+        }
+        Ok(SummaryReport { all_tests, cached_tests, listed, verbose_timeouts })
+    }
 }
 
 /// Where a test's logs go.
@@ -384,7 +467,7 @@ async fn report_test(key: &TestKey, result: &TestResult, built: &Built, epoch: u
         let reason = failure_reason(result.status, result.exit_code);
         out.stderr(&format!("FAIL: {shown} ({reason}) (see {})\n", log.display())).await;
     }
-    let show_log = output_mode == "all" || (output_mode == "errors" && failed);
+    let show_log = matches!(output_mode, "all" | "streamed") || (output_mode == "errors" && failed);
     if show_log && (result.epoch >= epoch || failed) {
         let text = tokio::fs::read_to_string(&log).await.unwrap_or_default();
         out.info(&format!("From Testing {shown}:")).await;
@@ -472,6 +555,14 @@ impl Summary<'_> {
         times
     }
 
+    /// Bazel's warning that the test's longest run took a time outside
+    /// the range its timeout is meant for, suggesting a better one.
+    fn size_warning(&self, label: &str) -> Option<String> {
+        let timeout = self.runs.iter().find_map(|(_, result)| result.as_ref().ok().map(|result| result.timeout_seconds))?;
+        let max_ms = self.times_ms().into_iter().max()?;
+        size_warning(label, timeout, max_ms)
+    }
+
     /// How many attempts ran in this command rather than coming from a
     /// cache.
     fn uncached_attempts(&self, epoch: u64) -> usize {
@@ -481,6 +572,40 @@ impl Summary<'_> {
         };
         self.runs.iter().filter_map(|(_, result)| result.as_ref().ok()).map(|result| each(result)).sum()
     }
+}
+
+/// The timeout categories: their names, timeouts in seconds, and the
+/// sizes they're the default of.
+const TIMEOUT_CATEGORIES: [(&str, u64, &str); 4] = [("short", 60, "small"), ("moderate", 300, "medium"), ("long", 900, "large"), ("eternal", 3600, "enormous")];
+
+/// The longest time Bazel considers, a year.
+const YEAR_SECONDS: u64 = 365 * 24 * 60 * 60;
+
+/// Bazel's warning that a test whose timeout is `timeout` seconds took
+/// `max_ms` at most, outside of half the next shorter timeout and 90% of
+/// its own, with the timeout it suggests: the first whose 75% it fits in.
+fn size_warning(label: &str, timeout: u64, max_ms: u64) -> Option<String> {
+    let seconds = max_ms / 1000;
+    let index = TIMEOUT_CATEGORIES.iter().position(|(_, seconds, _)| *seconds == timeout).unwrap_or(1);
+    let last = TIMEOUT_CATEGORIES.len() - 1;
+    let min = match index {
+        0 => 0,
+        _ => TIMEOUT_CATEGORIES[index - 1].1 / 2,
+    };
+    let max = match index == last {
+        true => YEAR_SECONDS,
+        false => TIMEOUT_CATEGORIES[index].1 * 9 / 10,
+    };
+    if (min..max).contains(&seconds) {
+        return None;
+    }
+    let suggested = TIMEOUT_CATEGORIES.iter().enumerate().find(|(position, (_, timeout, _))| *position == last || seconds < timeout * 3 / 4);
+    let (_, (name, _, size)) = suggested?;
+    Some(format!(
+        "{label}: Test execution time ({:.1}s excluding execution overhead) outside of range for {} tests. Consider setting timeout=\"{name}\" or size=\"{size}\".",
+        max_ms as f64 / 1000.0,
+        TIMEOUT_CATEGORIES[index].0.to_uppercase()
+    ))
 }
 
 /// How bad a status is, as Bazel orders `BlazeTestStatus`.
@@ -544,25 +669,33 @@ async fn report_summaries(results: &[(TestKey, Result<Arc<TestResult>, String>)]
 
 /// Print each test's status and the totals, as Bazel does: skipped tests,
 /// then passes, then failures.
-async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipped: &[Label], built: &Built, epoch: u64, out: &Output) {
-    for label in skipped {
+async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipped: &[Label], built: &Built, epoch: u64, report: &SummaryReport, out: &Output) {
+    for label in skipped.iter().filter(|_| report.listed && report.all_tests) {
         let label = bazel_query::display_label(*label, &built.main_mapping);
         out.stdout(&format!("{label:<width$}SKIPPED\n", width = status_width(&label, "", "SKIPPED"))).await;
     }
     let mut executed = 0;
     let mut passes = 0;
     let mut failures = 0;
+    let mut no_status = 0;
     let mut wrong_size = false;
     let mut summaries = summaries(results);
     summaries.sort_by_key(|summary| summary_order(summary, epoch));
     for summary in &summaries {
         let status = summary.status();
         let cached = summary.cached(epoch);
-        executed += usize::from(cached < summary.runs.len());
-        wrong_size |= summary.runs.iter().any(|(_, result)| matches!(result, Ok(result) if result.status == TestStatus::Passed && result.wrong_size()));
+        executed += usize::from(status.is_some() && cached < summary.runs.len());
+        let label = bazel_query::display_label(summary.label, &built.main_mapping);
+        let size_warning = summary.size_warning(&summary.label.to_string()).filter(|_| status == Some(TestStatus::Passed));
+        wrong_size |= size_warning.is_some() && !report.verbose_timeouts;
         match status {
             Some(TestStatus::Passed | TestStatus::Flaky) => passes += 1,
-            _ => failures += 1,
+            Some(_) => failures += 1,
+            None => no_status += 1,
+        }
+        let passed = status == Some(TestStatus::Passed);
+        if !report.listed || (passed && !report.all_tests) || (passed && cached == summary.runs.len() && !report.cached_tests) {
+            continue;
         }
         let word = status_word(status);
         let prefix = match (status, cached) {
@@ -570,13 +703,15 @@ async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipp
             (_, cached) if cached == summary.runs.len() => "(cached) ".to_string(),
             (_, cached) => format!("({cached}/{} cached) ", summary.runs.len()),
         };
-        let label = bazel_query::display_label(summary.label, &built.main_mapping);
         let width = status_width(&label, &prefix, word);
         let details = match status {
             None => String::new(),
             Some(status) => attempts_detail(status, summary.failed_logs(built).len(), summary.attempts()) + &time_detail(&summary.times_ms()),
         };
         out.stdout(&format!("{label:<width$}{prefix}{word}{details}\n")).await;
+        if let Some(warning) = size_warning.filter(|_| report.verbose_timeouts) {
+            out.stdout(&format!("  WARNING: {warning}\n")).await;
+        }
         for log in summary.failed_logs(built) {
             out.stdout(&format!("  {}\n", log.display())).await;
         }
@@ -594,7 +729,7 @@ async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipp
         1 => parts.push("1 fails locally".to_string()),
         count => parts.push(format!("{count} fail locally")),
     }
-    match skipped.len() {
+    match skipped.len() + no_status {
         0 => {}
         1 => parts.push("1 was skipped".to_string()),
         count => parts.push(format!("{count} were skipped")),

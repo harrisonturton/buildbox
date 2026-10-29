@@ -9,9 +9,9 @@ use bazel_progress::Progress;
 use bazel_starlark::{EvalContext, FileKind, Globber, Loads, PackageBuilder};
 use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
-use skyframe::{encoded_value, Ctx, Key, SkyError};
+use skyframe::{encoded_value, Compute, Ctx, Key, SkyError};
 use bazel_label::RepoMappingTable;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The names a BUILD file may have, in order of preference.
@@ -280,19 +280,32 @@ impl Globber for GraphGlobber {
 /// Where a package's BUILD file is on disk, or `None` if there's no such
 /// package.
 pub async fn build_file_path(ctx: &Ctx, id: PackageId) -> Result<Option<PathBuf>, SkyError> {
-    let lookup = ctx.compute(&PackageLookupKey(id)).await?;
+    let workspace = ctx.global::<bazel_fs::Workspace>()?;
+    build_file_path_in(ctx, &workspace.root, id).await
+}
+
+/// Where a package's BUILD file is on disk, for the workspace at
+/// `workspace`.
+async fn build_file_path_in(compute: &impl Compute, workspace: &Path, id: PackageId) -> Result<Option<PathBuf>, SkyError> {
+    let lookup = compute.compute(&PackageLookupKey(id)).await?;
     let PackageLookup::Found { root, build_file } = &*lookup else {
         return Ok(None);
     };
-    let path = RootedPath::new(*root, id.path.join(*build_file)).resolve(ctx)?;
-    Ok(Some(path))
+    Ok(Some(RootedPath::new(*root, id.path.join(*build_file)).resolve_in(workspace)))
 }
 
 /// Where a target was declared, as messages give it: the BUILD file's path,
 /// with the line and column of the call that made it if it's a rule.
 pub async fn target_location(ctx: &Ctx, label: Label) -> Option<String> {
-    let path = build_file_path(ctx, label.package).await.ok()??;
-    let package = ctx.compute(&PackageKey(label.package)).await.ok()?;
+    let workspace = ctx.global::<bazel_fs::Workspace>().ok()?;
+    target_location_in(ctx, &workspace.root, label).await
+}
+
+/// Where a target was declared, for the workspace at `workspace`, from a
+/// graph session or key.
+pub async fn target_location_in(compute: &impl Compute, workspace: &Path, label: Label) -> Option<String> {
+    let path = build_file_path_in(compute, workspace, label.package).await.ok()??;
+    let package = compute.compute(&PackageKey(label.package)).await.ok()?;
     let rule = match package.0.target(label.name) {
         Some(bazel_packages::Target::Rule(rule)) => rule,
         _ => return Some(path.display().to_string()),

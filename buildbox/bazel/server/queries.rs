@@ -434,7 +434,7 @@ mod tests {
     fn commands_take_only_bazels_options() {
         let commands = [
             ("build", build::build_spec()),
-            ("test", build::build_spec()),
+            ("test", build::command_spec("test")),
             ("run", build::command_spec("run")),
             ("info", build::build_spec()),
             ("query", query_spec()),
