@@ -17,8 +17,9 @@ where
     match tokio::task::spawn_blocking(move || span.in_scope(f)).await {
         Ok(result) => result,
         Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-        // Blocking tasks can only be cancelled by the runtime shutting down.
-        Err(error) => panic!("blocking task cancelled: {error}"),
+        // Blocking tasks are only cancelled by the runtime shutting down,
+        // which drops this task too, so it waits for that.
+        Err(_) => std::future::pending().await,
     }
 }
 
