@@ -1,273 +1,283 @@
 # What bb is missing compared with Bazel
 
-This lists the large structural pieces of Bazel that bb doesn't have yet. It
-leaves out small interface differences, such as individual flags or
-`ctx` fields. It was written on 2026-10-25 against Bazel 9.3.1, and is
-roughly in order of how many real repositories each gap blocks.
+This lists what Bazel 9.3.1 has and bb doesn't, as of 2026-10-28. It's
+ordered roughly by how many real repositories each gap blocks, and leaves
+out differences in wording and output that only a careful diff would see.
+Paths are relative to `buildbox/bazel/`.
 
-## 1. Configurations and transitions
+Much is already done and isn't listed: loading, Bzlmod resolution,
+Starlark rules and aspects (attached, propagated, required and top-level
+with `--aspects`), Starlark transitions and splits, toolchain resolution
+with optional toolchains and `target_settings`, incompatible-target
+skipping, analysis tests, `select()` and `config_setting`, visibility and
+dependency checks, `query`/`cquery`/`aquery` and their outputs, real C++,
+Java and Python builtins, remote caching and execution, and `build`,
+`test`, `run`, `fetch` and `clean`.
 
-- **Native options.** Configurations are made of native options and
-  Starlark flags (`buildbox/bazel/config/options.rs`): a registry of the
-  native options bb knows, with Bazel 9.3.1's types, defaults and parsing.
-  It has those `config_setting`s match in the rule sets bb has met, and
-  every one Bazel's exec transition reads or writes; a `config_setting` or
-  transition on any other fails rather than misbehaving. Most of them only
-  carry their values, which transitions and `config_setting`s read.
-- **Transitions are partly there.** Starlark transitions work on
-  attributes and on rules (`rule(cfg = ...)`), including splits and
-  `ctx.split_attr` (`buildbox/bazel/analysis/transition.rs`), and their
-  output directories are named as Bazel names them, against the top-level
-  configuration. Still missing:
-  - `analysis_test_transition`, and Bazel's own transitions that bb only
-    stands in for, such as Apple's splits.
-- **The exec configuration** comes from Bazel's own Starlark exec
-  transition, run for the execution platform toolchain resolution chooses
-  for each rule, from the platforms `--extra_execution_platforms` and
-  modules register, with the toolchains `--extra_toolchains` and modules
-  register. Toolchains' own tools are for the execution platform of the
-  rule that uses them, as Bazel's toolchain transition gives, and output
-  directories are named as Bazel names them.
+## 1. Platform-specific rule sets: Apple and Android
 
-rules_go, rules_rust, rules_oci, rules_python, platform-specific binary
-wrappers and multi-arch images all rely on transitions, and most of them on
-the exec configuration being right.
+Bazel's first-party Apple support is native, and bb doesn't have it:
 
-## 2. Aspects
+- `apple_common` is an opaque value (`starlark/opaque.rs`), apart from
+  `apple_common.dotted_version`. Its platform types, `XcodeVersionConfig`,
+  `AppleDynamicFrameworkInfo` and the rest are missing, so rules_apple,
+  rules_swift and apple_support's Apple rules fail in analysis.
+- `xcode_config`, `xcode_version` and `available_xcodes` run as Starlark
+  builtins (`analysis/native.rs`), but rules' late-bound `_xcode_config` is
+  a lenient stand-in (`analysis/build_ctx.rs`) and `--xcode_version_config`
+  is an error (`analysis/late_bound.rs`). Bazel analyzes
+  `@local_config_xcode//:host_xcodes` instead. rules_cc reads
+  `_xcode_config` on every platform, which is why it's lenient.
+- Bazel's native transitions, such as Apple's multi-arch splits, are opaque
+  `cfg` values that bb silently treats as no transition
+  (`analysis/transition.rs`): a split dependency is analyzed once, in the
+  rule's own configuration, with no error.
 
-Starlark aspects work as Bazel's do:
+Android:
 
-- attached with `attr.label(aspects = [...])`, taking parameters from the
-  rule's attributes of the same names and types;
-- propagated along `attr_aspects`, including `*`, and to the toolchains of
-  the types `toolchains_aspects` names, or every type for `*`, each list
-  given or computed for each target by a function;
-- applied only to rules whose `provides` satisfy `required_providers`, and
-  that their `propagation_predicate` accepts; and with
-  `apply_to_generating_rules`, to the rules generating the files they
-  propagate to;
-- applied after the aspects they `requires`, and seeing the providers of
-  those and of the aspects whose `provides` satisfy their
-  `required_aspect_providers`, keyed as Bazel keys them by the aspects
-  they see;
-- with private and exec attributes, toolchains and exec groups;
-- with `ctx.rule`, its `toolchains` giving the providers aspects gave
-  them, and `ctx.aspect_ids`; and their providers merged into the
-  dependent's view of the target, output groups included;
-- applied at the top level with `--aspects` and `--aspects_parameters`,
-  built with `--output_groups` and reported as Bazel reports them;
-- checked where they're defined, attached and used, and failing as Bazel's
-  do, with Bazel's tracebacks and wording, as rules' implementations now
-  do too.
+- There is no `android_common` or any other Android builtin, and rules_android
+  is untested.
+- `config_feature_flag` is always at its default: transitions that set
+  feature flags, which Android's resource handling uses, aren't supported
+  (`analysis/condition.rs`).
 
-Bazel 9 has no native aspects that users apply, only its validation
-aspect, which bb doesn't have.
+Opaque values are still truthy, since starlark-rust's `to_bool` can't fail,
+so `if apple_common.something:` takes the branch. Every other use of an
+opaque value is an error.
 
-`cquery` counts what an aspect's own attributes depend on as dependencies
-of the rule that attaches it, and `aquery` lists aspects' actions with
-the aspects that made them, as Bazel's do with `--include_aspects`.
+## 2. Execution platforms, exec groups and remote execution
 
-## 3. Execution platforms and exec groups
+- **Exec groups.** `ctx.exec_groups[name]` fails ("exec groups aren't
+  supported by bb yet", `analysis/exec_groups.rs`): no toolchains are
+  resolved per group. `ctx.actions.run` and `run_shell` drop `exec_group`,
+  `toolchain` and `resource_set` (`analysis/actions.rs`), and
+  `config.exec(exec_group = ...)` gets the rule's default execution
+  platform (`starlark/attr_module.rs`). `--incompatible_auto_exec_groups`
+  is off, as in Bazel 9, so most rule sets don't notice yet.
+- **Remote platform.** The REAPI `Platform` of every action is empty
+  (`execution/spawn.rs`): `exec_properties` and platforms'
+  `exec_properties` never reach a remote executor, so remote execution on
+  a platform other than the server's own doesn't work.
+  `Command.execution_platform` always reports the host platform, whatever
+  toolchain resolution chose.
+- **Remote services are configured on the server**, not per build:
+  `--remote_executor`, `--remote_cache`, `--disk_cache` and the other
+  `--remote_*` options are errors unless left at their defaults.
+  bb's own action cache is shared by every workspace.
+- **Execution requirements.** bb runs every action in a sandbox with the
+  host's network. `requires-network` holds and `no-cache` is honoured, but
+  `block-network` fails, and `no-sandbox`, `local`, `no-remote` and
+  `no-remote-exec` still run sandboxed, which their failures point out.
+  There are no spawn strategies (`--spawn_strategy`, `--strategy`). A test
+  rule's `testing.ExecutionInfo` is ignored; tests take their requirements
+  from tags alone.
+- **Persistent workers.** There are no persistent or multiplex workers
+  (`supports-workers` is passed through but unused). Java, Kotlin, Scala
+  and TypeScript builds work, but their compile actions are much slower,
+  and each prints the JVM's startup warnings.
 
-- **Exec groups:** `ctx.exec_groups` knows which groups a rule declares,
-  but fails when asked for one's context, since no toolchains are resolved
-  per group. Actions drop their `exec_group` argument
-  (`buildbox/bazel/analysis/actions.rs`).
-- **Remote platform:** the REAPI `Platform` of every action is empty
-  (`buildbox/bazel/execution/spawn.rs`), so `exec_properties` never reach a
-  remote executor.
-- **Execution requirements:** actions take them from
-  `execution_requirements` and their rules' tags, as Bazel gives them.
-  bb runs every action in a sandbox with the host's network, so
-  `requires-network` holds and `no-cache` is honoured, but actions and
-  tests tagged `block-network` fail, and those tagged `no-sandbox`,
-  `local`, `no-remote` or `no-remote-exec` still run sandboxed, which
-  their failures point out. Tests tagged `exclusive` run alone. There are
-  no spawn strategies.
+## 3. Configurations
 
-Together with section 1, this means remote execution on a platform other
-than the host doesn't work.
+Configurations are made of native options and Starlark flags
+(`config/options.rs`). Native options bb knows have Bazel's types,
+defaults and parsing; a `config_setting` or transition on any other fails
+rather than misbehaving. Still missing:
 
-## 4. Builtin APIs for rule sets other than C++, Java and Python
+- `config.none()` is treated as `config.target()`
+  (`starlark/rule_value.rs`).
+- `--host_action_env` has no effect: exec configurations copy the target's
+  `--action_env` (`analysis/transition.rs`).
+- Builtins' `incompatible_*` and `experimental_*` getters on opaque values
+  return `false` (`starlark/opaque.rs`), except
+  `incompatible_enable_proto_toolchain_resolution`. A flag Bazel 9 turns
+  on by default would be read wrongly.
+- `cquery` names configurations by bb's own hash, not Bazel's checksum,
+  and there are no test-trimmed configurations: where Bazel analyzes
+  non-test targets without test options, bb uses the same configuration.
 
-C++, Java and Python have real implementations of the native APIs their
-rule sets are written against: `cc_common` and `cc_internal`,
-`java_common_internal_do_not_use` (`buildbox/bazel/analysis/java`), which
-compiles with the toolchain's JavaBuilder and Turbine as Bazel does, and
-`py_builtins` (`buildbox/bazel/analysis/python.rs`). rules_java,
-rules_python and protobuf's `proto_library`, `java_proto_library` and
-prebuilt `protoc` build, and their actions match Bazel 9.3.1's. So do
-analysis tests: the `testing` module, `rule(analysis_test = True)`,
-`analysis_test_transition` and `Target.actions`, which rules_testing and
-skylib's `unittest` use. Bazel reduces the classpath of `Javac` to what
-the dependencies' `.jdeps` say is used; bb runs it with the full one.
+## 4. Actions and artifacts
 
-`apple_common` and `config` are still opaque values
-(`buildbox/bazel/starlark/opaque.rs`), which leaves out Apple and Android.
-Kotlin and Scala aren't tested. `coverage_common` is real, but only as
-Bazel behaves with coverage off (section 6).
+- **Directories on command lines.** Command lines are built in analysis,
+  before declared directories have contents, so `Args.add_all` and
+  `add_joined` ignore `expand_directories`, `map_each` sees the directory
+  rather than its files, and `expand_template`'s `computed_substitutions`
+  can't expand one (`analysis/args.rs`). Rules that pass a tree artifact
+  to `add_all` get its path instead of its files.
+- **Unresolved symlinks.** `ctx.actions.symlink(target_path = ...)` fails,
+  and `declare_symlink` declares an ordinary file (`analysis/actions.rs`).
+- **Action conflicts** are only checked within one rule
+  (`analysis/state.rs`). Two targets generating the same path, or one
+  generating a file inside another's directory, aren't reported; the last
+  to be written wins.
+- **Toolchain Make variables.** Nothing outside the C++ rules reads
+  `TemplateVariableInfo`, so `toolchains = [...]` on a genrule or Starlark
+  rule doesn't define `$(PYTHON3)`, `$(JAVA)` and the like. `ctx.var` has
+  only `COMPILATION_MODE`, `BINDIR`, `GENDIR`, `TARGET_CPU` and `--define`s
+  (`analysis/state.rs`).
+- **Param files.** Arguments only move to a param file with
+  `use_always = True`; Bazel also moves them once the command line passes
+  `--min_param_file_size`, so very long command lines can fail. The
+  `flag_per_line` format is written like `multiline`.
+- `ctx.resolve_command` is missing (`ctx.resolve_tools` works).
+- `starlark_doc_extract` has no implementation, which breaks stardoc.
+- `platform` targets return no providers, so `dep[PlatformInfo]` on one
+  fails (`analysis/native.rs`).
 
-A rule implementation fails if it calls, iterates or searches an opaque
-value, or returns one as a provider, so a missing API is an error rather
-than a silently wrong analysis. Two gaps remain:
+## 5. Runfiles, and the environment of `run` and `test`
 
-- Opaque values are still truthy, since starlark-rust's `to_bool` can't
-  fail: `if java_common.something:` takes the branch.
-- Apple's late-bound `_xcode_config` is a lenient opaque value, which rules
-  can use freely: rules_cc reads it unconditionally on every platform.
-  Bazel 9 analyzes `@local_config_xcode//:host_xcodes` (apple_support's
-  `xcode_config`, through `@bazel_tools`' `xcode_configure` extension)
-  instead, which needs `apple_common.XcodeVersionConfig` and the Apple
-  platform types.
-
-## 5. Query tooling
-
-`query`, `cquery` and `aquery` share one query language
-(`buildbox/bazel/query`): `query` reads the package graph, and `cquery` and
-`aquery` the configured graph analysis builds (`buildbox/bazel/cquery`).
-Their outputs match Bazel 9.3.1's on the formats people and tools read,
-`proto`, `jsonproto` and `xml` included. On bb's own repository, every
-action `aquery` lists, and every field of it, matches Bazel's, the runfiles
-actions of executables included. Still missing:
-
-- **Configuration checksums** are bb's own hash of its options, not
-  Bazel's, so `cquery` names configurations by different ids, and bb has
-  no test-trimmed configurations: where Bazel analyzes non-test targets in
-  a configuration without test options, bb uses the same one.
-- **aquery's action keys** are bb's hash of the action, not Bazel's, and
-  the nested sets of inputs its protos list are bb's, so their ids
-  differ, though each action's inputs are Bazel's. Source manifests name
-  files in bb's execution root.
-- `cquery --output=transitions`, `--show_config_fragments`, and the
-  Starlark output's `FileProvider` and `FilesToRunProvider`.
-- Proto outputs leave out `transitive_configs` and
-  `$rule_implementation_hash`, and give native rules every common
-  attribute, where Bazel gives some, such as `alias` and
-  `constraint_value`, fewer.
-- `cquery` analyzes `_license_kind` targets in an exec configuration,
-  where Bazel uses the one without options.
-- Error messages for invalid regular expressions are Rust's, not Java's.
-- `aquery` doesn't list tests' `TestRunner` actions, since bb runs tests
-  outside the action graph.
-- Where Bazel's own order varies from run to run, as for graphs, ranks and
-  `cquery`'s results, bb prints results in one of the orders Bazel may:
-  `--order_output=full`'s, or by label and configuration.
+- **`args` and `env` aren't expanded.** `bazel run` and `bazel test` pass
+  a rule's `args` and `env` through as written (`server/run.rs`,
+  `execution/test.rs`); Bazel expands `$(location)`, `$(rootpath)` and
+  Make variables in them, and splits `args` as a shell would.
+- **`env_inherit`** (`RunEnvironmentInfo.inherited_environment`) is
+  ignored, and `bazel run` applies neither it nor `environment`: the binary
+  gets the client's environment and `BUILD_*_DIRECTORY`.
+- **Tools' runfiles in actions** have no `_repo_mapping` or `MANIFEST`, so
+  runfiles libraries under Bzlmod (Python and shell launchers used as
+  tools) can fail to find files (`execution/spawn.rs`). The runfiles trees
+  of tests and of `bazel run` do have them.
+- `FilesToRunProvider`'s `runfiles_manifest` and `repo_mapping_manifest`
+  are always `None` (`analysis/runfiles.rs`).
+- Where two runfiles have the same path, bb keeps the first by label;
+  Bazel prefers `root_symlinks`, then `symlinks`, then files.
+- `--nobuild_runfile_links` is accepted but runfiles links are always
+  built. `--noenable_runfiles` and `--nobuild_runfile_manifests` are
+  errors.
 
 ## 6. The test runner
 
-The `shard_count` attribute has no effect: nothing sets
-`TEST_TOTAL_SHARDS`. `--test_filter`, `--test_arg`, `--test_env`,
-`--test_timeout`, `--test_tag_filters`, `--build_tag_filters`,
-`--build_tests_only` and `--cache_test_results` work as in Bazel, but
-`--runs_per_test`, `--flaky_test_attempts`, `--test_sharding_strategy`,
-`--test_size_filters`, `--test_timeout_filters` and `--test_lang_filters`
-aren't implemented (section 11). bb's action cache outlives `clean`, so
-tests that passed before it are still cached after it. There's
-no `coverage` command, no `coverage_common`, and no LCOV collection or
-merging.
+`--test_filter`, `--test_arg`, `--test_env`, `--test_timeout`,
+`--test_tag_filters`, `--build_tag_filters`, `--build_tests_only`,
+`--cache_test_results`, `exclusive`, timeouts by size, `test.log` and
+`test.xml` work as in Bazel. Missing:
 
-## 7. Persistent workers
+- **Sharding.** `shard_count` has no effect: nothing sets
+  `TEST_TOTAL_SHARDS`, `TEST_SHARD_INDEX` or `TEST_SHARD_STATUS_FILE`, and
+  `--test_sharding_strategy` isn't implemented.
+- **Undeclared outputs.** `TEST_UNDECLARED_OUTPUTS_DIR`,
+  `TEST_PREMATURE_EXIT_FILE` and the other output files are set, but only
+  `test.xml` is collected (`execution/test.rs`): there's no
+  `test.outputs/outputs.zip`, and a test that exits early with status 0
+  passes.
+- **Options:** `--runs_per_test`, `--flaky_test_attempts`,
+  `--test_size_filters`, `--test_timeout_filters`, `--test_lang_filters`,
+  `--test_summary`, `--test_verbose_timeout_warnings` (though bb prints
+  Bazel's hint to use it), `--test_keep_going`, `--test_strategy` and
+  `--run_under`. `--test_output=streamed` behaves like `summary`, and
+  invalid values aren't rejected.
+- **Coverage.** There's no `coverage` command, no LCOV collection or
+  merging; `coverage_common` behaves as Bazel's does with coverage off.
+- bb's action cache outlives `clean`, so tests that passed before it are
+  still cached after it.
 
-There are no persistent or multiplex workers (`supports-workers`). Java,
-Kotlin, Scala and TypeScript builds still build, but their compile actions
-are much slower, and each prints the JVM's startup warnings, which a
-worker would print once to its log.
+## 7. Build reporting and observability
 
-## 8. Build reporting
+- No Build Event Protocol (`--bes_backend`, `--build_event_json_file`,
+  `--build_event_binary_file`), which CI integrations and build-results
+  services depend on.
+- No execution log (`--execution_log_*`), no `--profile` JSON trace and
+  no `analyze-profile`, no `--explain`, and no `--announce_rc`.
+- `dump` prints bb's own engine statistics; Bazel's `--action_cache`,
+  `--packages`, `--rule_classes`, `--rules`, `--skyframe` and `--memory`
+  are ignored.
+- The counts of packages loaded and targets configured that analysis
+  reports differ from Bazel's: on a small workspace, Bazel reports 5
+  packages and 13 targets where bb reports 69 and 4.
 
-There's no Build Event Protocol (`--bes_backend`,
-`--build_event_json_file`), no execution log and no `--profile` JSON trace.
-CI integrations and remote build services depend on these.
+## 8. Bzlmod and repositories
 
-The counts of packages loaded and targets configured that analysis reports
-differ from Bazel's, which counts more targets and fewer packages: on a
-small workspace, Bazel reports 5 packages and 13 targets where bb reports
-69 and 4. Aspect applications are counted as Bazel counts them.
+- **Lockfile.** `MODULE.bazel.lock` is neither read nor written, and
+  `--lockfile_mode` other than `update` is an error. `extension_metadata`
+  and `repo_metadata(reproducible = ...)` are accepted and ignored, so
+  there are no `use_repo` fix-up warnings.
+- **Options:** `--override_module`, `--override_repository` and
+  `--ignore_dev_dependency` aren't implemented. Nor are credential helpers
+  (`--credential_helper`); downloads use `.netrc` only.
+- **Repository rules:**
+  - `repository_ctx.getenv` doesn't make the repository depend on the
+    variable, and `watch`, `watch_tree` and `read(watch = ...)` do nothing
+    (`bzlmod/io.rs`). Only `environ`, `--repo_env` and labels in the rule's
+    attributes cause a refetch.
+  - `repository_ctx.rename` is missing.
+  - `.7z`, `.deb` and `.ar` archives can't be extracted (`fetch/extract.rs`).
+  - `execute(quiet = False)` doesn't show the output, and
+    `report_progress` isn't shown.
+- **Overrides:** `git_override` and `archive_override` fail on the
+  attributes bb doesn't implement, such as `build_file` and
+  `sparse_checkout_patterns`. A `git_override` of a branch or tag is
+  fetched once and kept.
+- **Commands:** of `mod`'s subcommands only `dump_repo_mapping` works;
+  `fetch` has no `--configure` or `--force`; there's no `vendor` or
+  `sync`.
+- **Stamping:** the status files' host, user and time are fixed, and a
+  change to the volatile status reruns the actions that read it.
+- `flag_alias` in MODULE.bazel has no effect.
 
-## 9. Bzlmod and fetching
+## 9. Query tooling
 
-- **Lockfile:** `MODULE.bazel.lock` is neither read nor written, and
-  `--lockfile_mode` isn't implemented.
-- **Resolution** follows Bazel 9's discovery and selection
-  (`buildbox/bazel/bzlmod/selection.rs`), with `multiple_version_override`,
-  dependencies that only constrain selection, yanked versions,
-  `bazel_compatibility`, and the root module's direct dependencies checked
-  as `--check_direct_dependencies` says. `--override_module`,
-  `--override_repository` and `--ignore_dev_dependency` aren't
-  implemented.
-- **Overrides:** `git_override` and
-  `archive_override` take the attributes of `git_repository` and
-  `http_archive` that modules use, and fail on those bb doesn't
-  implement, such as `build_file` and `sparse_checkout_patterns`. A
-  `git_override` of a branch or tag is fetched once and kept, where Bazel
-  would fetch it again.
-- **Commands:** `fetch` works, but of `mod`'s subcommands only
-  `dump_repo_mapping` does, and there's no `vendor` or `sync`.
-- **Authentication:** downloads send the credentials of the `.netrc`
-  file `$NETRC` or `$HOME` points to, and `repository_ctx.download` takes
-  `auth` and `headers`, but there are no credential helpers
-  (`--credential_helper`).
-- **Stamping:** builds run `--workspace_status_command`, but the status
-  files' host, user and time are fixed, and a change to the volatile
-  status reruns the actions that read it, which Bazel doesn't.
-- **Registries:** `--registry`, `--module_mirrors` and registries'
-  `bazel_registry.json` work.
-- **`flag_alias`** in MODULE.bazel has no effect, so the options it
-  defines are unrecognized.
+`query`, `cquery` and `aquery` have all of Bazel's functions and output
+formats, except:
 
-## 10. Checking dependencies and visibility
+- `cquery --output=transitions`, `--show_config_fragments`, and the
+  Starlark output's `FileProvider` and `FilesToRunProvider`.
+- aquery's action keys and the ids of its nested sets of inputs are bb's;
+  source manifests name files in bb's execution root.
+- Proto outputs leave out `transitive_configs` and
+  `$rule_implementation_hash`, and give native rules every common
+  attribute, where Bazel gives some, such as `alias`, fewer.
+- `cquery` analyzes `_license_kind` targets in an exec configuration,
+  where Bazel uses the one without options.
+- `aquery` doesn't list tests' `TestRunner` actions.
+- Errors for invalid regular expressions are Rust's, not Java's.
+- `--infer_universe_scope` and options such as `--proto:default_values`.
 
-Analysis checks a rule's direct dependencies as Bazel does, with Bazel's
-errors (`buildbox/bazel/analysis/dep_checks.rs`): that each is a file or
-rule its attribute's `allow_files`, `allow_single_file`, `allow_rules`
-and `providers` allow, that it's visible to the rule, from the `.bzl`
-file defining the rule for implicit dependencies, and from where the
-symbolic macros declaring the rule are defined, and that it isn't testonly
-unless the rule is; with warnings for deprecated dependencies, and the
-checks of `allow_empty = False`, executable attributes, duplicate labels
-and `select()`s' `config_setting`s. Still unchecked:
+## 10. Checking dependencies
+
+Dependencies of Starlark rules are checked as Bazel checks them
+(`analysis/dep_checks.rs`). Not checked:
 
 - native rules' attributes, whose allowed files and providers bb doesn't
   know;
 - aspects' implicit dependencies, and toolchains;
-- Bazel's checks of output files of testonly rules, which
-  `--experimental_check_testonly_for_output_files` turns on.
+- output files of testonly rules
+  (`--experimental_check_testonly_for_output_files`).
 
-## 11. Options
+## 11. Commands and options
 
-bb checks every option against a table of Bazel 9.3.1's options and the
-commands that take each (`buildbox/bazel/options/bazel_options.txt`,
-generated from Bazel's source). An option Bazel doesn't take for the
-command is an error, as in Bazel, unless a `common` line of a `.bazelrc`
-gives it. An option Bazel takes but bb doesn't implement is an error
-unless its last use leaves it at its default, so `--disk_cache=` on the
-command line undoes a `.bazelrc`'s `--disk_cache`. bb implements few
-options outside configurations and the output it prints; among those it
-doesn't are:
+- **Commands** bb rejects: `analyze-profile`, `canonicalize-flags`,
+  `config`, `coverage`, `mobile-install`, `print_action`, `sync` and
+  `vendor` (`server/command.rs`).
+- **`info`** has 13 keys; missing are `command_log`, `server_log`,
+  `client-env`, `starlark-semantics`, `local_resources`, the heap and GC
+  keys and the Java ones, and `--show_make_env`.
+- **`clean --async`** runs synchronously.
+- **Startup options:** `--output_base` and `--output_user_root` are
+  ignored; the output base is always bb's, keyed by the workspace path.
+- **Options in general.** Every option is checked against Bazel 9.3.1's
+  table (`options/bazel_options.txt`). One bb doesn't implement is an
+  error unless its last use leaves it at its default. Options that only
+  tune Bazel's own server, such as `--local_resources` and `--watchfs`,
+  are accepted and ignored. Native options whose effect bb doesn't
+  implement are listed in `UNSUPPORTED_NATIVE_OPTIONS`
+  (`server/build.rs`).
 
-- caches and remote execution: `--disk_cache`, `--remote_cache`,
-  `--remote_executor` and the other `--remote_*` options (bb keeps its own
-  action cache, shared by every workspace);
-- `--announce_rc`, `--explain`, `--profile` and the Build Event Protocol;
-- some test options (section 6), `--run_under` and `--script_path`;
-- `--infer_universe_scope`, and query output options such as
-  `--proto:default_values`.
+## 12. Host platforms
 
-Native options that only change how Bazel runs, such as
-`--local_resources`, and the locations of the repository caches, since
-bb's server keeps one for all workspaces, are accepted and ignored. Of
-the native options configurations carry, those whose effect bb doesn't
-implement, such as `--noenable_runfiles` and `--shell_executable`, are
-errors unless left at their defaults
-(`UNSUPPORTED_NATIVE_OPTIONS` in `buildbox/bazel/server/build.rs`).
+bb's actions run in Linux containers. On macOS they run in a fresh
+directory of their own inputs, directly on the host, with no isolation
+like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
+`cmd_ps` are never used.
 
 ## Suggested order
 
-1. Execution platforms and exec groups (section 3).
-2. The test options left (section 6), and running actions outside the
-   sandbox and without the network (section 3).
-
-## Not yet audited
-
-Runfiles edge cases, tree artifacts and action conflict detection may hide
-further gaps.
+1. Expanding `args` and `env`, toolchain Make variables, and `_repo_mapping`
+   in tools' runfiles (sections 4 and 5): small, and common in real
+   repositories.
+2. Cross-target action conflicts and directory expansion in `Args`
+   (section 4).
+3. Exec groups and the remote platform (section 2).
+4. Test sharding, undeclared outputs and the remaining test options
+   (section 6).
+5. The Build Event Protocol (section 7).
+6. The lockfile (section 8).
+7. Apple (section 1), which needs most of the above first.
