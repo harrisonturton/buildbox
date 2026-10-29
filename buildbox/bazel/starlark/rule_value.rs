@@ -339,6 +339,8 @@ pub(crate) fn attr_schema(name: &str, attribute: &Attribute<'_>, parser: &LabelP
     };
     let cfg = if attribute.is_exec() {
         Cfg::Exec
+    } else if attribute.is_unconfigured() {
+        Cfg::None
     } else if attribute.has_transition() {
         Cfg::Transition
     } else {

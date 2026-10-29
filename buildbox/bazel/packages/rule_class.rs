@@ -168,6 +168,8 @@ pub enum Cfg {
     Exec,
     /// A Starlark transition.
     Transition,
+    /// `config.none()`: the configuration without options.
+    None,
 }
 
 impl RuleClass {
