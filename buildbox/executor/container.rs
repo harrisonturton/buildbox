@@ -1,11 +1,11 @@
 //! A [`Runner`] that runs commands in containers, made from a container
 //! image in the artifact store.
 
-use artifacts::{ArtifactError, ArtifactStore};
+use artifacts::{ArtifactError, ArtifactStore, ContainerImage};
 use async_trait::async_trait;
 use container::{ContainerError, ContainerRuntime, ContainerSpec, Mount, Network};
 use executor::ExecuteError;
-use executor_sandboxed::{ProcessOutput, RunRequest, Runner};
+use executor_sandboxed::{ProcessOutput, RunRequest, Runner, StartedProcess};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -53,31 +53,49 @@ impl Runner for ContainerRunner {
         // Held until the command finishes, so the image isn't deleted under it.
         let image = self.artifacts.container_image(&self.image).await.map_err(|error| self.image_error(error))?;
 
-        // The command's variables override the image's.
+        let spec = self.spec(request, &image);
+        let output = self.runtime.run(&spec, request.timeout).await;
+        drop(image);
+        output.map_err(execute_error)
+    }
+
+    async fn start(&self, request: &RunRequest<'_>) -> Result<StartedProcess, ExecuteError> {
+        if request.command.arguments.is_empty() {
+            return Err(ExecuteError::InvalidAction("command has no arguments".to_string()));
+        }
+        let image = self.artifacts.container_image(&self.image).await.map_err(|error| self.image_error(error))?;
+        let spec = self.spec(request, &image);
+        let running = self.runtime.start(&spec).await.map_err(execute_error)?;
+        Ok(StartedProcess {
+            process: running.process,
+            keep: Box::new((running.keep, image)),
+        })
+    }
+}
+
+impl ContainerRunner {
+    /// The container the request's command runs in: the image, with the
+    /// sandbox mounted at [`WORKSPACE`] and the command's variables
+    /// overriding the image's.
+    fn spec(&self, request: &RunRequest<'_>, image: &ContainerImage) -> ContainerSpec {
         let mut env = image.env.clone();
-        for variable in &command.environment_variables {
+        for variable in &request.command.environment_variables {
             env.retain(|(name, _)| *name != variable.name);
             env.push((variable.name.clone(), variable.value.clone()));
         }
-
-        let spec = ContainerSpec {
+        ContainerSpec {
             rootfs: image.rootfs.clone(),
             mounts: vec![Mount {
                 source: request.sandbox.to_path_buf(),
                 target: WORKSPACE.into(),
             }],
-            args: command.arguments.clone(),
+            args: request.command.arguments.clone(),
             env,
             working_dir: Path::new(WORKSPACE).join(request.working_dir),
             network: self.network,
-        };
-        let output = self.runtime.run(&spec, request.timeout).await;
-        drop(image);
-        output.map_err(execute_error)
+        }
     }
-}
 
-impl ContainerRunner {
     fn image_error(&self, error: ArtifactError) -> ExecuteError {
         let message = match error {
             ArtifactError::NotFound(_) => format!(

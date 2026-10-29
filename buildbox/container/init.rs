@@ -188,6 +188,8 @@ struct Command {
     program: CString,
     args: Vec<CString>,
     env: Vec<CString>,
+    /// Whether the command keeps this process's stdin.
+    interactive: bool,
 }
 
 impl Command {
@@ -210,7 +212,12 @@ impl Command {
             let variable = format!("{name}={value}");
             env.push(CString::new(variable).map_err(|_| format!("environment variable {name} contains NUL"))?);
         }
-        Ok(Command { program, args, env })
+        Ok(Command {
+            program,
+            args,
+            env,
+            interactive: spec.interactive,
+        })
     }
 
     /// Run the command as a child of this process, then reap every process
@@ -225,7 +232,10 @@ impl Command {
     /// Start the command. Whether exec succeeded is reported back through a
     /// pipe that exec closes: data on it is the error from a failed exec.
     fn start(&self) -> Result<libc::pid_t, Outcome> {
-        let stdin = File::open("/dev/null").map_err(|error| setup_failed(format!("failed to open /dev/null: {error}")))?;
+        let stdin = match self.interactive {
+            true => None,
+            false => Some(File::open("/dev/null").map_err(|error| setup_failed(format!("failed to open /dev/null: {error}")))?),
+        };
         let (exec_error_read, exec_error_write) =
             sys::pipe().map_err(|error| setup_failed(format!("failed to create a pipe: {error}")))?;
 
@@ -234,7 +244,11 @@ impl Command {
         let env = null_terminated(&self.env);
         let child = match sys::fork() {
             Ok(Fork::Child) => {
-                let error = match sys::set_stdin(stdin.as_raw_fd()) {
+                let redirected = match &stdin {
+                    Some(stdin) => sys::set_stdin(stdin.as_raw_fd()),
+                    None => Ok(()),
+                };
+                let error = match redirected {
                     Ok(()) => sys::execve(&self.program, &args, &env),
                     Err(error) => error,
                 };
@@ -349,6 +363,7 @@ mod tests {
             env: vec![("A=B".to_string(), "c".to_string())],
             working_dir: PathBuf::from("/"),
             isolate_network: true,
+            interactive: false,
         };
 
         assert!(Command::prepare(&spec).is_err());

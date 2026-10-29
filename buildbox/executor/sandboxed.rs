@@ -6,6 +6,9 @@ mod inputs;
 mod outputs;
 mod paths;
 mod sandbox;
+mod workers;
+
+pub use workers::{WORKER_KEY_PROPERTY, WORKER_PROTOCOL_PROPERTY};
 
 pub use process::ProcessOutput;
 
@@ -30,6 +33,21 @@ pub trait Runner: Send + Sync + 'static {
     ///
     /// Dropping the returned future stops the command.
     async fn run(&self, request: &RunRequest<'_>) -> Result<ProcessOutput, ExecuteError>;
+
+    /// Start the command, as a persistent worker, and leave it running with
+    /// its stdin and stdout connected. `request.timeout` doesn't apply.
+    async fn start(&self, request: &RunRequest<'_>) -> Result<StartedProcess, ExecuteError> {
+        let _ = request;
+        Err(ExecuteError::Internal("this runner can't start persistent workers".to_string()))
+    }
+}
+
+/// A process a [`Runner`] started and left running. Dropping it stops the
+/// process.
+pub struct StartedProcess {
+    pub process: process::Interactive,
+    /// What must live as long as the process, such as its container.
+    pub keep: Box<dyn std::any::Any + Send + Sync>,
 }
 
 /// A command to run, and where.
@@ -56,6 +74,7 @@ pub struct SandboxedExecutor {
     runner: Arc<dyn Runner>,
     worker_name: String,
     directories: inputs::DirectoryCache,
+    workers: workers::WorkerPool,
 }
 
 impl SandboxedExecutor {
@@ -71,12 +90,49 @@ impl SandboxedExecutor {
     ) -> SandboxedExecutor {
         SandboxedExecutor {
             cas,
-            sandbox_root,
             keep_sandboxes,
+            workers: workers::WorkerPool::new(sandbox_root.join("workers")),
+            sandbox_root,
             runner,
             worker_name,
             directories: inputs::DirectoryCache::default(),
         }
+    }
+
+    /// Run an action in a persistent worker of its kind.
+    async fn execute_in_worker(&self, action: &Action, spec: workers::WorkerSpec) -> Result<ActionResult, ExecuteError> {
+        let context = workers::WorkerContext {
+            cas: &*self.cas,
+            directories: &self.directories,
+            runner: &*self.runner,
+            pool: &self.workers,
+        };
+        let start = SystemTime::now();
+        let cas = &*self.cas;
+        let command = &action.command;
+        let (response, outputs) = workers::run(&context, action, spec, |dir| async move { outputs::collect_outputs(cas, command, &dir).await }).await?;
+        let completed = SystemTime::now();
+        let output = ProcessOutput {
+            exit_code: response.exit_code,
+            stdout: Vec::new(),
+            stderr: response.output.into_bytes(),
+        };
+        let (stdout, stderr) = self.store_output_streams(&output).await?;
+        let metadata = ExecutedActionMetadata {
+            worker: self.worker_name.clone(),
+            execution_start_timestamp: Timestamp::from(start).into(),
+            execution_completed_timestamp: Timestamp::from(completed).into(),
+            ..Default::default()
+        };
+        Ok(ActionResult {
+            output_files: outputs.files,
+            output_directories: outputs.directories,
+            exit_code: output.exit_code,
+            stdout_digest: stdout.to_proto().into(),
+            stderr_digest: stderr.to_proto().into(),
+            execution_metadata: metadata.into(),
+            ..Default::default()
+        })
     }
 
     /// Store the command's stdout and stderr in the CAS, returning their
@@ -110,6 +166,9 @@ impl Executor for SandboxedExecutor {
     async fn execute(&self, action: &Action) -> Result<ActionResult, ExecuteError> {
         let command = &action.command;
         let working_dir = paths::parse_relative_path(&command.working_directory).map_err(ExecuteError::InvalidAction)?;
+        if let Some(spec) = workers::worker_spec(action, &working_dir) {
+            return self.execute_in_worker(action, spec).await;
+        }
 
         let sandbox = Sandbox::create(&self.sandbox_root, self.keep_sandboxes).await?;
         tracing::info!("running action {} in {}", action.digest, sandbox.path().display());

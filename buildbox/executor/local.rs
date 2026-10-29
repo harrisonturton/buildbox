@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use executor::ExecuteError;
-use executor_sandboxed::{ProcessOutput, RunRequest, Runner};
+use executor_sandboxed::{ProcessOutput, RunRequest, Runner, StartedProcess};
 use process::{Invocation, ProcessError};
 use std::path::{Path, PathBuf};
 
@@ -16,25 +16,36 @@ pub struct HostRunner;
 #[async_trait]
 impl Runner for HostRunner {
     async fn run(&self, request: &RunRequest<'_>) -> Result<ProcessOutput, ExecuteError> {
-        let Some((program, args)) = request.command.arguments.split_first() else {
-            return Err(ExecuteError::InvalidAction("command has no arguments".to_string()));
-        };
-        let working_dir = request.sandbox.join(request.working_dir);
-        let env = request
-            .command
-            .environment_variables
-            .iter()
-            .map(|variable| (variable.name.clone(), variable.value.clone()))
-            .collect();
-
-        let invocation = Invocation {
-            program: resolve_program(program, &working_dir),
-            args: args.to_vec(),
-            env,
-            working_dir,
-        };
+        let invocation = invocation(request)?;
         process::run(&invocation, request.timeout).await.map_err(execute_error)
     }
+
+    async fn start(&self, request: &RunRequest<'_>) -> Result<StartedProcess, ExecuteError> {
+        let invocation = invocation(request)?;
+        let process = process::start(&invocation).await.map_err(execute_error)?;
+        Ok(StartedProcess { process, keep: Box::new(()) })
+    }
+}
+
+/// The request's command, run in its working directory with exactly its
+/// environment.
+fn invocation(request: &RunRequest<'_>) -> Result<Invocation, ExecuteError> {
+    let Some((program, args)) = request.command.arguments.split_first() else {
+        return Err(ExecuteError::InvalidAction("command has no arguments".to_string()));
+    };
+    let working_dir = request.sandbox.join(request.working_dir);
+    let env = request
+        .command
+        .environment_variables
+        .iter()
+        .map(|variable| (variable.name.clone(), variable.value.clone()))
+        .collect();
+    Ok(Invocation {
+        program: resolve_program(program, &working_dir),
+        args: args.to_vec(),
+        env,
+        working_dir,
+    })
 }
 
 /// A program given as a relative path (containing a slash) is relative to the
@@ -142,5 +153,80 @@ mod tests {
         let err = run(&Command::default(), dir.path(), None).await.unwrap_err();
 
         assert!(matches!(err, ExecuteError::InvalidAction(_)), "{err}");
+    }
+
+    /// A worker speaking the JSON protocol, which counts the requests it
+    /// gets and writes the count to the output its request names.
+    const JSON_WORKER: &str = r#"
+import json, sys
+assert sys.argv[-1] == "--persistent_worker", sys.argv
+count = 0
+for line in sys.stdin:
+    request = json.loads(line)
+    count += 1
+    out = request["arguments"][0]
+    with open(out, "w") as f:
+        f.write(str(count))
+    print(json.dumps({"exitCode": 0, "output": "made " + out}), flush=True)
+"#;
+
+    /// An action run by the JSON worker, writing `output`, whose flagfile
+    /// names it.
+    async fn worker_action(cas: &cas_mem::MemCas, output: &str) -> executor::Action {
+        use buffa::Message;
+        use cas::Cas;
+        use remote_execution_rust_connect::build::bazel::remote::execution::v2::{Directory, FileNode};
+        let worker = cas.put_bytes(JSON_WORKER.as_bytes()).await.unwrap();
+        let flagfile = cas.put_bytes(format!("{output}\n").as_bytes()).await.unwrap();
+        let file = |name: &str, digest: &cas::Digest| FileNode {
+            name: name.to_string(),
+            digest: digest.to_proto().into(),
+            ..Default::default()
+        };
+        let root = Directory {
+            files: vec![file("args.txt", &flagfile), file("worker.py", &worker)],
+            ..Default::default()
+        };
+        let input_root = cas.put_bytes(&root.encode_to_vec()).await.unwrap();
+        let command = Command {
+            arguments: vec!["python3".to_string(), "worker.py".to_string(), "@args.txt".to_string()],
+            environment_variables: vec![EnvironmentVariable {
+                name: "PATH".to_string(),
+                value: "/usr/bin:/bin".to_string(),
+                ..Default::default()
+            }],
+            output_files: vec![output.to_string()],
+            ..Default::default()
+        };
+        executor::Action {
+            digest: cas::Digest::of_bytes(output.as_bytes()),
+            command,
+            input_root,
+            timeout: Some(Duration::from_secs(60)),
+            platform: vec![
+                ("persistentWorkerKey".to_string(), "tools".to_string()),
+                ("persistentWorkerProtocol".to_string(), "json".to_string()),
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn runs_actions_in_one_persistent_worker() {
+        use cas::Cas;
+        use executor::Executor;
+        let root = tempfile::tempdir().unwrap();
+        let cas = std::sync::Arc::new(cas_mem::MemCas::default());
+        let executor = executor_sandboxed::SandboxedExecutor::new(cas.clone(), root.path().to_path_buf(), false, std::sync::Arc::new(HostRunner), "test".to_string());
+        for (output, count) in [("first.txt", "1"), ("second.txt", "2")] {
+            let action = worker_action(&cas, output).await;
+            let result = executor.execute(&action).await.unwrap();
+            assert_eq!(result.exit_code, 0);
+            let stderr = cas::Digest::from_required_proto(result.stderr_digest.as_option()).unwrap();
+            assert_eq!(cas.read_bytes(&stderr).await.unwrap(), format!("made {output}").into_bytes());
+            let file = &result.output_files[0];
+            assert_eq!(file.path, output);
+            let digest = cas::Digest::from_required_proto(file.digest.as_option()).unwrap();
+            assert_eq!(cas.read_bytes(&digest).await.unwrap(), count.as_bytes(), "the second action runs in the first's worker");
+        }
     }
 }

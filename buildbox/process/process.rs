@@ -89,6 +89,80 @@ pub async fn run(invocation: &Invocation, timeout: Option<Duration>) -> Result<P
     output
 }
 
+/// A process kept running to talk to, such as a persistent worker: its
+/// stdin and stdout are connected, and what it writes to stderr is kept.
+/// Dropping it kills the process and everything it started.
+pub struct Interactive {
+    pub stdin: tokio::process::ChildStdin,
+    pub stdout: tokio::process::ChildStdout,
+    child: Child,
+    stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    _group: Option<ProcessGroup>,
+}
+
+/// How much of a long-running process's stderr is kept: the end of it.
+const KEPT_STDERR: usize = 64 * 1024;
+
+impl Interactive {
+    /// What the process has written to stderr, or the end of it.
+    pub fn stderr(&self) -> String {
+        let stderr = self.stderr.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        String::from_utf8_lossy(&stderr).into_owned()
+    }
+
+    /// Whether the process is still running.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+/// Start `invocation` with its stdin and stdout connected, in its own
+/// process group.
+pub async fn start(invocation: &Invocation) -> Result<Interactive, ProcessError> {
+    let mut process = tokio::process::Command::new(&invocation.program);
+    process
+        .args(&invocation.args)
+        .current_dir(&invocation.working_dir)
+        .env_clear()
+        .envs(invocation.env.iter().map(|(name, value)| (name, value)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true);
+    let mut child = spawn(process).await.map_err(|error| ProcessError::Start {
+        program: invocation.program.clone(),
+        error,
+    })?;
+    let group = ProcessGroup::of(&child);
+    let (Some(stdin), Some(stdout), Some(stderr_pipe)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
+        return Err(io_error("connect to the process", std::io::Error::other("missing pipe")));
+    };
+    let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    tokio::spawn(keep_stderr(stderr_pipe, stderr.clone()));
+    Ok(Interactive {
+        stdin,
+        stdout,
+        child,
+        stderr,
+        _group: group,
+    })
+}
+
+/// Keep the end of what a process writes to stderr, until it closes it.
+async fn keep_stderr(mut pipe: tokio::process::ChildStderr, kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+    let mut buffer = [0u8; 8192];
+    while let Ok(read) = pipe.read(&mut buffer).await {
+        if read == 0 {
+            return;
+        }
+        let mut kept = kept.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        kept.extend_from_slice(&buffer[..read]);
+        let excess = kept.len().saturating_sub(KEPT_STDERR);
+        kept.drain(..excess);
+    }
+}
+
 /// Start a process, retrying while its program is "busy".
 ///
 /// Running a file fails with ETXTBSY while any process has it open for

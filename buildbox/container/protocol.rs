@@ -32,6 +32,11 @@ pub struct InitSpec {
 
     /// Whether the container gets its own network, with only loopback.
     pub isolate_network: bool,
+
+    /// Whether the command reads the helper's stdin, to be talked to, rather
+    /// than `/dev/null`.
+    #[serde(default)]
+    pub interactive: bool,
 }
 
 /// How running the container went.

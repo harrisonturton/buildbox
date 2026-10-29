@@ -15,7 +15,7 @@ mod protocol;
 mod sys;
 
 use async_trait::async_trait;
-use container::{ContainerError, ContainerRuntime, ContainerSpec, Network, ProcessOutput};
+use container::{ContainerError, ContainerRuntime, ContainerSpec, Network, ProcessOutput, RunningContainer};
 use fsutil::run_blocking;
 use process::{Invocation, ProcessError};
 use protocol::{InitSpec, Outcome, PROBE_MODE, RESULT_FILE, RUN_MODE, SPEC_FILE};
@@ -164,6 +164,33 @@ impl ContainerRuntime for NamespaceRuntime {
             outcome => Err(outcome_error(outcome, &output)),
         }
     }
+
+    #[tracing::instrument(name = "start_container", skip_all)]
+    async fn start(&self, spec: &ContainerSpec) -> Result<RunningContainer, ContainerError> {
+        let dir = self.create_dir().await?;
+        let init_spec = InitSpec {
+            interactive: true,
+            ..init_spec(spec)
+        };
+        let spec_path = dir.path().join(SPEC_FILE);
+        run_blocking(move || {
+            let json = serde_json::to_vec(&init_spec).map_err(std::io::Error::other)?;
+            std::fs::write(&spec_path, json)
+        })
+        .await
+        .map_err(|error| ContainerError::Internal(format!("failed to write the container spec: {error}")))?;
+        let mut args = self.helper.args.clone();
+        args.push(RUN_MODE.to_string());
+        args.push(dir.path().display().to_string());
+        let invocation = Invocation {
+            program: self.helper.program.clone(),
+            args,
+            env: vec![],
+            working_dir: PathBuf::from("/"),
+        };
+        let process = process::start(&invocation).await.map_err(process_error)?;
+        Ok(RunningContainer { process, keep: Box::new(dir) })
+    }
 }
 
 fn init_spec(spec: &ContainerSpec) -> InitSpec {
@@ -178,6 +205,7 @@ fn init_spec(spec: &ContainerSpec) -> InitSpec {
         env: spec.env.clone(),
         working_dir: spec.working_dir.clone(),
         isolate_network: spec.network == Network::Isolated,
+        interactive: false,
     }
 }
 

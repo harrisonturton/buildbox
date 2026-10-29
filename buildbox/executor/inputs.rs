@@ -51,6 +51,89 @@ pub async fn stage_inputs(cas: &dyn Cas, directories: &DirectoryCache, input_roo
     create_entries(cas, tree, sandbox).await
 }
 
+/// What a reused directory holds of earlier inputs, so staging the next
+/// action's inputs there only changes what differs.
+#[derive(Debug, Default)]
+pub struct Staged {
+    files: HashMap<PathBuf, (Digest, bool)>,
+    symlinks: HashMap<PathBuf, String>,
+}
+
+/// Make `dir`, which holds what `staged` says, hold the input tree rooted
+/// at `input_root` instead: remove the inputs that aren't in it, and add
+/// those that are new or have changed. Inputs that stay the same, such as a
+/// persistent worker's tools, are left alone. Returns every input file's
+/// path, relative to `dir`, with its digest.
+#[tracing::instrument(skip_all, fields(dirs = Empty, files = Empty, symlinks = Empty))]
+pub async fn sync_inputs(cas: &dyn Cas, directories: &DirectoryCache, input_root: &Digest, dir: &Path, staged: &mut Staged) -> Result<Vec<(String, Digest)>, ExecuteError> {
+    let tree = resolve_tree(cas, directories, input_root).await?;
+    let span = Span::current();
+    span.record("dirs", tree.dirs.len());
+    span.record("files", tree.files.len());
+    span.record("symlinks", tree.symlinks.len());
+    check_files_present(cas, &tree).await?;
+
+    let wanted_files: HashMap<PathBuf, (Digest, bool)> = tree.files.iter().map(|file| (file.path.clone(), (file.digest.clone(), file.executable))).collect();
+    let wanted_symlinks: HashMap<PathBuf, String> = tree.symlinks.iter().map(|symlink| (symlink.path.clone(), symlink.target.clone())).collect();
+    let mut stale: Vec<PathBuf> = staged.files.iter().filter(|(path, file)| wanted_files.get(*path) != Some(file)).map(|(path, _)| dir.join(path)).collect();
+    stale.extend(staged.symlinks.iter().filter(|(path, target)| wanted_symlinks.get(*path) != Some(target)).map(|(path, _)| dir.join(path)));
+    let added_files: Vec<InputFile> = tree.files.into_iter().filter(|file| staged.files.get(&file.path) != Some(&(file.digest.clone(), file.executable))).collect();
+    let added_symlinks: Vec<(PathBuf, String)> = tree
+        .symlinks
+        .into_iter()
+        .filter(|symlink| staged.symlinks.get(&symlink.path) != Some(&symlink.target))
+        .map(|symlink| (dir.join(&symlink.path), symlink.target))
+        .collect();
+    let dirs: Vec<PathBuf> = tree.dirs.iter().map(|path| dir.join(path)).collect();
+    let replaced: Vec<PathBuf> = added_files.iter().map(|file| dir.join(&file.path)).chain(added_symlinks.iter().map(|(path, _)| path.clone())).collect();
+    run_blocking(move || {
+        remove_paths(&stale)?;
+        create_dirs_if_missing(&dirs)?;
+        remove_paths(&replaced)
+    })
+    .await?;
+
+    let files = added_files
+        .into_iter()
+        .map(|file| Materialization {
+            dest: dir.join(&file.path),
+            digest: file.digest,
+            executable: file.executable,
+        })
+        .collect();
+    cas.materialize_all(files).await?;
+    run_blocking(move || create_symlinks(&added_symlinks)).await?;
+    let mut listed: Vec<(String, Digest)> = wanted_files.iter().map(|(path, (digest, _))| (path.display().to_string(), digest.clone())).collect();
+    listed.sort();
+    staged.files = wanted_files;
+    staged.symlinks = wanted_symlinks;
+    Ok(listed)
+}
+
+/// Remove files and symlinks, if they exist.
+fn remove_paths(paths: &[PathBuf]) -> Result<(), ExecuteError> {
+    for path in paths {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(internal_error("failed to remove", path, error)),
+        }
+    }
+    Ok(())
+}
+
+/// Create directories that don't exist yet, each after its parent.
+fn create_dirs_if_missing(dirs: &[PathBuf]) -> Result<(), ExecuteError> {
+    for path in dirs {
+        match std::fs::create_dir(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(internal_error("failed to create", path, error)),
+        }
+    }
+    Ok(())
+}
+
 /// Fetch every `Directory` in the tree and flatten it into a list of entries.
 /// The directories of each level are fetched together.
 #[tracing::instrument(skip_all)]

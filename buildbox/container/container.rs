@@ -19,6 +19,23 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     ///
     /// Dropping the returned future stops the container.
     async fn run(&self, spec: &ContainerSpec, timeout: Option<Duration>) -> Result<ProcessOutput, ContainerError>;
+
+    /// Start the command in a new container, with its stdin and stdout
+    /// connected, and leave it running, as a persistent worker runs. The
+    /// container is gone once the returned process is dropped.
+    async fn start(&self, spec: &ContainerSpec) -> Result<RunningContainer, ContainerError> {
+        let _ = spec;
+        Err(ContainerError::Internal("this container runtime can't keep containers running".to_string()))
+    }
+}
+
+/// A container left running, with its command's stdin and stdout. Dropping
+/// it stops the container.
+pub struct RunningContainer {
+    pub process: process::Interactive,
+    /// What must live as long as the container, such as its state
+    /// directory.
+    pub keep: Box<dyn std::any::Any + Send + Sync>,
 }
 
 /// What to run, and in what container.

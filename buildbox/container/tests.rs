@@ -168,3 +168,19 @@ async fn refuses_to_mount_through_symlinks_in_the_image() {
 
     assert!(matches!(result, Err(ContainerError::Setup(_))), "{result:?}");
 }
+
+#[tokio::test]
+async fn keeps_interactive_containers_running_to_talk_to() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let Some(f) = fixture().await else { return };
+
+    let mut running = f.runtime.start(&f.spec("while read line; do echo \"got $line\"; done")).await.unwrap();
+    let mut stdout = BufReader::new(&mut running.process.stdout);
+    for line in ["one", "two"] {
+        running.process.stdin.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+        running.process.stdin.flush().await.unwrap();
+        let mut answer = String::new();
+        stdout.read_line(&mut answer).await.unwrap();
+        assert_eq!(answer, format!("got {line}\n"));
+    }
+}
