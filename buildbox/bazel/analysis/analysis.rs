@@ -32,6 +32,7 @@ mod native;
 mod package_spec;
 pub mod paging;
 mod platform;
+mod platform_info;
 mod propagation;
 mod providers;
 mod python;

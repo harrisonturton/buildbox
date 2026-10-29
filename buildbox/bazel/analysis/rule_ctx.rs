@@ -252,7 +252,9 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
         Ok(false)
     }
 
-    /// `target_platform_has_constraint(constraintValue)`.
+    /// `target_platform_has_constraint(constraintValue)`: whether the
+    /// target platform has the value, or has no value for its setting and
+    /// it's the setting's default.
     fn target_platform_has_constraint<'v>(
         #[starlark(this)] _this: Value<'v>,
         #[starlark(require = pos)] constraint: Value<'v>,
@@ -262,10 +264,20 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
         let Some(info) = bazel_starlark::provider::ProviderInstance::from_value(constraint) else {
             anyhow::bail!("expected a ConstraintValueInfo");
         };
-        let Some(label) = info.field("label").and_then(|label| label.downcast_ref::<LabelValue>().map(|label| label.0)) else {
+        let label_of = |value: Option<Value<'v>>| value.and_then(|label| label.downcast_ref::<LabelValue>().map(|label| label.0));
+        let Some(label) = label_of(info.field("label")) else {
             return Ok(false);
         };
-        Ok(state.target_constraints.contains(&label))
+        let setting = info.field("constraint").and_then(bazel_starlark::provider::ProviderInstance::from_value);
+        let Some(setting) = setting else {
+            return Ok(state.target_constraints.iter().any(|(_, value)| *value == label));
+        };
+        let setting_label = label_of(setting.field("label"));
+        if let Some((_, value)) = state.target_constraints.iter().find(|(candidate, _)| Some(*candidate) == setting_label) {
+            return Ok(*value == label);
+        }
+        let default = setting.field("default_constraint_value").and_then(bazel_starlark::provider::ProviderInstance::from_value);
+        Ok(label_of(default.and_then(|default| default.field("label"))) == Some(label))
     }
 
     /// `resolve_tools(*, tools = [])`: the tools' files and runfiles as a

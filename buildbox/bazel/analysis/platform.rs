@@ -34,10 +34,6 @@ impl Platform {
         let value = self.constraints.iter().find(|(setting, _)| *setting == cpu).map(|(_, value)| value.name);
         value.map(|name| name.to_string()).unwrap_or_default()
     }
-
-    pub fn values(&self) -> Vec<Label> {
-        self.constraints.iter().map(|(_, value)| *value).collect()
-    }
 }
 
 /// A `platform` target, with its parents' constraints.

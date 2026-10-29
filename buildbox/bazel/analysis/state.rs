@@ -44,8 +44,8 @@ pub struct RuleState {
     /// The files `$(location)` expands each label to: those of the
     /// dependencies, and the rule's outputs.
     pub locations: Vec<(Label, Vec<Artifact>)>,
-    /// The constraint values of the target platform.
-    pub target_constraints: Vec<Label>,
+    /// The constraint values of the target platform, by setting.
+    pub target_constraints: Vec<(Label, Label)>,
     /// Whether the rule is an analysis test, which may not register
     /// actions.
     pub analysis_test: bool,

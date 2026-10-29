@@ -45,6 +45,7 @@ rust_library(
         "package_spec.rs",
         "paging.rs",
         "platform.rs",
+        "platform_info.rs",
         "propagation.rs",
         "providers.rs",
         "python.rs",

@@ -455,7 +455,7 @@ pub(crate) async fn rule_input(ctx: &Ctx, key: ConfiguredTargetKey, package: &Pa
         mapping: Arc::new(mapping.0.clone()),
         main_mapping: Arc::new(main_mapping.0.clone()),
         mappings,
-        target_constraints: platform.values(),
+        target_constraints: platform.constraints.clone(),
         target_cpu: platform.cpu(),
         aspect: None,
         toolchains: setup.toolchains,

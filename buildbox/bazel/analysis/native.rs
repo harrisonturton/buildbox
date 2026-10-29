@@ -11,7 +11,6 @@ use crate::state::{RuleState, runfiles_tree};
 use crate::target_value::TargetValue;
 use bazel_packages::AttrValue;
 use bazel_starlark::depset::{Depset, Order};
-use bazel_starlark::label_value::LabelValue;
 use intern::Symbol;
 use starlark::eval::Evaluator;
 use starlark::values::list::AllocList;
@@ -23,8 +22,6 @@ use std::sync::Arc;
 const MARKER_RULES: &[&str] = &[
     "config_setting",
     "config_feature_flag",
-    "constraint_setting",
-    "platform",
     "toolchain",
     "toolchain_type",
     "test_suite",
@@ -48,7 +45,9 @@ pub fn analyze<'v>(kind: Symbol, input: &RuleInput, prepared: &Prepared<'v>, eva
     match kind.as_str() {
         "filegroup" => filegroup(input, prepared, heap),
         "genrule" => genrule(input, prepared, RuleState::get(eval)?, heap),
-        "constraint_value" => constraint_value(input, heap),
+        "constraint_setting" => crate::platform_info::constraint_setting(input, heap),
+        "constraint_value" => crate::platform_info::constraint_value(input, prepared, heap),
+        "platform" => crate::platform_info::platform(input, prepared, heap),
         "label_flag" | "label_setting" => forward(input, prepared, "build_setting_default", heap),
         "cc_toolchain" => crate::cc::rules::cc_toolchain(input, prepared, heap),
         "cc_toolchain_alias" => crate::cc::rules::cc_toolchain_alias(input, heap),
@@ -136,20 +135,6 @@ fn output_groups<'v>(targets: &[Value<'v>], group: &str) -> Vec<Value<'v>> {
         }
     }
     out
-}
-
-/// `constraint_value`: its label and setting, as `ConstraintValueInfo`.
-fn constraint_value<'v>(input: &RuleInput, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
-    let setting = match input.attr("constraint_setting") {
-        Some(AttrValue::Label(setting)) => heap.alloc(LabelValue(*setting)),
-        _ => Value::new_none(),
-    };
-    let info = providers::instance(
-        "ConstraintValueInfo",
-        vec![("label", heap.alloc(LabelValue(input.label))), ("constraint_setting", setting)],
-        heap,
-    )?;
-    Ok(heap.alloc(AllocList([info])))
 }
 
 /// The providers of the target an attribute names, as `label_flag` has.

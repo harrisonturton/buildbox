@@ -108,7 +108,8 @@ pub struct RuleInput {
     /// How the main repository sees the others.
     pub main_mapping: Arc<RepoMappingTable>,
     pub mappings: HashMap<RepoName, Arc<RepoMappingTable>>,
-    pub target_constraints: Vec<Label>,
+    /// The target platform's constraint values, with their settings.
+    pub target_constraints: Vec<(Label, Label)>,
     /// The target platform's CPU, as `$(TARGET_CPU)` names it.
     pub target_cpu: String,
     /// For an aspect: the target it's applied to.
