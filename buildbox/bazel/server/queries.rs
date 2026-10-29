@@ -435,7 +435,7 @@ mod tests {
         let commands = [
             ("build", build::build_spec()),
             ("test", build::build_spec()),
-            ("run", build::build_spec()),
+            ("run", build::command_spec("run")),
             ("info", build::build_spec()),
             ("query", query_spec()),
             ("cquery", cquery_spec()),

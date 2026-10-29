@@ -7,6 +7,7 @@ use crate::actions::{self, Actions};
 use crate::artifact::{self, Artifact};
 use crate::action_value::DepTargets;
 use crate::configured::{ConfiguredTarget, Implementation};
+use crate::expand::LocationStyle;
 use crate::exec_groups::ExecGroups;
 use crate::failure::{AttributeErrors, ImplementationFailed};
 use crate::file_value::{FileRoot, FileValue};
@@ -251,7 +252,14 @@ pub fn rule_ctx<'v>(eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
 /// Run the rule's implementation, leaving its `Target` in `module` and
 /// returning its actions. What it printed goes in `printed`, even if it
 /// fails.
-pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed>) -> anyhow::Result<Vec<Action>> {
+/// What running a rule's implementation gave besides its providers.
+pub struct Ran {
+    pub actions: Vec<Action>,
+    /// An executable rule's `args`, expanded and split into words.
+    pub args: Vec<String>,
+}
+
+pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed>) -> anyhow::Result<Ran> {
     let heap = module.heap();
     let mut state = RuleState::new(input.label, input.class.kind, input.config.clone(), input.mapping.clone(), input.main_mapping.clone());
     state.target_constraints = input.target_constraints.clone();
@@ -294,7 +302,9 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
     };
     module.set(RULE_CTX, Value::new_none());
     printed.extend(context.printed.take());
-    let attribute_errors = context.extension.as_ref().and_then(|state| state.downcast_ref::<RuleState>()).map(|state| state.attribute_errors.take()).unwrap_or_default();
+    let rule_state = context.extension.as_ref().and_then(|state| state.downcast_ref::<RuleState>());
+    let args = rule_state.map(|state| executable_args(input, state)).unwrap_or_default();
+    let attribute_errors = rule_state.map(|state| state.attribute_errors.take()).unwrap_or_default();
     if !attribute_errors.is_empty() {
         let implementation = returned.err().map(|error| error.downcast::<ImplementationFailed>().unwrap_or_else(|error| ImplementationFailed::reported(error.to_string())));
         return Err(AttributeErrors {
@@ -319,7 +329,37 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
         None => providers::collect(input.label, returned, &defaults, heap)?,
     };
     module.set("target", heap.alloc(target));
-    Ok(state.actions.into_inner())
+    Ok(Ran {
+        actions: state.actions.into_inner(),
+        args,
+    })
+}
+
+/// The arguments an executable rule's `args` gives its executable when
+/// run or tested: each expanded, with `$(location)` giving runfiles paths,
+/// then split into words, as Bazel's `RunfilesSupport` computes them.
+/// Errors are the attribute's, recorded on `state`.
+fn executable_args(input: &RuleInput, state: &RuleState) -> Vec<String> {
+    if !input.class.executable && !input.class.test {
+        return Vec::new();
+    }
+    let Some(AttrValue::StringList(values)) = input.attr("args") else {
+        return Vec::new();
+    };
+    let mut args = Vec::new();
+    for value in values {
+        let words = state
+            .expand(value, &[], LocationStyle::Root)
+            .and_then(|expanded| crate::shell::tokenize(&expanded).map_err(|error| anyhow::anyhow!(error)));
+        match words {
+            Ok(words) => args.extend(words),
+            Err(error) => {
+                let error = format!("in args attribute of {} rule {}: {error}", input.class.kind, input.label);
+                state.attribute_errors.borrow_mut().push(error);
+            }
+        }
+    }
+    args
 }
 
 /// Write an analysis test's executable, `<name>.sh`: a script that passes

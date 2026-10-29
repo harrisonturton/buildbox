@@ -56,7 +56,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
         return exit::BUILD_FAILURE;
     }
 
-    let tests = select_tests(&session, &built, &options, &settings, out).await;
+    let tests = select_tests(&session, &built, &options, &settings, &context.env, out).await;
     let skipped: Vec<Label> = built
         .targets
         .iter()
@@ -138,7 +138,14 @@ fn test_timeouts(text: &str) -> Result<Vec<Option<u64>>, String> {
 
 /// The tests to run: those built that are compatible with the
 /// configuration and that `--test_tag_filters` selects.
-async fn select_tests(session: &Session, built: &Built, options: &ParsedOptions, settings: &TestSettings, out: &Output) -> Vec<TestKey> {
+async fn select_tests(
+    session: &Session,
+    built: &Built,
+    options: &ParsedOptions,
+    settings: &TestSettings,
+    client: &HashMap<String, String>,
+    out: &Output,
+) -> Vec<TestKey> {
     let candidates: Vec<ConfiguredTargetKey> = built
         .targets
         .iter()
@@ -149,7 +156,32 @@ async fn select_tests(session: &Session, built: &Built, options: &ParsedOptions,
     if selected.is_empty() && !candidates.is_empty() {
         out.warning("All specified test targets were excluded by filters").await;
     }
-    selected.into_iter().map(|target| TestKey { target, settings: settings.clone() }).collect()
+    selected
+        .into_iter()
+        .map(|target| TestKey {
+            target,
+            settings: settings.clone(),
+            inherited_env: inherited_env(built, target, client),
+        })
+        .collect()
+}
+
+/// The client's values of the variables a test's `RunEnvironmentInfo`
+/// inherits.
+fn inherited_env(built: &Built, test: ConfiguredTargetKey, client: &HashMap<String, String>) -> Vec<(String, String)> {
+    let target = built.targets.iter().find(|(label, target, _)| *label == test.label && target.config == test.config);
+    let Some((_, target, _)) = target else {
+        return Vec::new();
+    };
+    let mut env: Vec<(String, String)> = target
+        .run_env
+        .inherited
+        .iter()
+        .filter_map(|name| Some((name.clone(), client.get(name)?.clone())))
+        .collect();
+    env.sort();
+    env.dedup();
+    env
 }
 
 /// Let the tests that failed before run again, unless

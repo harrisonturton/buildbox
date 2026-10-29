@@ -660,7 +660,7 @@ fn nothing_provided(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol) -> Result
         };
         module.set(configured::TARGET, module.heap().alloc(target));
         let module = module.freeze_named(heap_name("no aspect", key, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        Ok(configured::Analyzed { module, actions: Vec::new() })
+        Ok(configured::Analyzed { module, actions: Vec::new(), args: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
     Ok(configured(ctx, key, kind, false, analyzed, fingerprint))

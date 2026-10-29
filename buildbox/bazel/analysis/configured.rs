@@ -1,6 +1,7 @@
 //! Configured targets: targets analyzed in a configuration.
 
 use bazel_starlark::print::Printed;
+use bazel_starlark::provider::ProviderInstance;
 use crate::action::{Action, RunfilesTree, StoredAction};
 use crate::paging::PagedValue;
 use crate::artifact::{self, Artifact};
@@ -63,6 +64,12 @@ pub struct ConfiguredTarget {
     pub exec_platform: Option<Label>,
     /// For an executable rule, its executable and runfiles tree.
     pub executable: Option<Executable>,
+    /// For an executable rule, the arguments its `args` attribute gives
+    /// the executable, expanded and split into words.
+    pub args: Vec<String>,
+    /// The environment its `RunEnvironmentInfo` gives its executable when
+    /// it's run or tested.
+    pub run_env: RunEnvironment,
     size: usize,
 }
 
@@ -72,6 +79,29 @@ pub struct ConfiguredTarget {
 pub struct Executable {
     pub file: Artifact,
     pub runfiles: Arc<RunfilesTree>,
+}
+
+/// The environment a target's `RunEnvironmentInfo` asks for: variables
+/// with fixed values, and the names of those taken from the client's
+/// environment, which take precedence.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunEnvironment {
+    pub fixed: Vec<(String, String)>,
+    pub inherited: Vec<String>,
+}
+
+impl RunEnvironment {
+    /// The variables an executable gets: the fixed ones, then the
+    /// inherited ones the client's environment sets, from `client`.
+    pub fn resolve(&self, client: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+        let mut env: BTreeMap<String, String> = self.fixed.iter().cloned().collect();
+        for name in &self.inherited {
+            if let Some(value) = client(name) {
+                env.insert(name.clone(), value);
+            }
+        }
+        env.into_iter().collect()
+    }
 }
 
 /// A configured target's direct dependency, as `cquery` follows it.
@@ -294,8 +324,10 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     let input = rule_input(ctx, key, package, setup, deps).await?;
     let analyzed = evaluate_reporting(ctx, label, input, heap_name("target", key, fingerprint)).await?;
     let executable = executable(&analyzed);
+    let run_env = run_environment(&analyzed);
     let mut target = configured(ctx, key, class_ref.kind, is_test, analyzed, fingerprint);
     target.executable = executable;
+    target.run_env = run_env;
     target.deps = edges;
     target.exec_platform = Some(exec_platform);
     target.aspects = applications;
@@ -314,6 +346,28 @@ fn executable(analyzed: &Analyzed) -> Option<Executable> {
     let runfiles = crate::runfiles::Runfiles::from_value(files_to_run.runfiles)?;
     let runfiles = crate::state::runfiles_tree(file, runfiles);
     Some(Executable { file, runfiles })
+}
+
+/// The environment a rule's `RunEnvironmentInfo` gives its executable.
+fn run_environment(analyzed: &Analyzed) -> RunEnvironment {
+    let Ok(value) = analyzed.module.get(TARGET) else {
+        return RunEnvironment::default();
+    };
+    let Some(target) = crate::target_value::TargetValue::from_value(value.value()) else {
+        return RunEnvironment::default();
+    };
+    let Some(info) = target.provider("RunEnvironmentInfo").and_then(ProviderInstance::from_value) else {
+        return RunEnvironment::default();
+    };
+    let mut fixed = Vec::new();
+    if let Some(dict) = info.field("environment").and_then(starlark::values::dict::DictRef::from_value) {
+        fixed.extend(dict.iter().filter_map(|(key, value)| Some((key.unpack_str()?.to_string(), value.unpack_str()?.to_string()))));
+    }
+    let mut inherited = Vec::new();
+    if let Some(list) = info.field("inherited_environment").and_then(starlark::values::list::ListRef::from_value) {
+        inherited.extend(list.iter().filter_map(|name| name.unpack_str().map(str::to_string)));
+    }
+    RunEnvironment { fixed, inherited }
 }
 
 /// What a rule's analysis needs before its dependencies are analyzed.
@@ -961,6 +1015,8 @@ pub(crate) fn forwarded(key: ConfiguredTargetKey, target: &ConfiguredTarget) -> 
         exec_platform: target.exec_platform,
         aspects: Vec::new(),
         executable: None,
+        args: target.args.clone(),
+        run_env: target.run_env.clone(),
         size: 64,
     })
 }
@@ -969,6 +1025,8 @@ pub(crate) fn forwarded(key: ConfiguredTargetKey, target: &ConfiguredTarget) -> 
 pub struct Analyzed {
     pub module: FrozenModule,
     pub actions: Vec<Action>,
+    /// An executable rule's expanded `args`.
+    pub args: Vec<String>,
 }
 
 /// The name the target value is kept under in its frozen module.
@@ -998,6 +1056,8 @@ pub(crate) fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_t
         exec_platform: None,
         aspects: Vec::new(),
         executable: None,
+        args: analyzed.args,
+        run_env: RunEnvironment::default(),
         size,
     }
 }
@@ -1023,9 +1083,13 @@ pub(crate) fn evaluate(input: RuleInput, name: FrozenHeapName) -> (Result<Analyz
     let mut printed = Vec::new();
     let analyzed = Module::with_temp_heap(|module| {
         module.frozen_heap().add_reference(bazel_starlark::provider::builtin_providers_heap());
-        let actions = build_ctx::run(&module, &input, &mut printed).map_err(|error| Failure::of(&input, error))?;
+        let ran = build_ctx::run(&module, &input, &mut printed).map_err(|error| Failure::of(&input, error))?;
         let module = module.freeze_named(name).map_err(|error| Failure::of(&input, anyhow::anyhow!("{}: {error:?}", input.label)))?;
-        Ok(Analyzed { module, actions })
+        Ok(Analyzed {
+            module,
+            actions: ran.actions,
+            args: ran.args,
+        })
     });
     (analyzed, printed)
 }
@@ -1041,7 +1105,7 @@ fn file(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, artifact: Artifact) -> 
         let target = providers::file_target(key.label, artifact, module.heap())?;
         module.set(TARGET, module.heap().alloc(target));
         let module = module.freeze_named(heap_name("file", key, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        Ok(Analyzed { module, actions: Vec::new() })
+        Ok(Analyzed { module, actions: Vec::new(), args: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
     Ok(configured(ctx, key, Symbol::intern(kind), false, analyzed, fingerprint))
@@ -1094,7 +1158,7 @@ async fn package_group(ctx: &Ctx, key: ConfiguredTargetKey, group: &bazel_packag
         let target = providers::collect(key.label, provided, &defaults, module.heap())?;
         module.set(TARGET, module.heap().alloc(target));
         let module = module.freeze_named(heap_name("package group", key, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        Ok(Analyzed { module, actions: Vec::new() })
+        Ok(Analyzed { module, actions: Vec::new(), args: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
     Ok(configured(ctx, key, Symbol::intern(PACKAGE_GROUP), false, analyzed, fingerprint))
@@ -1120,7 +1184,7 @@ pub(crate) fn empty_target(ctx: &Ctx, key: ConfiguredTargetKey, kind: &str, is_t
         let target = providers::collect(key.label, starlark::values::Value::new_none(), &defaults, module.heap())?;
         module.set(TARGET, module.heap().alloc(target));
         let module = module.freeze_named(heap_name("empty", key, fingerprint)).map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        Ok(Analyzed { module, actions: Vec::new() })
+        Ok(Analyzed { module, actions: Vec::new(), args: Vec::new() })
     })
     .map_err(|error| SkyError::new(format!("{}: {error}", key.label)))?;
     Ok(configured(ctx, key, Symbol::intern(kind), is_test, analyzed, fingerprint))

@@ -13,6 +13,7 @@ mod commands;
 mod fetch;
 mod modcmd;
 mod help;
+mod invocation;
 mod memory;
 mod output;
 mod queries;

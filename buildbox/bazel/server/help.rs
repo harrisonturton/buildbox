@@ -194,7 +194,7 @@ fn command_page(name: &str) -> Option<String> {
 /// The options a command's help page lists: those bb reads.
 fn command_options(command: &str) -> Option<OptionSpec> {
     match command {
-        "build" | "test" | "run" | "info" => Some(crate::build::build_spec()),
+        "build" | "test" | "run" | "info" => Some(crate::build::command_spec(command)),
         "query" => Some(crate::queries::query_spec()),
         "cquery" => Some(crate::queries::cquery_spec()),
         "aquery" => Some(crate::queries::aquery_spec()),

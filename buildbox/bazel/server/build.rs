@@ -73,6 +73,16 @@ pub fn build_spec() -> OptionSpec {
     OptionSpec::new(&options)
 }
 
+/// The options a command built on `build` takes: `build`'s, and those of
+/// its own.
+pub fn command_spec(command: &str) -> OptionSpec {
+    let mut options = build_spec().options();
+    if command == "run" {
+        options.push(("run_env", OptionKind::Multi));
+    }
+    OptionSpec::new(&options)
+}
+
 /// Options bb takes and ignores, since they only tune how Bazel itself
 /// runs, which bb does its own way. bb's server keeps downloads and fetched
 /// repositories in its root, shared by every workspace, as Bazel's
@@ -274,7 +284,7 @@ pub async fn completed(failed_tests: usize, out: &Output) {
 /// Parse a build command's options.
 pub async fn parse(context: &CommandContext<'_>, command: &str, args: &[String], out: &Output) -> Result<ParsedOptions, i32> {
     let all_args = bazel_options::command_args(&context.rc, command, args);
-    match bazel_options::parse(&all_args, &build_spec(), &context.rc, command) {
+    match bazel_options::parse(&all_args, &command_spec(command), &context.rc, command) {
         Ok(options) => {
             out.configure(&options).await;
             Ok(options)

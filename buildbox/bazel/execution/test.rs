@@ -8,7 +8,6 @@ use bazel_analysis::{Artifact, ConfiguredTargetKey, FileValue, Runfiles, runfile
 use bazel_label::{Label, RepoName};
 use bazel_loading::PackageKey;
 use bazel_packages::{AttrValue, Target};
-use bazel_starlark::provider::ProviderInstance;
 use intern::Symbol;
 use skycodec::{Decode, Encode};
 use skyframe::{Compute, Ctx, Key, SkyError, encoded_value};
@@ -90,6 +89,9 @@ encoded_value!(TestResult);
 pub struct TestKey {
     pub target: ConfiguredTargetKey,
     pub settings: TestSettings,
+    /// The values the client's environment gives the variables the test's
+    /// `RunEnvironmentInfo` inherits, by name; unset ones are left out.
+    pub inherited_env: Vec<(String, String)>,
 }
 
 /// How a command runs tests, as its test options say.
@@ -116,7 +118,7 @@ impl Key for TestKey {
 
     async fn compute(&self, ctx: &Ctx) -> Result<TestResult, SkyError> {
         let backend = ctx.global::<Backend>()?;
-        let test = TestSpec::of(ctx, self.target, &self.settings).await?;
+        let test = TestSpec::of(ctx, self, &self.settings).await?;
         let request = test.request(ctx).await?;
         let _shared = match test.exclusive {
             true => None,
@@ -233,7 +235,8 @@ struct TestSpec {
 }
 
 impl TestSpec {
-    async fn of(ctx: &Ctx, key: ConfiguredTargetKey, settings: &TestSettings) -> Result<TestSpec, SkyError> {
+    async fn of(ctx: &Ctx, test: &TestKey, settings: &TestSettings) -> Result<TestSpec, SkyError> {
+        let key = test.target;
         let target = ctx.compute(&key).await?;
         let providers = target.providers()?;
         let value = providers.get().ok_or_else(|| SkyError::new(format!("{} has no providers", key.label)))?;
@@ -245,17 +248,14 @@ impl TestSpec {
         let default_runfiles = value.default_info("default_runfiles").and_then(Runfiles::from_value);
         let runfiles = default_runfiles.map(|runfiles| runfiles.entries(workspace_dir)).unwrap_or_default();
         let empty_runfiles = default_runfiles.map(|runfiles| runfiles.empty_files(workspace_dir)).unwrap_or_default();
-        let mut env = run_environment(value.provider("RunEnvironmentInfo"));
+        let env = target.run_env.resolve(|name| test.inherited_env.iter().find(|(inherited, _)| inherited == name).map(|(_, value)| value.clone()));
         let package = ctx.compute(&PackageKey(key.label.package)).await?;
         let Some(Target::Rule(rule)) = package.0.target(key.label.name) else {
             return Err(SkyError::new(format!("{} is not a rule", key.label)));
         };
         let size = string_attr(rule.attr(Symbol::intern("size"))).unwrap_or_else(|| "medium".to_string());
         let timeout = string_attr(rule.attr(Symbol::intern("timeout")));
-        let mut args = match rule.attr(Symbol::intern("args")) {
-            Some(AttrValue::StringList(args)) => args.clone(),
-            _ => Vec::new(),
-        };
+        let mut args = target.args.clone();
         args.extend(settings.args.iter().cloned());
         let tags = match rule.attr(Symbol::intern("tags")) {
             Some(AttrValue::StringList(tags)) => tags.clone(),
@@ -264,9 +264,6 @@ impl TestSpec {
         let tagged = |wanted: &[&str]| tags.iter().any(|tag| wanted.contains(&tag.as_str()));
         if tagged(&["block-network"]) {
             return Err(SkyError::new(format!("{} is tagged 'block-network', but bb can't block tests' network yet", key.label)));
-        }
-        if let Some(AttrValue::StringDict(entries)) = rule.attr(Symbol::intern("env")) {
-            env.extend(entries.iter().cloned());
         }
         let config = key.config.get();
         let testlogs = format!(
@@ -370,19 +367,6 @@ impl TestSpec {
 /// with runfiles sees the others that have runfiles.
 pub async fn repo_mapping(compute: &impl Compute, runfiles: &[(String, Artifact)]) -> Result<String, SkyError> {
     bazel_analysis::repo_mapping_manifest(compute, runfiles.iter().map(|(_, artifact)| *artifact), None).await
-}
-
-/// The environment a `RunEnvironmentInfo` provider gives.
-fn run_environment(info: Option<starlark::values::Value<'_>>) -> Vec<(String, String)> {
-    let Some(environment) = info.and_then(ProviderInstance::from_value).and_then(|info| info.field("environment")) else {
-        return Vec::new();
-    };
-    let Some(dict) = starlark::values::dict::DictRef::from_value(environment) else {
-        return Vec::new();
-    };
-    dict.iter()
-        .filter_map(|(key, value)| Some((key.unpack_str()?.to_string(), value.unpack_str()?.to_string())))
-        .collect()
 }
 
 fn string_attr(value: Option<&AttrValue>) -> Option<String> {

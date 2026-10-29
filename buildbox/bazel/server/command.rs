@@ -194,6 +194,8 @@ pub struct CommandContext<'a> {
     pub rc: RcFile,
     /// The client's environment.
     pub env: HashMap<String, String>,
+    /// The command's unique ID, as Bazel's invocation ID.
+    pub invocation_id: String,
 }
 
 /// Run a command line, returning its exit code.
@@ -244,6 +246,7 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         working_directory: invocation.working_directory.clone(),
         rc,
         env: invocation.env.clone(),
+        invocation_id: crate::invocation::new_invocation_id(),
     };
 
     match command.as_str() {

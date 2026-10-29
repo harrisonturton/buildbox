@@ -4,10 +4,8 @@ use crate::build::{self, Built};
 use crate::command::{CommandContext, exit};
 use crate::output::Output;
 use bazel_analysis::FileValue;
-use bazel_packages::{AttrValue, Target};
-use bazel_loading::PackageKey;
-use intern::Symbol;
-use skyframe::Session;
+use bazel_options::ParsedOptions;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -39,7 +37,7 @@ pub async fn run(context: &CommandContext<'_>, args: &[String], out: &Output) ->
         return exit::BUILD_FAILURE;
     }
     build::completed(0, out).await;
-    let argv = match command_line(&session, &built, &pattern, program_args).await {
+    let argv = match command_line(&built, &pattern, program_args) {
         Ok(argv) => argv,
         Err(message) => {
             out.error(&message).await;
@@ -50,12 +48,12 @@ pub async fn run(context: &CommandContext<'_>, args: &[String], out: &Output) ->
     shown[0] = shown_executable(&built, &options);
     out.info(&format!("Running command line: {}", shown.join(" "))).await;
     let working_directory = PathBuf::from(format!("{}.runfiles/_main", argv[0]));
-    out.exec(argv, &working_directory, environment(context)).await;
+    out.exec(argv, &working_directory, environment(context, &built, &options)).await;
     exit::SUCCESS
 }
 
 /// The executable as Bazel shows it, through the `bazel-bin` symlink.
-fn shown_executable(built: &Built, options: &bazel_options::ParsedOptions) -> String {
+fn shown_executable(built: &Built, options: &ParsedOptions) -> String {
     let prefix = options.get("symlink_prefix").unwrap_or("bazel-");
     let config = built.config.get();
     let executable = built
@@ -73,7 +71,7 @@ fn shown_executable(built: &Built, options: &bazel_options::ParsedOptions) -> St
 
 /// The executable of the one target built, with its `args` and the
 /// command line's.
-async fn command_line(session: &Session, built: &Built, pattern: &str, program_args: Vec<String>) -> Result<Vec<String>, String> {
+fn command_line(built: &Built, pattern: &str, program_args: Vec<String>) -> Result<Vec<String>, String> {
     let [(label, target, _)] = built.targets.as_slice() else {
         return Err(format!("Only a single target can be run. Your target pattern {pattern} matches {} targets", built.targets.len()));
     };
@@ -85,33 +83,55 @@ async fn command_line(session: &Session, built: &Built, pattern: &str, program_a
         .and_then(FileValue::artifact)
         .ok_or_else(|| format!("Cannot run target {shown}: Not executable"))?;
     let mut argv = vec![built.exec_root.join(executable.exec_path.to_string()).display().to_string()];
-    argv.extend(rule_args(session, *label).await);
+    argv.extend(target.args.iter().cloned());
     argv.extend(program_args);
     Ok(argv)
 }
 
-/// A rule's `args` attribute.
-async fn rule_args(session: &Session, label: bazel_label::Label) -> Vec<String> {
-    let Ok(package) = session.evaluate(&PackageKey(label.package)).await else {
-        return Vec::new();
-    };
-    match package.0.target(label.name) {
-        Some(Target::Rule(rule)) => match rule.attr(Symbol::intern("args")) {
-            Some(AttrValue::StringList(args)) => args.clone(),
-            _ => Vec::new(),
-        },
-        _ => Vec::new(),
+/// Variables `bazel run` always clears, since runfiles libraries would
+/// take them as the location of the executable's runfiles.
+const CLEARED: [&str; 5] = ["JAVA_RUNFILES", "RUNFILES_DIR", "RUNFILES_MANIFEST_FILE", "RUNFILES_MANIFEST_ONLY", "TEST_SRCDIR"];
+
+/// The environment `bazel run` gives the executable: the client's, with
+/// the variables Bazel adds, then `--run_env`'s, then the target's
+/// `RunEnvironmentInfo`'s, less those it clears.
+fn environment(context: &CommandContext<'_>, built: &Built, options: &ParsedOptions) -> Vec<(String, String)> {
+    let mut env: BTreeMap<String, String> = context.env.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+    let added = [
+        ("BUILD_WORKSPACE_DIRECTORY", context.workspace_root.display().to_string()),
+        ("BUILD_WORKING_DIRECTORY", context.working_directory.display().to_string()),
+        ("BUILD_EXECROOT", built.exec_root.display().to_string()),
+        ("BUILD_ID", context.invocation_id.clone()),
+    ];
+    env.extend(added.into_iter().map(|(name, value)| (name.to_string(), value)));
+    for entry in options.all("run_env") {
+        apply_run_env(&mut env, &context.env, entry);
     }
+    if let Some((_, target, _)) = built.targets.first() {
+        env.extend(target.run_env.resolve(|name| context.env.get(name).cloned()));
+    }
+    for name in CLEARED {
+        env.remove(name);
+    }
+    env.into_iter().collect()
 }
 
-/// The client's environment, with the variables `bazel run` adds.
-fn environment(context: &CommandContext<'_>) -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = context.env.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
-    env.retain(|(name, _)| name != "BUILD_WORKSPACE_DIRECTORY" && name != "BUILD_WORKING_DIRECTORY");
-    env.push(("BUILD_WORKSPACE_DIRECTORY".to_string(), context.workspace_root.display().to_string()));
-    env.push(("BUILD_WORKING_DIRECTORY".to_string(), context.working_directory.display().to_string()));
-    env.sort();
-    env
+/// Apply one `--run_env`: `name=value` sets a variable, `name` takes the
+/// client's value or unsets it if the client has none, and `=name` unsets
+/// it.
+fn apply_run_env(env: &mut BTreeMap<String, String>, client: &HashMap<String, String>, entry: &str) {
+    if let Some(name) = entry.strip_prefix('=') {
+        env.remove(name);
+        return;
+    }
+    if let Some((name, value)) = entry.split_once('=') {
+        env.insert(name.to_string(), value.to_string());
+        return;
+    }
+    match client.get(entry) {
+        Some(value) => env.insert(entry.to_string(), value.clone()),
+        None => env.remove(entry),
+    };
 }
 
 fn shell_quote(arg: &str) -> String {

@@ -190,7 +190,7 @@ fn exec_program(exec: Exec) -> std::io::Error {
         return std::io::Error::other("the server asked to run an empty command");
     };
     let mut command = std::process::Command::new(program);
-    command.args(args).current_dir(&exec.working_directory);
+    command.args(args).current_dir(&exec.working_directory).env_clear();
     for var in exec.env {
         command.env(var.name, var.value);
     }
