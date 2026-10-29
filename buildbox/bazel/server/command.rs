@@ -423,6 +423,9 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         invocation_id: crate::invocation::new_invocation_id(),
     };
 
+    if command != "info" {
+        out.log_to(&crate::commands::output_base(&context).join(COMMAND_LOG));
+    }
     let code = match command.as_str() {
         "query" => crate::queries::query(&context, args, out).await,
         "cquery" => crate::queries::cquery(&context, args, out).await,
@@ -441,6 +444,11 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
     };
     crate::build_events::finish(code, out).await
 }
+
+/// The file in a workspace's output base that holds the latest command's
+/// output, as Bazel's `command.log` does. `info` doesn't replace it, so it
+/// can name the log of the command before.
+pub const COMMAND_LOG: &str = "command.log";
 
 /// The commands Bazel has that bb doesn't support yet.
 const UNSUPPORTED_COMMANDS: &[&str] = &[

@@ -29,25 +29,36 @@ pub fn output_base_for(server: &crate::BazelServer, root: &std::path::Path) -> P
     server.config().bazel_dir.join("output_bases").join(digest.to_string())
 }
 
-/// The keys `info` prints, with Bazel's descriptions of them.
+/// The keys `info` prints, with Bazel's descriptions of them. Bazel's
+/// keys about its JVM have no counterpart in bb.
 pub const INFO_KEYS: &[(&str, &str)] = &[
     ("bazel-bin", "Configuration dependent directory for binaries."),
     ("bazel-genfiles", "Configuration dependent directory for generated files."),
     ("bazel-testlogs", "Configuration dependent directory for logs from a test run."),
+    ("command_log", "Location of the log containing the output from the build commands."),
+    ("default-package-path", "The default package path"),
+    ("defaults-package", "Obsolete. Retained for backwards compatibility."),
     ("execution_root", "A directory that makes all input and output files visible to the build."),
     ("install_base", "The installation base directory."),
+    ("install_md5", "The logical checksum of the bb server."),
+    ("local_resources", "Auto detected local resources"),
     ("output_base", "A directory for shared bb state as well as tool and strategy specific subdirectories."),
     ("output_path", "Output directory"),
     ("package_path", "The search path for resolving package labels."),
     ("release", "bb release identifier"),
     ("repository_cache", "The location of the repository download cache used"),
+    ("server_log", "bb server log path"),
     ("server_pid", "bb process id"),
     (
         "used-heap-size",
         "The amount of used memory in bytes. Note that this is not a good indicator of the actual memory use, as it includes any remaining inaccessible memory.",
     ),
+    ("used-heap-size-after-gc", "The amount of used memory in bytes after a call to System.gc()."),
     ("workspace", "The working directory of the server."),
 ];
+
+/// The keys `info` prints only when asked for them, as Bazel's hidden ones.
+const HIDDEN_INFO_KEYS: &[&str] = &["default-package-path", "defaults-package", "install_md5", "used-heap-size-after-gc"];
 
 /// `bb info`: the values of the keys the command line names, or of all of
 /// them, for the configuration its options give.
@@ -70,7 +81,7 @@ pub async fn info(context: &CommandContext<'_>, args: &[String], out: &Output) -
     };
     let entries = info_values(context, &output_directory);
     let text = match keys.as_slice() {
-        [] => entries.iter().map(|(key, value)| format!("{key}: {value}\n")).collect(),
+        [] => entries.iter().filter(|(key, _)| !HIDDEN_INFO_KEYS.contains(key)).map(|(key, value)| format!("{key}: {value}\n")).collect(),
         [key] => format!("{}\n", info_value(&entries, key)),
         keys => keys.iter().map(|key| format!("{key}: {}\n", info_value(&entries, key))).collect(),
     };
@@ -120,10 +131,26 @@ fn info_values(context: &CommandContext<'_>, output_directory: &str) -> Vec<(&'s
         "release" => format!("release {VERSION}"),
         "repository_cache" => context.server.config().repository_cache.display().to_string(),
         "server_pid" => std::process::id().to_string(),
-        "used-heap-size" => format!("{}MB", (engine.store.stored_bytes + engine.store.entry_bytes) >> 20),
+        "used-heap-size" | "used-heap-size-after-gc" => format!("{}MB", (engine.store.stored_bytes + engine.store.entry_bytes) >> 20),
+        "command_log" => output_base.join(crate::command::COMMAND_LOG).display().to_string(),
+        "default-package-path" => "%workspace%".to_string(),
+        "defaults-package" => String::new(),
+        "install_md5" => crate::build_id::build_id().unwrap_or_default().to_string(),
+        "local_resources" => local_resources(),
+        "server_log" => bazel_dir.join("server.log").display().to_string(),
         _ => context.workspace_root.display().to_string(),
     };
     INFO_KEYS.iter().map(|(key, _)| (*key, value(key))).collect()
+}
+
+/// The machine's memory and processors, as Bazel's `local_resources`
+/// reports them.
+fn local_resources() -> String {
+    // SAFETY: sysconf only reads system configuration.
+    let (pages, page_size) = unsafe { (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE)) };
+    let ram_mb = (pages.max(0) as u64 * page_size.max(0) as u64) >> 20;
+    let cpus = std::thread::available_parallelism().map(|cpus| cpus.get()).unwrap_or(1);
+    format!("RAM={ram_mb}MB, CPU={cpus}.0")
 }
 
 pub async fn shutdown(context: &CommandContext<'_>, out: &Output) -> i32 {

@@ -211,9 +211,9 @@ Dependencies of Starlark rules are checked as Bazel checks them
 - **Commands** bb rejects: `analyze-profile`, `canonicalize-flags`,
   `config`, `coverage`, `mobile-install`, `print_action`, `sync` and
   `vendor` (`server/command.rs`).
-- **`info`** has 13 keys; missing are `command_log`, `server_log`,
-  `client-env`, `starlark-semantics`, `local_resources`, the heap and GC
-  keys and the Java ones, and `--show_make_env`.
+- **`info`** has Bazel's keys but those about its JVM (heap, GC and Java
+  keys), `build-language`, `client-env`, `starlark-semantics` and
+  `worker_metrics`, and no `--show_make_env`.
 - **`clean --async`** runs synchronously.
 - **Startup options:** `--output_base` and `--output_user_root` are
   ignored; the output base is always bb's, keyed by the workspace path.

@@ -32,6 +32,9 @@ pub struct Output {
     ui: Arc<Mutex<Ui>>,
     /// The command's build events, if it writes them.
     events: Arc<std::sync::Mutex<Option<Arc<BuildEvents>>>>,
+    /// The file the command's output is copied to, as Bazel's command log
+    /// is, if it keeps one.
+    command_log: Arc<std::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
 }
 
 /// What's been written, and what the progress bar shows.
@@ -72,7 +75,11 @@ impl Output {
         };
         let ui = Arc::new(Mutex::new(ui));
         tokio::spawn(refresh_until_dropped(Arc::downgrade(&ui)));
-        Output { ui, events: Arc::default() }
+        Output {
+            ui,
+            events: Arc::default(),
+            command_log: Arc::default(),
+        }
     }
 
     /// Set how output looks from a command's `--color`, `--curses`,
@@ -134,9 +141,24 @@ impl Output {
         self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
     }
 
+    /// Copy the command's output to the file at `path`, replacing what it
+    /// held. A log that can't be written is skipped.
+    pub fn log_to(&self, path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = std::fs::File::create(path).map(std::io::BufWriter::new);
+        *self.command_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = file.ok();
+    }
+
     fn record(&self, stdout: &str, stderr: &str) {
         if let Some(events) = self.build_events() {
             events.printed(stdout, stderr);
+        }
+        let mut log = self.command_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(log) = log.as_mut() {
+            use std::io::Write;
+            let _ = log.write_all(stdout.as_bytes()).and_then(|()| log.write_all(stderr.as_bytes()));
         }
     }
 
