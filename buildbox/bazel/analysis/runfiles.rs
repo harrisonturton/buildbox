@@ -12,6 +12,7 @@ use starlark::values::{
     Freeze, Heap, NoSerialize, ProvidesStaticType, StarlarkPagable, StarlarkValue, Trace, Value, ValueLifetimeless,
     ValueLike, starlark_value,
 };
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// A set of runfiles: files, and symlinks to files at chosen paths.
@@ -75,27 +76,78 @@ impl<'v> Runfiles<'v> {
 }
 
 impl<'v, V: ValueLike<'v>> RunfilesGen<V> {
-    /// Each file and its path in the tree, relative to the tree's root.
+    /// Each file and its path in the tree, relative to the tree's root, as
+    /// Bazel lays the tree out: files replace symlinks at the same path,
+    /// root symlinks replace both, a later entry replaces an earlier one,
+    /// and files inside paths that are files are dropped.
     pub fn entries(&self, workspace_dir: &str) -> Vec<(String, crate::artifact::Artifact)> {
-        let mut entries = Vec::new();
+        let mut manifest = Manifest::default();
+        for (path, file) in &self.symlinks {
+            if let Some(artifact) = FileValue::artifact(file.to_value()) {
+                let path = match path.strip_prefix("../") {
+                    Some(external) => external.to_string(),
+                    None => format!("{workspace_dir}/{path}"),
+                };
+                manifest.put(path, artifact);
+            }
+        }
         if let Some(files) = Depset::from_value(self.files.to_value()) {
             for file in files.to_list() {
                 if let Some(artifact) = FileValue::artifact(file) {
-                    entries.push((artifact.runfiles_path(), artifact));
+                    manifest.put(artifact.runfiles_path(), artifact);
                 }
             }
         }
-        for (path, file) in &self.symlinks {
-            if let Some(artifact) = FileValue::artifact(file.to_value()) {
-                entries.push((format!("{workspace_dir}/{path}"), artifact));
-            }
-        }
+        manifest.drop_obscured();
         for (path, file) in &self.root_symlinks {
             if let Some(artifact) = FileValue::artifact(file.to_value()) {
-                entries.push((path.clone(), artifact));
+                manifest.put(path.clone(), artifact);
             }
         }
-        entries
+        manifest.entries
+    }
+}
+
+/// A runfiles tree's files by path, as Bazel's `getRunfilesInputs` builds
+/// it: a later file at a path replaces an earlier one, in its place.
+#[derive(Default)]
+struct Manifest {
+    entries: Vec<(String, crate::artifact::Artifact)>,
+    positions: HashMap<String, usize>,
+}
+
+impl Manifest {
+    fn put(&mut self, path: String, artifact: crate::artifact::Artifact) {
+        match self.positions.get(&path) {
+            Some(&position) => self.entries[position].1 = artifact,
+            None => {
+                self.positions.insert(path.clone(), self.entries.len());
+                self.entries.push((path, artifact));
+            }
+        }
+    }
+
+    /// Drop the files inside paths that are files themselves, which a
+    /// tree can't have, as Bazel drops these obscured symlinks.
+    fn drop_obscured(&mut self) {
+        let paths: HashSet<&str> = self.entries.iter().map(|(path, _)| path.as_str()).collect();
+        let obscured = |path: &str| {
+            let mut parent = path;
+            while let Some((dir, _)) = parent.rsplit_once('/') {
+                if paths.contains(dir) {
+                    return true;
+                }
+                parent = dir;
+            }
+            false
+        };
+        let kept: Vec<bool> = self.entries.iter().map(|(path, _)| !obscured(path)).collect();
+        if kept.iter().all(|kept| *kept) {
+            return;
+        }
+        let mut kept = kept.into_iter();
+        self.entries.retain(|_| kept.next().unwrap_or(true));
+        self.positions = self.entries.iter().enumerate().map(|(position, (path, _))| (path.clone(), position)).collect();
     }
 }
 
