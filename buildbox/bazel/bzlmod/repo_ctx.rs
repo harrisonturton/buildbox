@@ -3,9 +3,9 @@
 use crate::attrs::{AttrContext, apply_schema};
 use crate::bootstrap::BootstrapBzlKey;
 use crate::config::BzlmodConfig;
-use crate::fetch_repo::{FetchedRepo, RepoFetchKey, fetch_into, repo_dir};
+use crate::fetch_repo::{FetchedRepo, RepoFetchKey, fetch_recording, repo_dir};
 use crate::graph_access::GraphAccess;
-use crate::io::{HasIo, IoState};
+use crate::io::{HasIo, IoState, RecordedInputs};
 use crate::path_value::PathValue;
 use crate::repo_env::ClientEnv;
 use crate::repo_spec::{OverrideSpec, RepoRuleSpec};
@@ -30,7 +30,7 @@ use starlark::values::structs::AllocStruct;
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, StarlarkPagablePanic, StarlarkValue, Value, starlark_value};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// `repository_ctx`: what a repository rule's implementation is given.
 #[derive(ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
@@ -176,16 +176,25 @@ async fn run_fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec, loaded: Loade
     let spec = spec.clone();
     let span = tracing::info_span!("bzlmod.repository_rule", repo = %repo, rule = %spec.rule);
     let fetched_dest = dest.clone();
+    let repos_dir = config.repos_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _entered = span.enter();
-        fetch_into(&fetched_dest, |dir| {
+        let checking = access.clone();
+        let still_current = |marker: &[u8]| RecordedInputs::decode(marker).is_current(&checking);
+        fetch_recording(&fetched_dest, still_current, |dir| {
+            let recorded = Arc::new(Mutex::new(RecordedInputs::default()));
             let io = IoState {
                 base_dir: dir.to_path_buf(),
                 graph: access,
                 downloads,
                 env: environment.env.iter().cloned().collect(),
+                repos_dir,
+                watch_outside: true,
+                recorded: recorded.clone(),
             };
-            run_rule(&module, &spec, repo, io, mappings).map_err(|error| format!("fetching @@{repo}: {error}"))
+            run_rule(&module, &spec, repo, io, mappings).map_err(|error| format!("fetching @@{repo}: {error}"))?;
+            let recorded = recorded.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).encode();
+            Ok(recorded)
         })
     })
     .await;

@@ -64,6 +64,9 @@ impl Key for ExtensionKey {
             graph: GraphAccess::new(ctx.clone()),
             downloads: config.downloads_for(ctx)?,
             env: ctx.global::<crate::repo_env::ClientEnv>()?.current().env.iter().cloned().collect(),
+            repos_dir: config.repos_dir.clone(),
+            watch_outside: false,
+            recorded: Default::default(),
         };
         let span = tracing::info_span!("bzlmod.module_extension", extension = %info.prefix);
         let graph = graph.clone();

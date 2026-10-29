@@ -19,7 +19,9 @@ use std::fmt;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use skycodec::{Decode, Encode};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// What a context's I/O methods work with.
@@ -30,6 +32,66 @@ pub struct IoState {
     pub graph: GraphAccess,
     pub downloads: DownloadCache,
     pub env: HashMap<String, String>,
+    /// Where fetched repositories are, whose files may be watched.
+    pub repos_dir: PathBuf,
+    /// Whether files outside the workspace and repositories may be watched,
+    /// as repository rules' may and module extensions' may not.
+    pub watch_outside: bool,
+    /// What the code read that it must run again for if it changes.
+    pub recorded: Arc<Mutex<RecordedInputs>>,
+}
+
+/// What a repository rule or module extension read that it must run again
+/// for if it changes, beyond what identifies it: as Bazel records them, the
+/// environment variables it read, and the files and trees it watched.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct RecordedInputs {
+    pub env: Vec<(String, Option<String>)>,
+    /// Files, by absolute path, with their digests, `None` if missing.
+    pub files: Vec<(String, Option<String>)>,
+    /// Directory trees, by absolute path, with their digests.
+    pub trees: Vec<(String, String)>,
+}
+
+impl RecordedInputs {
+    /// What a fetched repository's marker records, or nothing if it's from
+    /// a fetch that recorded nothing.
+    pub fn decode(bytes: &[u8]) -> RecordedInputs {
+        skycodec::from_bytes(bytes).unwrap_or_default()
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        skycodec::to_bytes(self)
+    }
+
+    /// Whether everything recorded is as it was, as `graph` sees it now;
+    /// what `graph` is computing depends on each.
+    pub fn is_current(&self, graph: &GraphAccess) -> bool {
+        let env = self.env.iter().all(|(name, value)| graph.env_var(name).is_ok_and(|now| now == *value));
+        let files = self.files.iter().all(|(path, digest)| graph.file_digest(Path::new(path)).is_ok_and(|now| now == *digest));
+        let trees = self.trees.iter().all(|(path, digest)| graph.tree_digest(Path::new(path)).is_ok_and(|now| now == *digest));
+        env && files && trees
+    }
+}
+
+/// Whether to watch a file that code reads: `yes`, `no`, or `auto`, which
+/// watches it if it may be watched.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Watch {
+    Yes,
+    No,
+    Auto,
+}
+
+impl Watch {
+    fn parse(value: Option<&str>) -> anyhow::Result<Watch> {
+        match value.unwrap_or("auto") {
+            "yes" => Ok(Watch::Yes),
+            "no" => Ok(Watch::No),
+            "auto" => Ok(Watch::Auto),
+            other => anyhow::bail!("bad value for 'watch' parameter; want 'yes', 'no', or 'auto', got {other}"),
+        }
+    }
 }
 
 /// A Starlark value with I/O methods.
@@ -49,6 +111,70 @@ pub fn io_of<'v>(value: Value<'v>) -> anyhow::Result<&'v IoState> {
 }
 
 impl IoState {
+    /// An environment variable, recorded as read.
+    fn getenv(&self, name: &str) -> anyhow::Result<Option<String>> {
+        let value = self.graph.env_var(name)?;
+        let mut recorded = self.recorded();
+        if !recorded.env.iter().any(|(recorded_name, _)| recorded_name == name) {
+            recorded.env.push((name.to_string(), value.clone()));
+        }
+        Ok(value)
+    }
+
+    /// Watch a file, as `watch` says, as Bazel decides: never one in the
+    /// directory being worked in, and one outside the workspace and the
+    /// repositories only where that's allowed.
+    fn watch_file(&self, path: &Path, watch: Watch) -> anyhow::Result<()> {
+        if !self.may_watch(path, watch)? {
+            return Ok(());
+        }
+        let digest = self.graph.file_digest(path)?;
+        let path = path.display().to_string();
+        let mut recorded = self.recorded();
+        if !recorded.files.iter().any(|(recorded_path, _)| *recorded_path == path) {
+            recorded.files.push((path, digest));
+        }
+        Ok(())
+    }
+
+    /// Watch a directory tree, every file and directory in it.
+    fn watch_tree(&self, path: &Path) -> anyhow::Result<()> {
+        if !self.may_watch(path, Watch::Yes)? {
+            return Ok(());
+        }
+        let digest = self.graph.tree_digest(path)?;
+        let path = path.display().to_string();
+        let mut recorded = self.recorded();
+        if !recorded.trees.iter().any(|(recorded_path, _)| *recorded_path == path) {
+            recorded.trees.push((path, digest));
+        }
+        Ok(())
+    }
+
+    fn may_watch(&self, path: &Path, watch: Watch) -> anyhow::Result<bool> {
+        if watch == Watch::No {
+            return Ok(false);
+        }
+        if path.starts_with(&self.base_dir) {
+            if watch == Watch::Auto {
+                return Ok(false);
+            }
+            anyhow::bail!("attempted to watch path under working directory");
+        }
+        let in_workspace = path.starts_with(self.graph.workspace_root()?) || path.starts_with(&self.repos_dir);
+        if !in_workspace && !self.watch_outside {
+            if watch == Watch::Auto {
+                return Ok(false);
+            }
+            anyhow::bail!("attempted to watch path outside workspace, but it's prohibited in the current context");
+        }
+        Ok(true)
+    }
+
+    fn recorded(&self) -> std::sync::MutexGuard<'_, RecordedInputs> {
+        self.recorded.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The path a value names: a string, relative to the base directory
     /// unless absolute; a `path`; or a label.
     pub fn path(&self, value: Value<'_>) -> anyhow::Result<PathBuf> {
@@ -355,9 +481,13 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         Ok(PathValue(io_of(this)?.path(path)?))
     }
 
-    fn read<'v>(this: Value<'v>, path: Value<'v>, #[starlark(require = named)] watch: Option<Value<'v>>) -> anyhow::Result<String> {
-        let _ = watch;
-        let path = io_of(this)?.path(path)?;
+    fn read<'v>(this: Value<'v>, path: Value<'v>, #[starlark(require = named)] watch: Option<&str>) -> anyhow::Result<String> {
+        let io = io_of(this)?;
+        let path = io.path(path)?;
+        io.watch_file(&path, Watch::parse(watch)?)?;
+        if path.is_dir() {
+            anyhow::bail!("attempting to read() a directory: {}", path.display());
+        }
         std::fs::read_to_string(&path).map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))
     }
 
@@ -380,11 +510,11 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         template: Value<'v>,
         substitutions: Option<Value<'v>>,
         #[starlark(default = true)] executable: bool,
-        #[starlark(require = named)] watch_template: Option<Value<'v>>,
+        #[starlark(require = named)] watch_template: Option<&str>,
     ) -> anyhow::Result<NoneType> {
-        let _ = watch_template;
         let io = io_of(this)?;
         let template = io.path(template)?;
+        io.watch_file(&template, Watch::parse(watch_template)?)?;
         let mut text = std::fs::read_to_string(&template).map_err(|error| anyhow::anyhow!("failed to read template {}: {error}", template.display()))?;
         if let Some(substitutions) = substitutions.and_then(DictRef::from_value) {
             for (from, to) in substitutions.iter() {
@@ -428,8 +558,8 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
     }
 
     fn getenv<'v>(this: Value<'v>, name: &str, default: Option<Value<'v>>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
-        Ok(match io_of(this)?.env.get(name) {
-            Some(value) => heap.alloc(value.as_str()),
+        Ok(match io_of(this)?.getenv(name)? {
+            Some(value) => heap.alloc(value),
             None => default.unwrap_or_else(Value::new_none),
         })
     }
@@ -566,16 +696,16 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         output: Option<Value<'v>>,
         #[starlark(default = "")] strip_prefix: &str,
         #[starlark(require = named)] rename_files: Option<Value<'v>>,
-        #[starlark(require = named)] watch_archive: Option<Value<'v>>,
+        #[starlark(require = named)] watch_archive: Option<&str>,
         #[starlark(require = named, default = "")] r#type: &str,
         #[allow(non_snake_case)]
         #[starlark(require = named)]
         stripPrefix: Option<&str>,
         #[starlark(require = named, default = 0)] strip_components: i32,
     ) -> anyhow::Result<NoneType> {
-        let _ = watch_archive;
         let io = io_of(this)?;
         let archive = io.path(archive)?;
+        io.watch_file(&archive, Watch::parse(watch_archive)?)?;
         let dest = match given_output(output) {
             Some(output) => io.path(output)?,
             None => io.base_dir.clone(),
@@ -591,11 +721,11 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         patch_file: Value<'v>,
         #[starlark(default = 0)] strip: i32,
         #[starlark(require = named)] directory: Option<Value<'v>>,
-        #[starlark(require = named)] watch_patch: Option<Value<'v>>,
+        #[starlark(require = named)] watch_patch: Option<&str>,
     ) -> anyhow::Result<NoneType> {
-        let _ = watch_patch;
         let io = io_of(this)?;
         let patch = io.path(patch_file)?;
+        io.watch_file(&patch, Watch::parse(watch_patch)?)?;
         let directory = match directory.filter(|directory| directory.unpack_str() != Some("")) {
             Some(directory) => io.path(directory)?,
             None => io.base_dir.clone(),
@@ -617,12 +747,14 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
     }
 
     fn watch<'v>(this: Value<'v>, path: Value<'v>) -> anyhow::Result<NoneType> {
-        let _ = (this, path);
+        let io = io_of(this)?;
+        io.watch_file(&io.path(path)?, Watch::Yes)?;
         Ok(NoneType)
     }
 
     fn watch_tree<'v>(this: Value<'v>, path: Value<'v>) -> anyhow::Result<NoneType> {
-        let _ = (this, path);
+        let io = io_of(this)?;
+        io.watch_tree(&io.path(path)?)?;
         Ok(NoneType)
     }
 }

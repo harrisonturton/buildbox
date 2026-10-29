@@ -159,16 +159,11 @@ and Bazel's summaries work as in Bazel. Missing:
 
 - **Lockfile.** `MODULE.bazel.lock` is neither read nor written:
   `--lockfile_mode=off` and `update` are taken, `refresh` and `error` are
-  errors. `extension_metadata`
-  and `repo_metadata(reproducible = ...)` are accepted and ignored, so
-  there are no `use_repo` fix-up warnings.
+  errors. `extension_metadata` and `repo_metadata(reproducible = ...)` are
+  accepted and ignored, so there are no `use_repo` fix-up warnings.
 - **Credential helpers** (`--credential_helper`) aren't implemented;
   downloads use `.netrc` only.
 - **Repository rules:**
-  - `repository_ctx.getenv` doesn't make the repository depend on the
-    variable, and `watch`, `watch_tree` and `read(watch = ...)` do nothing
-    (`bzlmod/io.rs`). Only `environ`, `--repo_env` and labels in the rule's
-    attributes cause a refetch.
   - `repository_ctx.rename` is missing.
   - `.7z`, `.deb` and `.ar` archives can't be extracted (`fetch/extract.rs`).
   - `execute(quiet = False)` doesn't show the output, and
@@ -241,8 +236,7 @@ like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
 
 ## Suggested order
 
-1. Credential helpers, and repository rules' `getenv` and `watch`
-   (section 8).
+1. Credential helpers (section 8).
 2. The lockfile (section 8).
 3. `map_each` over directories (section 4).
 4. The remote platform (section 2).

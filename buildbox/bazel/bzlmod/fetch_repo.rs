@@ -96,25 +96,43 @@ fn complete_marker(dest: &Path) -> PathBuf {
 /// directory keeps two fetches of it, such as one a cancelled command left
 /// running and a later command's, from working in it at once. Blocks.
 pub fn fetch_into(dest: &Path, fetch: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), SkyError> {
+    fetch_recording(dest, |_| true, |dir| fetch(dir).map(|()| Vec::new()))
+}
+
+/// [`fetch_into`], for a fetch that records what it read beyond what
+/// identifies the repository, which it returns and the marker keeps. A
+/// repository fetched before is kept if `still_current` says what its
+/// marker recorded is unchanged, and fetched again otherwise.
+pub fn fetch_recording(
+    dest: &Path,
+    still_current: impl FnOnce(&[u8]) -> bool,
+    fetch: impl FnOnce(&Path) -> Result<Vec<u8>, String>,
+) -> Result<(), SkyError> {
     let _lock = lock_beside(dest)?;
     let marker = complete_marker(dest);
-    if marker.exists() {
-        link_external(dest);
-        return Ok(());
+    if let Ok(recorded) = std::fs::read(&marker) {
+        if still_current(&recorded) {
+            link_external(dest);
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(&marker);
     }
     if dest.exists() {
         let _ = std::fs::remove_dir_all(dest);
     }
     std::fs::create_dir_all(dest).map_err(|error| SkyError::transient(format!("failed to create {}: {error}", dest.display())))?;
-    if let Err(message) = fetch(dest) {
-        let _ = std::fs::remove_dir_all(dest);
-        return Err(SkyError::transient(message));
-    }
+    let recorded = match fetch(dest) {
+        Ok(recorded) => recorded,
+        Err(message) => {
+            let _ = std::fs::remove_dir_all(dest);
+            return Err(SkyError::transient(message));
+        }
+    };
     let symlinked = dest.is_symlink();
     if !symlinked && !BOUNDARY_FILES.iter().any(|name| dest.join(name).exists()) {
         let _ = std::fs::write(dest.join("REPO.bazel"), b"");
     }
-    std::fs::write(&marker, b"").map_err(|error| SkyError::transient(format!("failed to write {}: {error}", marker.display())))?;
+    std::fs::write(&marker, recorded).map_err(|error| SkyError::transient(format!("failed to write {}: {error}", marker.display())))?;
     link_external(dest);
     Ok(())
 }
