@@ -70,6 +70,8 @@ pub struct ConfiguredTarget {
     /// The environment its `RunEnvironmentInfo` gives its executable when
     /// it's run or tested.
     pub run_env: RunEnvironment,
+    /// For a test, how its attributes, as configured, say to run it.
+    pub test: Option<TestAttrs>,
     size: usize,
 }
 
@@ -101,6 +103,27 @@ impl RunEnvironment {
             }
         }
         env.into_iter().collect()
+    }
+}
+
+/// How a test's attributes say to run it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TestAttrs {
+    /// `shard_count`: how many shards to split it into, or 0 for none.
+    pub shard_count: u32,
+    /// `flaky`: whether to try it again when it fails.
+    pub flaky: bool,
+}
+
+impl TestAttrs {
+    fn of(attrs: &[(Symbol, AttrValue)]) -> TestAttrs {
+        let attr = |name: &str| attrs.iter().find(|(attr, _)| attr.as_str() == name).map(|(_, value)| value);
+        let shard_count = match attr("shard_count") {
+            Some(AttrValue::Int(count)) => u32::try_from(*count).unwrap_or(0),
+            _ => 0,
+        };
+        let flaky = matches!(attr("flaky"), Some(AttrValue::Bool(true)));
+        TestAttrs { shard_count, flaky }
     }
 }
 
@@ -321,6 +344,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     let edges = dependency_edges(ctx, key, package, rule, &setup, &deps).await?;
     let applications = aspect_applications(&deps);
     let exec_platform = setup.toolchains.exec_platform.unwrap_or(key.config.get().host_platform);
+    let test = is_test.then(|| TestAttrs::of(&setup.attrs));
     let input = rule_input(ctx, key, package, setup, deps).await?;
     let analyzed = evaluate_reporting(ctx, label, input, heap_name("target", key, fingerprint)).await?;
     let executable = executable(&analyzed);
@@ -328,6 +352,7 @@ async fn analyze_rule(ctx: &Ctx, key: ConfiguredTargetKey, package: &Package, ru
     let mut target = configured(ctx, key, class_ref.kind, is_test, analyzed, fingerprint);
     target.executable = executable;
     target.run_env = run_env;
+    target.test = test;
     target.deps = edges;
     target.exec_platform = Some(exec_platform);
     target.aspects = applications;
@@ -1017,6 +1042,7 @@ pub(crate) fn forwarded(key: ConfiguredTargetKey, target: &ConfiguredTarget) -> 
         executable: None,
         args: target.args.clone(),
         run_env: target.run_env.clone(),
+        test: target.test,
         size: 64,
     })
 }
@@ -1058,6 +1084,7 @@ pub(crate) fn configured(ctx: &Ctx, key: ConfiguredTargetKey, kind: Symbol, is_t
         executable: None,
         args: analyzed.args,
         run_env: RunEnvironment::default(),
+        test: None,
         size,
     }
 }

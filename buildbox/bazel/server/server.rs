@@ -23,6 +23,7 @@ mod runfiles;
 mod running;
 mod service;
 mod test;
+mod test_options;
 mod top_level;
 mod workspace;
 mod written;

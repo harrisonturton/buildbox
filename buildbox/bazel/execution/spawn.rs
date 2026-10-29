@@ -32,9 +32,13 @@ pub struct SpawnRequest {
     pub env: Vec<(String, String)>,
     pub output_files: Vec<String>,
     pub output_directories: Vec<String>,
-    /// Whether the result may be taken from, and stored in, the action
-    /// cache.
+    /// Whether the result may be cached at all, which the action says.
     pub cacheable: bool,
+    /// Whether a cacheable result may be taken from the action cache.
+    pub read_cache: bool,
+    /// Whether a cacheable result that succeeds is stored in the action
+    /// cache.
+    pub write_cache: bool,
     pub timeout: Option<std::time::Duration>,
     /// What to call the command in messages.
     pub description: String,
@@ -76,7 +80,7 @@ pub struct SpawnResult {
 pub async fn execute(backend: &Backend, mut request: SpawnRequest) -> Result<SpawnResult, SkyError> {
     let inputs = std::mem::take(&mut request.inputs);
     let Prepared { action_digest, command, input_root } = prepare(backend, inputs, &request).await?;
-    if request.cacheable {
+    if request.cacheable && request.read_cache {
         let span = tracing::info_span!("action_cache_lookup");
         if let Some(result) = cached(backend, &action_digest).instrument(span).await? {
             return Ok(SpawnResult { result, cached: true });
@@ -95,7 +99,7 @@ pub async fn execute(backend: &Backend, mut request: SpawnRequest) -> Result<Spa
         .execute(&executable)
         .await
         .map_err(|error| SkyError::transient(format!("{}: {error}", request.description)))?;
-    if request.cacheable && result.exit_code == 0 {
+    if request.cacheable && request.write_cache && result.exit_code == 0 {
         upload_outputs(backend, &result).await?;
         backend
             .action_cache
@@ -182,6 +186,8 @@ pub async fn run(ctx: &Ctx, backend: &Arc<Backend>, action_key: ActionKey, actio
         output_files,
         output_directories,
         cacheable: !spawn.execution_info.iter().any(|(key, _)| key == "no-cache"),
+        read_cache: true,
+        write_cache: true,
         timeout: None,
         description: description(action, owner),
     };

@@ -23,4 +23,5 @@ pub use jobs::Jobs;
 pub use materialize::{RunfilesLayout, materialize, write_runfiles};
 pub use source::{SourceDigest, SourceDigestKey, SourceDigests};
 pub use spawn::{LocalActionCache, output_text};
-pub use test::{TestKey, TestResult, TestSettings, TestStatus, next_epoch, repo_mapping};
+pub use materialize::write_tree;
+pub use test::{UNDECLARED_OUTPUTS, Attempt, CacheResults, TestKey, TestResult, TestRun, TestSettings, TestStatus, next_epoch, repo_mapping};

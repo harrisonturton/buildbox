@@ -5,14 +5,15 @@ use crate::command::{CommandContext, exit};
 use crate::output::Output;
 use crate::workspace::Workspace;
 use bazel_analysis::ConfiguredTargetKey;
-use bazel_execution::{Backend, TestKey, TestResult, TestSettings, TestStatus};
+use crate::test_options::TestRepetition;
+use bazel_execution::{Backend, CacheResults, TestKey, TestResult, TestRun, TestSettings, TestStatus};
 use bazel_loading::PackageKey;
 use bazel_options::ParsedOptions;
 use bazel_packages::Target;
 use std::collections::{BTreeMap, HashMap};
 use bazel_label::Label;
 use skyframe::Session;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -38,6 +39,13 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
             return exit::COMMAND_LINE_ERROR;
         }
     };
+    let repetition = match TestRepetition::parse(&options) {
+        Ok(repetition) => repetition,
+        Err(message) => {
+            out.error(&message).await;
+            return exit::COMMAND_LINE_ERROR;
+        }
+    };
     let epoch = bazel_execution::next_epoch();
     let workspace = context.server.workspaces().get(&context.workspace_root);
     crate::command::refresh(context, &workspace, &options).await;
@@ -56,7 +64,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
         return exit::BUILD_FAILURE;
     }
 
-    let tests = select_tests(&session, &built, &options, &settings, &context.env, out).await;
+    let tests = select_tests(&session, &built, &options, &settings, &repetition, &context.env, out).await;
     let skipped: Vec<Label> = built
         .targets
         .iter()
@@ -72,6 +80,7 @@ pub async fn test(context: &CommandContext<'_>, args: &[String], out: &Output) -
     let session = retry_failures(&workspace, session, &tests, &options).await;
     let output_mode = options.get("test_output").unwrap_or("summary").to_string();
     let results = run_tests(context, &session, &tests, &built, epoch, &output_mode, out).await;
+    report_summaries(&results, &built, out).await;
     drop(session);
 
     let failed = results.iter().filter(|(_, result)| !passed(result)).count();
@@ -92,7 +101,12 @@ fn test_settings(context: &CommandContext<'_>, options: &ParsedOptions) -> Resul
         args: options.all("test_arg").into_iter().map(str::to_string).collect(),
         env: test_env(&context.env, &options.all("test_env")),
         timeouts: test_timeouts(options.get("test_timeout").unwrap_or("-1"))?,
-        cached: options.get("cache_test_results") != Some("false"),
+        cache_results: match options.get("cache_test_results") {
+            Some("true") => CacheResults::Yes,
+            Some("false") => CacheResults::No,
+            _ => CacheResults::Auto,
+        },
+        zip_outputs: options.flag("zip_undeclared_test_outputs", false),
     })
 }
 
@@ -143,6 +157,7 @@ async fn select_tests(
     built: &Built,
     options: &ParsedOptions,
     settings: &TestSettings,
+    repetition: &TestRepetition,
     client: &HashMap<String, String>,
     out: &Output,
 ) -> Vec<TestKey> {
@@ -156,21 +171,36 @@ async fn select_tests(
     if selected.is_empty() && !candidates.is_empty() {
         out.warning("All specified test targets were excluded by filters").await;
     }
-    selected
-        .into_iter()
-        .map(|target| TestKey {
-            target,
-            settings: settings.clone(),
-            inherited_env: inherited_env(built, target, client),
-        })
-        .collect()
+    let mut keys = Vec::new();
+    for target in selected {
+        let attrs = built_target(built, target).and_then(|built| built.test).unwrap_or_default();
+        let label = target.label.to_string();
+        let shards = repetition.shards(attrs.shard_count);
+        let attempts = repetition.attempts(&label, attrs.flaky);
+        let inherited_env = inherited_env(built, target, client);
+        for run in TestRun::all(shards, repetition.runs(&label)) {
+            keys.push(TestKey {
+                target,
+                settings: settings.clone(),
+                inherited_env: inherited_env.clone(),
+                run,
+                attempts,
+            });
+        }
+    }
+    keys
+}
+
+/// The configured target of a test the build built.
+fn built_target(built: &Built, test: ConfiguredTargetKey) -> Option<&bazel_analysis::ConfiguredTarget> {
+    let found = built.targets.iter().find(|(label, target, _)| *label == test.label && target.config == test.config);
+    found.map(|(_, target, _)| target.as_ref())
 }
 
 /// The client's values of the variables a test's `RunEnvironmentInfo`
 /// inherits.
 fn inherited_env(built: &Built, test: ConfiguredTargetKey, client: &HashMap<String, String>) -> Vec<(String, String)> {
-    let target = built.targets.iter().find(|(label, target, _)| *label == test.label && target.config == test.config);
-    let Some((_, target, _)) = target else {
+    let Some(target) = built_target(built, test) else {
         return Vec::new();
     };
     let mut env: Vec<(String, String)> = target
@@ -239,7 +269,7 @@ fn status_width(label: &str, prefix: &str, word: &str) -> usize {
 }
 
 fn passed(result: &Result<Arc<TestResult>, String>) -> bool {
-    matches!(result, Ok(result) if result.status == TestStatus::Passed)
+    matches!(result, Ok(result) if matches!(result.status, TestStatus::Passed | TestStatus::Flaky))
 }
 
 /// Run the tests, writing their logs to the testlogs tree and reporting
@@ -258,8 +288,8 @@ async fn run_tests(
     for (key, result) in tests.iter().zip(results) {
         let result = result.map_err(|error| error.message().to_string());
         if let Ok(test) = &result {
-            let log = write_logs(context.server.backend(), built, key, test).await;
-            report_test(key, test, &log, built, epoch, output_mode, out).await;
+            write_logs(context.server.backend(), built, key, test).await;
+            report_test(key, test, built, epoch, output_mode, out).await;
         }
         if let Err(message) = &result {
             out.error(message).await;
@@ -273,45 +303,100 @@ async fn run_tests(
 fn testlogs_dir(built: &Built, key: &TestKey) -> PathBuf {
     let config = built.config.get();
     let relative = bazel_analysis::package_dir(key.target.label.package).join_path(bazel_analysis::name_path(key.target.label));
-    built.exec_root.join("bazel-out").join(&config.output_directory).join("testlogs").join(relative.to_string())
+    let dir = built.exec_root.join("bazel-out").join(&config.output_directory).join("testlogs").join(relative.to_string());
+    match key.run.dir() {
+        Some(run) => dir.join(run),
+        None => dir,
+    }
 }
 
-/// Write a test's `test.log` and `test.xml`, returning the log's path.
-async fn write_logs(backend: Option<&Arc<Backend>>, built: &Built, key: &TestKey, result: &TestResult) -> PathBuf {
+/// The logs of the failed attempts before a test's last.
+fn attempt_log(built: &Built, key: &TestKey, attempt: usize, extension: &str) -> PathBuf {
+    testlogs_dir(built, key).join("test_attempts").join(format!("attempt_{}.{extension}", attempt + 1))
+}
+
+/// The logs of a test's run that failed: its failed attempts', and its
+/// own if it failed too.
+fn failed_logs(built: &Built, key: &TestKey, result: &TestResult) -> Vec<PathBuf> {
+    let mut logs: Vec<PathBuf> = (0..result.failed_attempts.len()).map(|attempt| attempt_log(built, key, attempt, "log")).collect();
+    if !matches!(result.status, TestStatus::Passed | TestStatus::Flaky) {
+        logs.push(testlogs_dir(built, key).join("test.log"));
+    }
+    logs
+}
+
+/// Write a test's `test.log`, `test.xml`, the other files it left, and
+/// the logs of its failed attempts.
+async fn write_logs(backend: Option<&Arc<Backend>>, built: &Built, key: &TestKey, result: &TestResult) {
     let dir = testlogs_dir(built, key);
-    let log = dir.join("test.log");
     let Some(backend) = backend else {
-        return log;
+        return;
     };
-    let _ = tokio::fs::create_dir_all(&dir).await;
-    for (name, digest) in [("test.log", result.log), ("test.xml", result.xml)] {
-        let path = dir.join(name);
+    for stale in ["test_attempts", "test.outputs", "test.outputs_manifest"] {
+        let _ = tokio::fs::remove_dir_all(dir.join(stale)).await;
+    }
+    let mut files: Vec<(PathBuf, Option<bazel_execution::BlobDigest>)> = vec![(dir.join("test.log"), result.log), (dir.join("test.xml"), result.xml)];
+    files.extend(result.outputs.iter().map(|(path, digest)| (dir.join(path), Some(*digest))));
+    for (index, attempt) in result.failed_attempts.iter().enumerate() {
+        files.push((attempt_log(built, key, index, "log"), attempt.log));
+        files.push((attempt_log(built, key, index, "xml"), attempt.xml));
+    }
+    if let Some(tree) = result.undeclared_outputs {
+        let dest = dir.join(bazel_execution::UNDECLARED_OUTPUTS);
+        if let Err(error) = bazel_execution::write_tree(backend, &tree.to_cas(), &dest).await {
+            tracing::warn!("failed to write {}: {}", dest.display(), error.message());
+        }
+    }
+    for (path, digest) in files {
         let _ = tokio::fs::remove_file(&path).await;
         let Some(digest) = digest else {
             continue;
         };
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
         if let Err(error) = backend.cas.materialize(&digest.to_cas(), &path, false).await {
             tracing::warn!("failed to write {}: {error}", path.display());
         }
     }
-    log
 }
 
-async fn report_test(key: &TestKey, result: &TestResult, log: &Path, built: &Built, epoch: u64, output_mode: &str, out: &Output) {
+/// The test's label, and which shard and run of it `key` is.
+fn test_name(key: &TestKey, built: &Built) -> String {
     let shown = bazel_query::display_label(key.target.label, &built.main_mapping);
-    let failed = result.status != TestStatus::Passed;
+    match key.run.suffix().as_str() {
+        "" => shown,
+        suffix => format!("{shown} {suffix}"),
+    }
+}
+
+async fn report_test(key: &TestKey, result: &TestResult, built: &Built, epoch: u64, output_mode: &str, out: &Output) {
+    let shown = test_name(key, built);
+    let log = testlogs_dir(built, key).join("test.log");
+    if result.epoch >= epoch {
+        for (index, attempt) in result.failed_attempts.iter().enumerate() {
+            let reason = failure_reason(attempt.status, attempt.exit_code);
+            out.stderr(&format!("FAIL: {shown} ({reason}) (see {})\n", attempt_log(built, key, index, "log").display())).await;
+        }
+    }
+    let failed = !matches!(result.status, TestStatus::Passed | TestStatus::Flaky);
     if failed && result.epoch >= epoch {
-        let reason = match result.status {
-            TestStatus::TimedOut => "TIMEOUT".to_string(),
-            _ => format!("Exit {}", result.exit_code),
-        };
+        let reason = failure_reason(result.status, result.exit_code);
         out.stderr(&format!("FAIL: {shown} ({reason}) (see {})\n", log.display())).await;
     }
     let show_log = output_mode == "all" || (output_mode == "errors" && failed);
     if show_log && (result.epoch >= epoch || failed) {
-        let text = tokio::fs::read_to_string(log).await.unwrap_or_default();
+        let text = tokio::fs::read_to_string(&log).await.unwrap_or_default();
         out.info(&format!("From Testing {shown}:")).await;
         out.stdout(&format!("==================== Test output for {shown}:\n{}{}\n", without_preamble(&text), "=".repeat(80))).await;
+    }
+}
+
+/// Why a run failed, as Bazel says it.
+fn failure_reason(status: TestStatus, exit_code: i32) -> String {
+    match status {
+        TestStatus::TimedOut => "TIMEOUT".to_string(),
+        _ => format!("Exit {exit_code}"),
     }
 }
 
@@ -322,6 +407,138 @@ fn without_preamble(log: &str) -> &str {
     match log.find(SEPARATOR) {
         Some(index) => &log[index + SEPARATOR.len()..],
         None => log,
+    }
+}
+
+/// The results of a test's shards and runs, together, as Bazel summarizes
+/// them.
+struct Summary<'a> {
+    label: Label,
+    /// Each run's key and result.
+    runs: Vec<(&'a TestKey, &'a Result<Arc<TestResult>, String>)>,
+}
+
+impl Summary<'_> {
+    /// The worst of the runs' statuses, as Bazel aggregates them, or
+    /// `None` if a run has none.
+    fn status(&self) -> Option<TestStatus> {
+        let mut worst = TestStatus::Passed;
+        for (_, result) in &self.runs {
+            let Ok(result) = result else {
+                return None;
+            };
+            if severity(result.status) > severity(worst) {
+                worst = result.status;
+            }
+        }
+        Some(worst)
+    }
+
+    /// How many runs' results were cached, by the action cache or from an
+    /// earlier command.
+    fn cached(&self, epoch: u64) -> usize {
+        let cached = |result: &TestResult| result.cached || result.epoch < epoch;
+        self.runs.iter().filter(|(_, result)| matches!(result, Ok(result) if cached(result))).count()
+    }
+
+    fn failed_logs(&self, built: &Built) -> Vec<PathBuf> {
+        let mut logs = Vec::new();
+        for (key, result) in &self.runs {
+            if let Ok(result) = result {
+                logs.extend(failed_logs(built, key, result));
+            }
+        }
+        logs
+    }
+
+    /// How many attempts ran, passed or failed.
+    fn attempts(&self) -> usize {
+        let each = |result: &Result<Arc<TestResult>, String>| match result {
+            Ok(result) => result.failed_attempts.len() + 1,
+            Err(_) => 0,
+        };
+        self.runs.iter().map(|(_, result)| each(result)).sum()
+    }
+
+    /// How long each attempt of each run took.
+    fn times_ms(&self) -> Vec<u64> {
+        let mut times = Vec::new();
+        for (_, result) in &self.runs {
+            if let Ok(result) = result {
+                times.extend(result.failed_attempts.iter().map(|attempt| attempt.duration_ms));
+                times.push(result.duration_ms);
+            }
+        }
+        times
+    }
+
+    /// How many attempts ran in this command rather than coming from a
+    /// cache.
+    fn uncached_attempts(&self, epoch: u64) -> usize {
+        let each = |result: &TestResult| match result.cached || result.epoch < epoch {
+            true => 0,
+            false => result.failed_attempts.len() + 1,
+        };
+        self.runs.iter().filter_map(|(_, result)| result.as_ref().ok()).map(|result| each(result)).sum()
+    }
+}
+
+/// How bad a status is, as Bazel orders `BlazeTestStatus`.
+fn severity(status: TestStatus) -> u8 {
+    match status {
+        TestStatus::Passed => 1,
+        TestStatus::Flaky => 2,
+        TestStatus::TimedOut => 3,
+        TestStatus::Failed => 4,
+    }
+}
+
+fn status_word(status: Option<TestStatus>) -> &'static str {
+    match status {
+        Some(TestStatus::Passed) => "PASSED",
+        Some(TestStatus::Flaky) => "FLAKY",
+        Some(TestStatus::Failed) => "FAILED",
+        Some(TestStatus::TimedOut) => "TIMEOUT",
+        None => "NO STATUS",
+    }
+}
+
+/// The results of each test, its shards' and runs' together, in the order
+/// they were run.
+fn summaries<'a>(results: &'a [(TestKey, Result<Arc<TestResult>, String>)]) -> Vec<Summary<'a>> {
+    let mut summaries: Vec<Summary<'a>> = Vec::new();
+    for (key, result) in results {
+        match summaries.iter_mut().find(|summary| summary.label == key.target.label && summary.runs[0].0.target == key.target) {
+            Some(summary) => summary.runs.push((key, result)),
+            None => summaries.push(Summary {
+                label: key.target.label,
+                runs: vec![(key, result)],
+            }),
+        }
+    }
+    summaries
+}
+
+/// Report what Bazel reports when a test's results are in: the logs of
+/// each failure, for statuses that say more than a single failure does.
+async fn report_summaries(results: &[(TestKey, Result<Arc<TestResult>, String>)], built: &Built, out: &Output) {
+    for summary in summaries(results) {
+        let status = summary.status();
+        let logs = summary.failed_logs(built);
+        let news = match status {
+            None | Some(TestStatus::Passed) => false,
+            Some(TestStatus::Failed) => logs.len() != 1,
+            Some(_) => true,
+        };
+        if !news {
+            continue;
+        }
+        let label = bazel_query::display_label(summary.label, &built.main_mapping);
+        let mut text = format!("{}: {label} (Summary)\n", status_word(status));
+        for log in logs {
+            text.push_str(&format!("      {}\n", log.display()));
+        }
+        out.stderr(&text).await;
     }
 }
 
@@ -336,35 +553,35 @@ async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipp
     let mut passes = 0;
     let mut failures = 0;
     let mut wrong_size = false;
-    let mut ordered: Vec<&(TestKey, Result<Arc<TestResult>, String>)> = results.iter().collect();
-    ordered.sort_by_key(|(key, result)| summary_order(result, epoch, key));
-    for (key, result) in ordered {
-        let (word, prefix, seconds) = match result {
-            Ok(result) => {
-                let cached = result.cached || result.epoch < epoch;
-                executed += usize::from(!cached);
-                wrong_size |= result.status == TestStatus::Passed && result.wrong_size();
-                let word = match result.status {
-                    TestStatus::Passed => "PASSED",
-                    TestStatus::Failed => "FAILED",
-                    TestStatus::TimedOut => "TIMEOUT",
-                };
-                (word, if cached { "(cached) " } else { "" }, result.duration_ms as f64 / 1000.0)
-            }
-            Err(_) => ("NO STATUS", "", 0.0),
-        };
-        match word {
-            "PASSED" => passes += 1,
+    let mut summaries = summaries(results);
+    summaries.sort_by_key(|summary| summary_order(summary, epoch));
+    for summary in &summaries {
+        let status = summary.status();
+        let cached = summary.cached(epoch);
+        executed += usize::from(cached < summary.runs.len());
+        wrong_size |= summary.runs.iter().any(|(_, result)| matches!(result, Ok(result) if result.status == TestStatus::Passed && result.wrong_size()));
+        match status {
+            Some(TestStatus::Passed | TestStatus::Flaky) => passes += 1,
             _ => failures += 1,
         }
-        let label = bazel_query::display_label(key.target.label, &built.main_mapping);
-        let width = status_width(&label, prefix, word);
-        out.stdout(&format!("{label:<width$}{prefix}{word} in {seconds:.1}s\n")).await;
-        if word != "PASSED" {
-            out.stdout(&format!("  {}\n", testlogs_dir(built, key).join("test.log").display())).await;
+        let word = status_word(status);
+        let prefix = match (status, cached) {
+            (None, _) | (_, 0) => String::new(),
+            (_, cached) if cached == summary.runs.len() => "(cached) ".to_string(),
+            (_, cached) => format!("({cached}/{} cached) ", summary.runs.len()),
+        };
+        let label = bazel_query::display_label(summary.label, &built.main_mapping);
+        let width = status_width(&label, &prefix, word);
+        let details = match status {
+            None => String::new(),
+            Some(status) => attempts_detail(status, summary.failed_logs(built).len(), summary.attempts()) + &time_detail(&summary.times_ms()),
+        };
+        out.stdout(&format!("{label:<width$}{prefix}{word}{details}\n")).await;
+        for log in summary.failed_logs(built) {
+            out.stdout(&format!("  {}\n", log.display())).await;
         }
     }
-    let total = results.len() + skipped.len();
+    let total = summaries.len() + skipped.len();
     let tests = if total == 1 { "test" } else { "tests" };
     let mut parts = Vec::new();
     match passes {
@@ -388,21 +605,59 @@ async fn summarize(results: &[(TestKey, Result<Arc<TestResult>, String>)], skipp
     }
 }
 
-/// Where Bazel lists a test's result: cached ones first, then by status,
-/// passes first, then by label.
-fn summary_order(result: &Result<Arc<TestResult>, String>, epoch: u64, key: &TestKey) -> (bool, i32, String, TestKey) {
-    let (cached, status) = match result {
-        Ok(result) => {
-            let status = match result.status {
-                TestStatus::Passed => -1,
-                TestStatus::TimedOut => 3,
-                TestStatus::Failed => 4,
-            };
-            (result.cached || result.epoch < epoch, status)
+/// How many of a test's attempts failed, as Bazel adds it to the status
+/// of a test tried more than once.
+fn attempts_detail(status: TestStatus, failed: usize, attempts: usize) -> String {
+    if attempts <= 1 {
+        return String::new();
+    }
+    match status {
+        TestStatus::Flaky => format!(", failed in {failed} out of {attempts}"),
+        TestStatus::Failed | TestStatus::TimedOut => format!(" in {failed} out of {attempts}"),
+        TestStatus::Passed => String::new(),
+    }
+}
+
+/// How long a test took: its one run's time, or for several, the longest
+/// and statistics over them, as Bazel prints them.
+fn time_detail(times_ms: &[u64]) -> String {
+    let seconds = |ms: u64| format!("{:.1}s", ms as f64 / 1000.0);
+    match times_ms {
+        [] => String::new(),
+        [only] => format!(" in {}", seconds(*only)),
+        times => {
+            let max = times.iter().copied().max().unwrap_or(0);
+            let min = times.iter().copied().min().unwrap_or(0);
+            let sum: u64 = times.iter().sum();
+            let count = times.len() as f64;
+            let mean = sum as f64 / count;
+            let squares: f64 = times.iter().map(|time| (*time as f64) * (*time as f64)).sum();
+            let deviation = ((squares - sum as f64 * mean) / count).max(0.0).sqrt();
+            format!(
+                " in {}\n  Stats over {} runs: max = {}, min = {}, avg = {}, dev = {}",
+                seconds(max),
+                times.len(),
+                seconds(max),
+                seconds(min),
+                seconds(mean as u64),
+                seconds(deviation as u64)
+            )
         }
-        Err(_) => (false, 0),
+    }
+}
+
+/// Where Bazel lists a test's result: cached ones first, then those with
+/// fewer attempts run, then by status, passes first, then by label.
+fn summary_order(summary: &Summary<'_>, epoch: u64) -> (bool, usize, i32, String) {
+    let status = match summary.status() {
+        Some(TestStatus::Passed) => -1,
+        Some(TestStatus::Flaky) => 2,
+        Some(TestStatus::TimedOut) => 3,
+        Some(TestStatus::Failed) => 4,
+        None => 0,
     };
-    (!cached, status, key.target.label.to_string(), key.clone())
+    let cached = summary.status().is_some() && summary.cached(epoch) == summary.runs.len();
+    (!cached, summary.uncached_attempts(epoch), status, summary.label.to_string())
 }
 
 /// Items joined as Bazel joins them in English: `a`, `a and b`, or `a, b,

@@ -41,7 +41,7 @@ async fn write_file(backend: &Backend, digest: &cas::Digest, dest: &Path, execut
 }
 
 /// Write a directory output from its `Tree`.
-async fn write_tree(backend: &Backend, digest: &cas::Digest, dest: &Path) -> Result<(), SkyError> {
+pub async fn write_tree(backend: &Backend, digest: &cas::Digest, dest: &Path) -> Result<(), SkyError> {
     let bytes = backend.cas.read_bytes(digest).await.map_err(cas_error)?;
     let tree = reapi::Tree::decode_from_slice(&bytes).map_err(|error| SkyError::new(format!("invalid Tree {digest}: {error}")))?;
     let mut children = std::collections::HashMap::new();

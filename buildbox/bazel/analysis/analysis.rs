@@ -54,7 +54,7 @@ pub use inputs::{InputSet, KnownSets};
 pub use artifact::{Artifact, name_path, package_dir, parse as parse_path, repo_dir, runfiles_repo_name};
 pub use attrs::{ConfiguredAttrs, ConfiguredAttrsKey};
 pub use transition::native_value;
-pub use configured::{ConfiguredDep, ConfiguredTarget, ConfiguredTargetKey, Executable, Incompatibility, Providers, RunEnvironment};
+pub use configured::{ConfiguredDep, ConfiguredTarget, ConfiguredTargetKey, Executable, Incompatibility, Providers, RunEnvironment, TestAttrs};
 pub use file_value::FileValue;
 pub use platform::{Platform, PlatformKey};
 pub use repo_mapping::repo_mapping_manifest;
