@@ -177,11 +177,15 @@ rather than misbehaving. Still missing:
 - **Build Event Protocol.** `--build_event_json_file` and
   `--build_event_binary_file` write Bazel's events for the command line,
   options, patterns, configurations, targets and their files, test results
-  and summaries, and the outcome (`server/build_events.rs`). Missing are
-  `--bes_backend` and the other `--bes_*` options, `--build_event_text_file`,
-  structured command lines, action events, progress events while the
-  command runs (bb posts one at the end), and source files in a target's
-  named sets of files.
+  and summaries, and the outcome (`server/build_events.rs`), and
+  `--bes_backend` streams them to a Build Event Service over gRPC or TLS
+  (`bes/`), with Bazel's lifecycle events, retries, keywords, headers and
+  exit codes. `--bes_upload_mode` other than `wait_for_upload_complete`
+  doesn't wait, but the next command doesn't wait for it either, and
+  `--bes_proxy` and credential helpers are missing. Also missing are
+  `--build_event_text_file`, structured command lines, action events,
+  progress events while the command runs (bb posts one at the end), and
+  source files in a target's named sets of files.
 - No execution log (`--execution_log_*`), no `--profile` JSON trace and
   no `analyze-profile`, no `--explain`, and no `--announce_rc`.
 - `dump` prints bb's own engine statistics; Bazel's `--action_cache`,
@@ -285,6 +289,5 @@ like Bazel's `darwin-sandbox`. Windows isn't supported, so `cmd_bat` and
 3. The remote platform (section 2).
 4. Test sharding, undeclared outputs and the remaining test options
    (section 6).
-5. The Build Event Protocol (section 7).
 6. The lockfile (section 8).
 7. Apple (section 1), which needs most of the above first.

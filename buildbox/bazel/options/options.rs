@@ -3,10 +3,12 @@
 //! or a query).
 
 mod bazel;
+mod duration;
 mod jobs;
 mod rc;
 
 pub use bazel::{BazelKind, BazelOption, bazel_option};
+pub use duration::convert_duration;
 pub use jobs::{MAX_JOBS, convert_jobs};
 pub use rc::{RcFile, RcError, parse_rc_files};
 

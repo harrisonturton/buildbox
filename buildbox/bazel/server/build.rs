@@ -50,6 +50,18 @@ pub fn build_spec() -> OptionSpec {
         ("repositories_without_autoloads", Value),
         ("build_event_json_file", Value),
         ("build_event_binary_file", Value),
+        ("bes_backend", Value),
+        ("bes_check_preceding_lifecycle_events", Bool),
+        ("bes_header", Multi),
+        ("bes_instance_name", Value),
+        ("bes_keywords", Multi),
+        ("bes_lifecycle_events", Bool),
+        ("bes_results_url", Value),
+        ("bes_system_keywords", Multi),
+        ("bes_timeout", Value),
+        ("bes_upload_mode", Value),
+        ("build_request_id", Value),
+        ("tls_certificate", Value),
         ("verbose_failures", Bool),
         ("jobs", Jobs),
         ("test_output", Value),
@@ -107,6 +119,9 @@ pub fn command_spec(command: &str) -> OptionSpec {
 /// repository caches do, and uses no remote cache, so whether to upload to
 /// one doesn't arise.
 pub const NO_OP_OPTIONS: &[(&str, OptionKind)] = &[
+    ("bes_oom_finish_upload_timeout", OptionKind::Value),
+    ("bes_outerr_buffer_size", OptionKind::Value),
+    ("bes_outerr_chunk_size", OptionKind::Value),
     ("experimental_check_external_repository_files", OptionKind::Bool),
     ("experimental_repository_cache_hardlinks", OptionKind::Bool),
     ("heap_dump_on_oom", OptionKind::Bool),

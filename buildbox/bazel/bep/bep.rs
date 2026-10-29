@@ -1,8 +1,10 @@
-//! The Build Event Protocol: a command's events, written as Bazel's
-//! `--build_event_json_file` and `--build_event_binary_file` write them.
+//! The Build Event Protocol: a command's events, and the transports they go
+//! out on, such as the files Bazel's `--build_event_json_file` and
+//! `--build_event_binary_file` name.
 
 pub mod events;
 
+use async_trait::async_trait;
 use buffa::Message;
 use events::BuildEvent;
 use std::io;
@@ -11,6 +13,33 @@ use std::sync::Mutex;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+/// Somewhere a command's build events go, in the order they're posted.
+#[async_trait]
+pub trait Transport: Send + Sync {
+    /// Send an event, after those posted before it. Events posted after
+    /// the transport closes are dropped.
+    fn post(&self, event: BuildEvent);
+
+    /// Wait until every event posted has gone, as far as the transport
+    /// waits, and stop taking more. Closing again does nothing.
+    async fn close(&self) -> Result<(), TransportError>;
+}
+
+/// Why a transport couldn't send every event.
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("Unable to write build events: {0}")]
+    Write(io::Error),
+
+    /// The Build Event Service upload failed, `transient`ly if trying again
+    /// later might work.
+    #[error("The Build Event Protocol upload failed: {message}")]
+    Upload { message: String, transient: bool },
+
+    #[error("The Build Event Protocol upload timed out.")]
+    Timeout,
+}
 
 /// Where a command's build events go: a file of JSON lines and a file of
 /// length-delimited protos, written in the order events are posted, by a
@@ -42,28 +71,28 @@ impl BuildEventLog {
             writer: Mutex::new(Some(writer)),
         }))
     }
+}
 
+#[async_trait]
+impl Transport for BuildEventLog {
     /// Write an event, after those posted before it. Events posted after
-    /// the log closes are dropped, and so are those posted after writing
-    /// failed, which `close` reports.
-    pub fn post(&self, event: BuildEvent) {
+    /// writing failed are dropped too, and `close` reports the failure.
+    fn post(&self, event: BuildEvent) {
         let events = self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(events) = events.as_ref() {
             let _ = events.send(event);
         }
     }
 
-    /// Write the last event, marked as last, and wait until every event is
-    /// written. Closing a log again does nothing.
-    pub async fn close(&self, mut last: BuildEvent) -> io::Result<()> {
-        last.last_message = true;
-        self.post(last);
+    /// Wait until every event is written.
+    async fn close(&self) -> Result<(), TransportError> {
         self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         let writer = self.writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
-        match writer {
-            Some(writer) => writer.await.map_err(io::Error::other)?,
-            None => Ok(()),
-        }
+        let Some(writer) = writer else {
+            return Ok(());
+        };
+        let written = writer.await.map_err(|error| TransportError::Write(io::Error::other(error)))?;
+        written.map_err(TransportError::Write)
     }
 }
 

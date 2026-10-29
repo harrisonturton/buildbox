@@ -6,6 +6,7 @@
 //! concurrently, in the same workspace or different ones; there is no
 //! server lock.
 
+mod bes;
 mod build;
 mod build_events;
 mod build_id;

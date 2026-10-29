@@ -1,7 +1,38 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("//bazel/connect:defs.bzl", "rust_connect_library")
 
 rust_connect_library(
     name = "bytestream_rust_connect",
     protos = ["@googleapis//google/bytestream:bytestream_proto"],
+    visibility = ["//buildbox:__subpackages__"],
+)
+
+# The Build Event Service's protos, copied from the googleapis module because
+# its BUILD file for them no longer loads under Bazel 9 (it calls the removed
+# native py_test).
+proto_library(
+    name = "build_proto",
+    srcs = [
+        "google/devtools/build/v1/build_events.proto",
+        "google/devtools/build/v1/build_status.proto",
+        "google/devtools/build/v1/publish_build_event.proto",
+    ],
+    strip_import_prefix = "/third_party/googleapis",
+    deps = [
+        "@googleapis//google/api:annotations_proto",
+        "@googleapis//google/api:client_proto",
+        "@googleapis//google/api:field_behavior_proto",
+        "@protobuf//:any_proto",
+        "@protobuf//:duration_proto",
+        "@protobuf//:empty_proto",
+        "@protobuf//:timestamp_proto",
+        "@protobuf//:wrappers_proto",
+    ],
+)
+
+# The Build Event Service, which `--bes_backend` streams build events to.
+rust_connect_library(
+    name = "build_rust_connect",
+    protos = [":build_proto"],
     visibility = ["//buildbox:__subpackages__"],
 )

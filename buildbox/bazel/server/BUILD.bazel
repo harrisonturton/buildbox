@@ -22,6 +22,7 @@ rust_connect_library(
 rust_library(
     name = "server",
     srcs = [
+        "bes.rs",
         "build.rs",
         "build_events.rs",
         "build_id.rs",
@@ -75,6 +76,7 @@ rust_library(
         ":bazel_rust_connect",
         "//buildbox/bazel/analysis",
         "//buildbox/bazel/bep",
+        "//buildbox/bazel/bes",
         "//buildbox/bazel/bzlmod",
         "//buildbox/bazel/config",
         "//buildbox/bazel/execution",

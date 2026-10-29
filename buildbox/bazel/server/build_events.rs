@@ -1,13 +1,15 @@
 //! A command's build events: opening the files `--build_event_json_file`
-//! and `--build_event_binary_file` name, the events every command starts
-//! and ends with, and keeping the stream whole, every announced event
-//! posted or reported aborted, as Bazel's is.
+//! and `--build_event_binary_file` name and the Build Event Service
+//! `--bes_backend` names, the events every command starts and ends with,
+//! and keeping the stream whole, every announced event posted or reported
+//! aborted, as Bazel's is.
 
 use crate::command::{CommandContext, PRODUCT, VERSION, exit};
 use crate::output::Output;
 use bazel_analysis::ConfiguredTarget;
 use bazel_analysis::workspace_status::StatusValues;
-use bazel_bep::BuildEventLog;
+use crate::bes::BesStream;
+use bazel_bep::{BuildEventLog, Transport, TransportError};
 use bazel_bep::events::{self, BuildEvent, BuildEventId, FileRef, Started};
 use bazel_config::BuildConfiguration;
 use bazel_execution::OutputFile;
@@ -47,35 +49,74 @@ pub async fn start(context: &CommandContext<'_>, command: &str, args: &[String],
         explicit_options: explicit.clone(),
         patterns: options.residue.clone(),
     };
-    match BuildEvents::open(json.as_deref(), binary.as_deref(), info).await {
-        Ok(Some(events)) => {
-            out.set_build_events(Arc::new(events));
-            Ok(())
+    let files = match BuildEventLog::open(json, binary).await {
+        Ok(files) => files,
+        Err(error) => {
+            out.error(&format!("Unable to write build events: {error}")).await;
+            return Err(exit::LOCAL_ENVIRONMENTAL_ERROR);
         }
-        Ok(None) => Ok(()),
-        Err(message) => {
-            out.error(&message).await;
-            Err(exit::LOCAL_ENVIRONMENTAL_ERROR)
+    };
+    let service = match crate::bes::stream(context, command, options) {
+        Ok(service) => service,
+        Err(error) => {
+            out.error(&error.message).await;
+            return Err(error.exit_code);
         }
+    };
+    if files.is_none() && service.is_none() {
+        return Ok(());
     }
+    if let Some(url) = service.as_ref().and_then(|service| service.results_url.as_deref()) {
+        out.info(&format!("Streaming build results to: {url}")).await;
+    }
+    let events = BuildEvents::open(files, service, info);
+    out.set_build_events(Arc::new(events));
+    Ok(())
 }
 
 /// End the events of a command that wrote them, now that it finished
-/// with `exit_code`.
-pub async fn finish(exit_code: i32, out: &Output) {
+/// with `exit_code`, returning the code it ends with: a failed upload's,
+/// as in Bazel.
+pub async fn finish(exit_code: i32, out: &Output) -> i32 {
     let Some(events) = out.take_build_events() else {
-        return;
+        return exit_code;
     };
     let actions = out.snapshot().await.actions_finished as i64;
-    match events.finish(exit_code, actions).await {
-        Ok(()) => out.info("Build Event Protocol files produced successfully.").await,
-        Err(message) => out.error(&message).await,
+    let closed = events.finish(exit_code, actions).await;
+    if let Some(Err(error)) = &closed.files {
+        out.error(&error.to_string()).await;
     }
+    match &closed.service {
+        Some(Err(error)) => {
+            out.error(&error.to_string()).await;
+            return crate::bes::exit_code_after_failed_upload(exit_code, error);
+        }
+        Some(Ok(())) => {
+            if let Some(url) = &events.results_url {
+                out.info(&format!("Streaming build results to: {url}")).await;
+            }
+        }
+        None if matches!(closed.files, Some(Ok(()))) => out.info("Build Event Protocol files produced successfully.").await,
+        None => {}
+    }
+    exit_code
+}
+
+/// How each of a command's transports closed, for those it had.
+pub struct Closed {
+    pub files: Option<Result<(), TransportError>>,
+    pub service: Option<Result<(), TransportError>>,
 }
 
 /// The events of a command that writes them.
 pub struct BuildEvents {
-    log: BuildEventLog,
+    /// The files the events are written to, if any.
+    files: Option<BuildEventLog>,
+    /// The Build Event Service the events are uploaded to, if any.
+    service: Option<bazel_bes::BesUpload>,
+    /// Where people can see the upload: `--bes_results_url` with the
+    /// invocation.
+    results_url: Option<String>,
     state: Mutex<State>,
     started: Instant,
     /// The target patterns, whose expansion is announced.
@@ -144,17 +185,14 @@ pub struct CommandInfo<'a> {
 }
 
 impl BuildEvents {
-    /// Start a command's events, if the options ask for them: the started
-    /// event and those describing the command line.
-    pub async fn open(json: Option<&Path>, binary: Option<&Path>, info: CommandInfo<'_>) -> Result<Option<BuildEvents>, String> {
-        let log = BuildEventLog::open(json.map(Into::into), binary.map(Into::into)).await;
-        let log = match log {
-            Ok(Some(log)) => log,
-            Ok(None) => return Ok(None),
-            Err(error) => return Err(format!("Unable to write build events: {error}")),
-        };
+    /// Start a command's events, going to files, a service or both: the
+    /// started event and those describing the command line.
+    pub fn open(files: Option<BuildEventLog>, service: Option<BesStream>, info: CommandInfo<'_>) -> BuildEvents {
+        let results_url = service.as_ref().and_then(|service| service.results_url.clone());
         let events = BuildEvents {
-            log,
+            files,
+            service: service.map(|service| service.upload),
+            results_url,
             state: Mutex::new(State::default()),
             started: Instant::now(),
             patterns: info.patterns.clone(),
@@ -175,7 +213,7 @@ impl BuildEvents {
         events.post(events::build_metadata());
         events.post(events::unstructured_command_line(&info.args));
         events.post(events::options_parsed(&[], &info.options, &info.explicit_options));
-        Ok(Some(events))
+        events
     }
 
     /// Post an event, recording the events it announces.
@@ -187,7 +225,17 @@ impl BuildEvents {
             }
             state.announced.extend(event.children.iter().cloned());
         }
-        self.log.post(event);
+        self.send(event);
+    }
+
+    /// Send an event to every transport.
+    fn send(&self, event: BuildEvent) {
+        if let Some(service) = &self.service {
+            service.post(event.clone());
+        }
+        if let Some(files) = &self.files {
+            files.post(event);
+        }
     }
 
     /// Post a configuration's description, the first time it's needed.
@@ -286,7 +334,7 @@ impl BuildEvents {
     /// End the stream: what the command printed, any announced events that
     /// won't come, as aborted, and that the command finished with
     /// `exit_code`, with its logs and metrics.
-    pub async fn finish(&self, exit_code: i32, actions_executed: i64) -> Result<(), String> {
+    pub async fn finish(&self, exit_code: i32, actions_executed: i64) -> Closed {
         let (stdout, stderr) = {
             let mut state = self.lock();
             (std::mem::take(&mut state.stdout), std::mem::take(&mut state.stderr))
@@ -301,8 +349,11 @@ impl BuildEvents {
         }
         self.post(events::build_finished(exit_code, SystemTime::now()));
         self.post(events::build_tool_logs(self.started.elapsed().as_secs_f64()));
-        let last = events::build_metrics(actions_executed, actions_executed);
-        self.log.close(last).await.map_err(|error| format!("Unable to write build events: {error}"))
+        let mut last = events::build_metrics(actions_executed, actions_executed);
+        last.last_message = true;
+        self.post(last);
+        let (files, service) = tokio::join!(close(self.files.as_ref()), close(self.service.as_ref()));
+        Closed { files, service }
     }
 
     /// The events announced but not yet posted, each once.
@@ -322,6 +373,14 @@ impl BuildEvents {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Close a transport the command has, waiting as it waits.
+async fn close(transport: Option<&(impl Transport + ?Sized)>) -> Option<Result<(), TransportError>> {
+    match transport {
+        Some(transport) => Some(transport.close().await),
+        None => None,
     }
 }
 

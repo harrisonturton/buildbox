@@ -1,0 +1,60 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:private"])
+
+rust_library(
+    name = "bes",
+    srcs = [
+        "bes.rs",
+        "requests.rs",
+        "tests.rs",
+        "upload.rs",
+    ],
+    crate_name = "bazel_bes",
+    crate_root = "bes.rs",
+    proc_macro_deps = ["@crates//:async-trait"],
+    visibility = ["//buildbox:__subpackages__"],
+    deps = [
+        "//buildbox/bazel/bep",
+        "//buildbox/grpcclient",
+        "//third_party/googleapis:build_rust_connect",
+        "@crates//:buffa",
+        "@crates//:buffa-types",
+        "@crates//:connectrpc",
+        "@crates//:http",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+    ],
+)
+
+# A Build Event Service that records what it's sent, for tests.
+rust_library(
+    name = "fake_bes",
+    testonly = True,
+    srcs = ["fake.rs"],
+    crate_root = "fake.rs",
+    deps = [
+        "//third_party/googleapis:build_rust_connect",
+        "@crates//:buffa-types",
+        "@crates//:connectrpc",
+        "@crates//:futures",
+        "@crates//:http",
+        "@crates//:hyper",
+        "@crates//:hyper-util",
+        "@crates//:rustls",
+        "@crates//:tokio",
+        "@crates//:tokio-rustls",
+        "@crates//:tokio-stream",
+        "@crates//:tower",
+    ],
+)
+
+rust_test(
+    name = "bes_test",
+    compile_data = glob(["testdata/*"]),
+    crate = ":bes",
+    deps = [
+        ":fake_bes",
+        "@crates//:tempfile",
+    ],
+)

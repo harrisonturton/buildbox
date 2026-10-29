@@ -6,6 +6,7 @@ rust_library(
     name = "options",
     srcs = [
         "bazel.rs",
+        "duration.rs",
         "jobs.rs",
         "options.rs",
         "rc.rs",

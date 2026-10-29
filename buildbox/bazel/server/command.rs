@@ -211,6 +211,10 @@ pub mod exit {
     pub const INTERRUPTED: i32 = 8;
     pub const LOCAL_ENVIRONMENTAL_ERROR: i32 = 36;
     pub const INTERNAL_ERROR: i32 = 37;
+    /// Uploading the build events failed, but might work if tried again.
+    pub const TRANSIENT_BES_UPLOAD_ERROR: i32 = 38;
+    /// Uploading the build events failed, and would fail again.
+    pub const PERSISTENT_BES_UPLOAD_ERROR: i32 = 45;
     /// The modules or repositories the build depends on couldn't be
     /// resolved or fetched.
     pub const EXTERNAL_DEPS_ERROR: i32 = 48;
@@ -303,8 +307,7 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         "mod" => crate::modcmd::mod_command(&context, args, out).await,
         other => unsupported(other, out).await,
     };
-    crate::build_events::finish(code, out).await;
-    code
+    crate::build_events::finish(code, out).await
 }
 
 /// The commands Bazel has that bb doesn't support yet.
@@ -341,8 +344,7 @@ pub async fn interrupted(command: &RunningCommand, out: &Output) -> i32 {
         }
         _ => out.error(&format!("{name} interrupted")).await,
     }
-    crate::build_events::finish(exit::INTERRUPTED, out).await;
-    exit::INTERRUPTED
+    crate::build_events::finish(exit::INTERRUPTED, out).await
 }
 
 /// Separate the startup options, which come before the command, from the
