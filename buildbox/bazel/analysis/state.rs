@@ -5,14 +5,14 @@ use crate::action::{Action, ActionKind, RunfilesTree};
 use crate::artifact::{self, Artifact};
 use crate::expand::LocationStyle;
 use crate::runfiles::Runfiles;
-use crate::inputs::InputSets;
+use crate::inputs::{InputSet, InputSets};
 use crate::shared::Sharing;
 use bazel_config::{BuildConfiguration, OptionValue};
 use bazel_label::{Label, LabelContext, RepoMappingTable};
 use bazel_starlark::EvalContext;
 use intern::PathId;
 use starlark::eval::Evaluator;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
@@ -41,6 +41,8 @@ pub struct RuleState {
     /// actions that take them as inputs run with their runfiles, as the
     /// runfiles Bazel gives with them.
     pub resolved_tools: RefCell<HashSet<Artifact>>,
+    /// How many times the rule called `resolve_command`.
+    resolve_command_scripts: Cell<u32>,
     /// The input sets of the depsets actions read.
     pub input_sets: RefCell<InputSets>,
     /// Make variables, such as `$(BINDIR)`, by name.
@@ -76,6 +78,7 @@ impl RuleState {
             declared: RefCell::new(Vec::new()),
             tool_runfiles: RefCell::new(HashMap::new()),
             resolved_tools: RefCell::new(HashSet::new()),
+            resolve_command_scripts: Cell::new(0),
             input_sets: RefCell::new(InputSets::default()),
             make_variables,
             locations: Vec::new(),
@@ -188,6 +191,38 @@ impl RuleState {
         self.tool_runfiles.borrow_mut().insert(executable, tree);
     }
 
+    /// The command line that runs `command` with Bash, as Bazel's
+    /// `CommandHelper` makes it, and the script it runs instead for a
+    /// command too long to pass to `bash -c`, `<name><script_suffix>`,
+    /// which the action must take as an input.
+    pub fn bash_command(&self, command: &str, script_suffix: &str) -> anyhow::Result<(Vec<String>, Option<Artifact>)> {
+        if command.len() <= MAX_COMMAND_LENGTH {
+            return Ok((vec![SHELL.to_string(), "-c".to_string(), command.to_string()], None));
+        }
+        let script = self.declare(&format!("{}{script_suffix}", self.label.name), false)?;
+        self.register_own(Action {
+            mnemonic: Symbol::intern("FileWrite"),
+            progress_message: String::new(),
+            inputs: InputSet::default(),
+            runfiles: Vec::new(),
+            outputs: vec![script],
+            kind: ActionKind::Write {
+                content: format!("#!/bin/bash\n{command}"),
+                executable: true,
+                from_args: false,
+            },
+        })?;
+        Ok((vec![SHELL.to_string(), script.exec_path.to_string()], Some(script)))
+    }
+
+    /// The suffix of the script of the next `resolve_command` call, which
+    /// Bazel numbers from 0 for each rule.
+    pub fn next_resolve_command_script(&self) -> String {
+        let index = self.resolve_command_scripts.get();
+        self.resolve_command_scripts.set(index + 1);
+        format!(".resolve_command_{index}.script.sh")
+    }
+
     /// Record that `resolve_command` gave `executable`.
     pub fn resolve_tool(&self, executable: Artifact) {
         if self.tool_runfiles.borrow().contains_key(&executable) {
@@ -241,6 +276,13 @@ impl RuleState {
         self.make_variables.iter().find(|(variable, _)| variable == name).map(|(_, value)| value.as_str())
     }
 }
+
+/// The shell commands run with, as Bazel's `sh` toolchain gives it.
+const SHELL: &str = "/bin/bash";
+
+/// The longest command Bazel passes to `bash -c`; longer ones go in a
+/// script.
+const MAX_COMMAND_LENGTH: usize = 64000;
 
 fn same_action(a: &Action, b: &Action) -> bool {
     if let (ActionKind::Symlink { target: a_target, .. }, ActionKind::Symlink { target: b_target, .. }) = (&a.kind, &b.kind) {

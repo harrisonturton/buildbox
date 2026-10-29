@@ -242,14 +242,16 @@ fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, he
         Some(AttrValue::Label(label)) => Artifact::source(*label),
         _ => anyhow::bail!("genrule has no setup script"),
     };
+    let command = format!("source {}; {expanded}", setup.exec_path);
+    let (arguments, script) = state.bash_command(&command, ".genrule_script.sh")?;
     let mut inputs = srcs.clone();
     inputs.extend(tools);
     inputs.push(setup);
+    inputs.extend(script);
     if genrule_stamps(input) {
         inputs.extend([crate::workspace_status::info_file(), crate::workspace_status::version_file()]);
     }
     let inputs = InputSet::of(inputs);
-    let script = format!("source {}; {expanded}", setup.exec_path);
     let message = match input.string("message") {
         "" => "Executing genrule",
         message => message,
@@ -261,7 +263,7 @@ fn genrule<'v>(input: &RuleInput, prepared: &Prepared<'v>, state: &RuleState, he
         runfiles,
         outputs: outs.clone(),
         kind: ActionKind::Spawn(Spawn {
-            arguments: vec!["/bin/bash".to_string(), "-c".to_string(), script],
+            arguments,
             env: input.config.options.action_env.clone(),
             execution_info: execution_info(input),
             param_files: Vec::new(),

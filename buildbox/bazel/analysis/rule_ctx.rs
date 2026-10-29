@@ -257,14 +257,8 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
         if let Some(variables) = make_variables.filter(|value| !value.is_none()) {
             command = expand_make_variables(state, attribute, &command, &string_pairs(variables))?;
         }
-        let argv = match command.len() <= MAX_COMMAND_LENGTH {
-            true => vec![SHELL.to_string(), "-c".to_string(), command],
-            false => {
-                let script = command_script(state, &command)?;
-                inputs.push(script);
-                vec![SHELL.to_string(), script.exec_path.to_string()]
-            }
-        };
+        let (argv, script) = state.bash_command(&command, &state.next_resolve_command_script())?;
+        inputs.extend(script);
         let inputs = heap.alloc(AllocList(inputs.into_iter().map(|artifact| heap.alloc(FileValue(artifact)))));
         let argv = heap.alloc(AllocList(argv.iter().map(|argument| heap.alloc(argument.as_str()))));
         Ok(heap.alloc(AllocTuple([inputs, argv, heap.alloc(AllocList::EMPTY)])))
@@ -316,33 +310,6 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
 
 /// Escape every `$` in `text` that doesn't start a location function, so
 /// only those are expanded.
-/// The shell commands run with, as Bazel's `sh` toolchain gives it.
-const SHELL: &str = "/bin/bash";
-
-/// The longest command Bazel passes to `bash -c`; longer ones go in a
-/// script.
-const MAX_COMMAND_LENGTH: usize = 64000;
-
-/// Write a script running `command`, for a command too long to pass to
-/// `bash -c`, as Bazel's `CommandHelper` does.
-fn command_script(state: &RuleState, command: &str) -> anyhow::Result<Artifact> {
-    let index = state.actions.borrow().len();
-    let script = state.declare(&format!("{}.resolve_command_{index}.script.sh", state.label.name), false)?;
-    state.register(crate::action::Action {
-        mnemonic: intern::Symbol::intern("FileWrite"),
-        progress_message: String::new(),
-        inputs: crate::inputs::InputSet::default(),
-        runfiles: Vec::new(),
-        outputs: vec![script],
-        kind: crate::action::ActionKind::Write {
-            content: command.to_string(),
-            executable: true,
-            from_args: false,
-        },
-    })?;
-    Ok(script)
-}
-
 /// The files of `tools`, with their executables, which actions taking
 /// them as inputs run with their runfiles, and what `$(location)` expands
 /// each tool's label to.
