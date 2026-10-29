@@ -104,6 +104,27 @@ fn repo_methods(builder: &mut MethodsBuilder) {
         let _ = (this, reproducible, attrs_for_reproducibility);
         Ok(NoneType)
     }
+
+    /// `rename(src, dst)`: move a file or directory within the repository,
+    /// making `dst`'s parents. `dst` mustn't exist.
+    fn rename<'v>(this: Value<'v>, src: Value<'v>, dst: Value<'v>) -> anyhow::Result<NoneType> {
+        let io = crate::io::io_of(this)?;
+        let (src, dst) = (io.path(src)?, io.path(dst)?);
+        for path in [&src, &dst] {
+            if !path.starts_with(&io.base_dir) {
+                anyhow::bail!("Cannot write outside of the repository directory for path {}", path.display());
+            }
+        }
+        let failed = |reason: String| anyhow::anyhow!("Could not rename {} to {}: {reason}", src.display(), dst.display());
+        if dst.symlink_metadata().is_ok() {
+            return Err(failed("already exists".to_string()));
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| failed(error.to_string()))?;
+        }
+        std::fs::rename(&src, &dst).map_err(|error| failed(error.to_string()))?;
+        Ok(NoneType)
+    }
 }
 
 /// Fetch a repository by running its repository rule.

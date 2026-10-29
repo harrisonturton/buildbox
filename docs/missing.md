@@ -164,7 +164,6 @@ and Bazel's summaries work as in Bazel. Missing:
 - **Credential helpers** (`--credential_helper`) aren't implemented;
   downloads use `.netrc` only.
 - **Repository rules:**
-  - `repository_ctx.rename` is missing.
   - `.7z`, `.deb` and `.ar` archives can't be extracted (`fetch/extract.rs`).
   - `execute(quiet = False)` doesn't show the output, and
     `report_progress` isn't shown.
