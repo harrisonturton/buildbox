@@ -258,6 +258,29 @@ fn urls(value: Value<'_>) -> anyhow::Result<Vec<String>> {
     bazel_starlark::convert::strings(value).ok_or_else(|| anyhow::anyhow!("url must be a string or a list of strings"))
 }
 
+/// The URLs a download may use, as Bazel decides: each must be `http`,
+/// `https` or `file`, and without a checksum to check what's downloaded,
+/// plain `http` ones are left out.
+fn usable_urls(urls: Vec<String>, checksum_given: bool) -> anyhow::Result<Vec<String>> {
+    if urls.is_empty() {
+        anyhow::bail!("urls not set");
+    }
+    let mut usable = Vec::with_capacity(urls.len());
+    for url in urls {
+        let scheme = url.split_once(':').map(|(scheme, _)| scheme.to_ascii_lowercase()).unwrap_or_default();
+        if !matches!(scheme.as_str(), "http" | "https" | "file") {
+            anyhow::bail!("Unsupported protocol: {scheme}");
+        }
+        if checksum_given || scheme != "http" {
+            usable.push(url);
+        }
+    }
+    if usable.is_empty() {
+        anyhow::bail!("No URLs left after removing plain http URLs due to missing checksum. Please provide either a checksum or an https download location.");
+    }
+    Ok(usable)
+}
+
 fn integrity(sha256: &str, integrity: &str) -> anyhow::Result<Option<Integrity>> {
     if !integrity.is_empty() {
         return Ok(Some(Integrity::sri(integrity)?));
@@ -638,7 +661,8 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
             }
         };
         let expected = self::integrity(sha256, integrity)?;
-        match io.downloads.download_with(&urls(url)?, expected.as_ref(), &dest, &options.headers) {
+        let urls = usable_urls(urls(url)?, expected.is_some())?;
+        match io.downloads.download_with(&urls, expected.as_ref(), &dest, &options.headers) {
             Ok(checksum) => {
                 if executable {
                     use std::os::unix::fs::PermissionsExt;
@@ -678,6 +702,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         let archive_type = archive_type?;
         let download = dest.join(format!(".bb_archive_{}", std::process::id()));
         let expected = self::integrity(sha256, integrity)?;
+        let urls = usable_urls(urls, expected.is_some())?;
         let checksum = match io.downloads.download_with(&urls, expected.as_ref(), &download, &options.headers) {
             Ok(checksum) => checksum,
             Err(_) if allow_fail => return Ok(download_result(heap, false, None, options.block)),
