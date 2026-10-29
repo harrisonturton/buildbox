@@ -19,6 +19,10 @@ use std::collections::{HashMap, HashSet};
 /// name, as Bazel's do.
 pub const WELL_KNOWN_MODULES: [&str; 3] = ["bazel_tools", "platforms", "local_config_platform"];
 
+/// What to do when no Bazel installation provides `@bazel_tools`.
+const NO_BAZEL_TOOLS: &str =
+    "no @bazel_tools found: run `bazel version` once so Bazel installs itself, or set BB_BAZEL_TOOLS to an installed Bazel's embedded_tools directory";
+
 /// The root module's MODULE.bazel, with the files it includes, or why it
 /// couldn't be evaluated.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -647,7 +651,7 @@ async fn special_module(
 ) -> Result<Option<Discovered>, SkyError> {
     if name == "bazel_tools" {
         let Some(dir) = &config.bazel_tools else {
-            return Err(SkyError::new("no @bazel_tools found; set BB_BAZEL_TOOLS"));
+            return Err(SkyError::new(NO_BAZEL_TOOLS));
         };
         let spec = RepoSpec::Builtin {
             dir: dir.display().to_string(),

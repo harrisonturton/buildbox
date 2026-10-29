@@ -103,4 +103,5 @@ rust_library(
 rust_test(
     name = "server_test",
     crate = ":server",
+    deps = ["@crates//:tempfile"],
 )

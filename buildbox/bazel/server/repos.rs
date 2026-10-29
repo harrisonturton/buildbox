@@ -3,16 +3,42 @@
 use std::path::{Path, PathBuf};
 
 /// Find `@bazel_tools`'s files: in `BB_BAZEL_TOOLS`, or the `embedded_tools`
-/// of an installed Bazel, preferring the version the workspace asks for in
-/// `.bazelversion`.
+/// of an installed Bazel, preferring `wanted_version`, and otherwise the
+/// most recently installed.
 pub fn find_bazel_tools(home: Option<&Path>, wanted_version: Option<&str>) -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("BB_BAZEL_TOOLS") {
         return Some(PathBuf::from(dir));
     }
-    let cache = home?.join(".cache/bazel");
+    let user = std::env::var("USER").ok();
+    find_installed_tools(&install_dirs(home, user.as_deref()), wanted_version)
+}
+
+/// The directories Bazel installs itself in, one per installed version,
+/// beneath its default output user roots: `~/.cache/bazel/_bazel_$USER` on
+/// Linux, and on macOS `~/Library/Caches/bazel/_bazel_$USER`, or
+/// `/private/var/tmp/_bazel_$USER` for older Bazels.
+fn install_dirs(home: Option<&Path>, user: Option<&str>) -> Vec<PathBuf> {
+    let mut output_user_roots = Vec::new();
+    for cache in [".cache/bazel", "Library/Caches/bazel"] {
+        let Some(home) = home else {
+            break;
+        };
+        let entries = std::fs::read_dir(home.join(cache)).into_iter().flatten().flatten();
+        output_user_roots.extend(entries.map(|entry| entry.path()));
+    }
+    if let Some(user) = user {
+        output_user_roots.push(PathBuf::from(format!("/private/var/tmp/_bazel_{user}")));
+    }
+    output_user_roots.iter().map(|root| root.join("install")).collect()
+}
+
+/// The `embedded_tools` of the best Bazel installed in `install_dirs`:
+/// version `wanted_version` if it's there, and otherwise the most recently
+/// installed.
+fn find_installed_tools(install_dirs: &[PathBuf], wanted_version: Option<&str>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    for user_dir in std::fs::read_dir(&cache).ok()?.flatten() {
-        let Ok(installs) = std::fs::read_dir(user_dir.path().join("install")) else {
+    for dir in install_dirs {
+        let Ok(installs) = std::fs::read_dir(dir) else {
             continue;
         };
         for install in installs.flatten() {
@@ -67,4 +93,50 @@ fn extract_builtins(jar: &Path, dest: &Path) -> Result<(), String> {
     bazel_fetch::extract(&inner, bazel_fetch::ArchiveType::Zip, dest, "", 0, &Default::default()).map_err(|error| error.to_string())?;
     let _ = std::fs::remove_file(&inner);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Install a fake Bazel `version` as `hash` in the `install` directory
+    /// beneath `root`.
+    fn install(root: &Path, hash: &str, version: &str) -> PathBuf {
+        let dir = root.join("install").join(hash);
+        std::fs::create_dir_all(dir.join("embedded_tools/tools")).unwrap();
+        std::fs::write(dir.join("build-label.txt"), format!("{version}\n")).unwrap();
+        dir.join("embedded_tools")
+    }
+
+    #[test]
+    fn finds_bazel_installed_under_either_operating_systems_root() {
+        let root = tempfile::tempdir().unwrap();
+        let linux = root.path().join("home/.cache/bazel/_bazel_me");
+        let macos = root.path().join("private/var/tmp/_bazel_me");
+        install(&linux, "aaa", "8.7.0");
+        let wanted = install(&macos, "bbb", "9.3.1");
+
+        let dirs = [linux.join("install"), macos.join("install")];
+
+        assert_eq!(find_installed_tools(&dirs, Some("9.3.1")), Some(wanted));
+        assert!(find_installed_tools(&dirs[..1], Some("9.3.1")).is_some(), "another version will do");
+        assert_eq!(find_installed_tools(&[root.path().join("missing")], None), None);
+    }
+
+    #[test]
+    fn looks_where_linux_and_macos_install_bazel() {
+        let home = tempfile::tempdir().unwrap();
+        for root in [".cache/bazel/_bazel_me", "Library/Caches/bazel/_bazel_me"] {
+            std::fs::create_dir_all(home.path().join(root)).unwrap();
+        }
+
+        let dirs = install_dirs(Some(home.path()), Some("me"));
+
+        let expected = [
+            home.path().join(".cache/bazel/_bazel_me/install"),
+            home.path().join("Library/Caches/bazel/_bazel_me/install"),
+            PathBuf::from("/private/var/tmp/_bazel_me/install"),
+        ];
+        assert_eq!(dirs, expected);
+    }
 }

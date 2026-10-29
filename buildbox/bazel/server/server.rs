@@ -218,7 +218,7 @@ impl BazelServer {
         let bazel_tools = repos::find_bazel_tools(config.home.as_deref(), Some(bazel_starlark::BAZEL_VERSION));
         match &bazel_tools {
             Some(dir) => tracing::info!("using @bazel_tools from {}", dir.display()),
-            None => tracing::warn!("no @bazel_tools found; set BB_BAZEL_TOOLS"),
+            None => tracing::warn!("no @bazel_tools found: run `bazel version` once so Bazel installs itself, or set BB_BAZEL_TOOLS to an installed Bazel's embedded_tools directory"),
         }
         let builtins = bazel_tools
             .as_deref()
