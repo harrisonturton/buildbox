@@ -121,6 +121,11 @@ where
         if self.exported.get().is_some() {
             return Ok(());
         }
+        if self.test != variable_name.ends_with("_test") {
+            return Err(starlark::Error::new_other(anyhow::anyhow!(
+                "Invalid rule class name '{variable_name}', test rule class names must end with '_test' and other rule classes must not"
+            )));
+        }
         let context = EvalContext::get(eval).map_err(starlark::Error::new_other)?;
         let class = schema(self, variable_name, context).map_err(starlark::Error::new_other)?;
         let _ = self.exported.set(Arc::new(class));
