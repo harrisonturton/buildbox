@@ -26,6 +26,7 @@ rust_library(
         "cc/values.rs",
         "cc/variables.rs",
         "condition.rs",
+        "conflicts.rs",
         "configured.rs",
         "coverage.rs",
         "dep_checks.rs",

@@ -6,6 +6,7 @@ use crate::output::Output;
 use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey, output_groups};
 use crate::workspace::Workspace;
 use crate::written::Written;
+use bazel_analysis::conflicts::ActionConflictsKey;
 use bazel_analysis::{Artifact, ConfiguredTarget, ConfiguredTargetKey, Incompatibility};
 use bazel_analysis::settings::BuildSetting;
 use bazel_analysis::workspace_status::StatusValues;
@@ -423,7 +424,11 @@ async fn analyze_and_build(
     if incompatible && !keep_going {
         return Err(exit::BUILD_FAILURE);
     }
-    let mut errors = incompatible;
+    let conflicted = report_conflicts(session, &analyzed, &applied, out).await;
+    if conflicted && !keep_going {
+        return Err(exit::BUILD_FAILURE);
+    }
+    let mut errors = incompatible || conflicted;
     let execute_actions = options.flag("build", true);
     let skipped = skipped_warnings(&failed, &failed_aspects, &main_mapping);
     if !execute_actions {
@@ -501,6 +506,36 @@ async fn analyze_and_build(
         analysis_incomplete: analysis_failed && !errors && !patterns_failed,
         patterns_failed: patterns_failed && !errors,
     })
+}
+
+/// Report the conflicts among the actions of the analyzed targets, and
+/// of the aspects applied to them, returning whether there were any.
+async fn report_conflicts(
+    session: &Session,
+    analyzed: &[(Label, Arc<ConfiguredTarget>)],
+    applied: &[(String, Label, Arc<ConfiguredTarget>)],
+    out: &Output,
+) -> bool {
+    let targets = analyzed.iter().map(|(_, target)| target).chain(applied.iter().map(|(_, _, target)| target));
+    let mut tops: Vec<ConfiguredTargetKey> = targets
+        .map(|target| ConfiguredTargetKey {
+            label: target.label,
+            config: target.config,
+        })
+        .collect();
+    tops.sort();
+    tops.dedup();
+    let conflicts = match session.evaluate(&ActionConflictsKey(tops)).await {
+        Ok(conflicts) => conflicts,
+        Err(error) => {
+            out.error(error.message()).await;
+            return true;
+        }
+    };
+    for conflict in &conflicts.0 {
+        out.error(conflict).await;
+    }
+    !conflicts.0.is_empty()
 }
 
 /// The files of a top-level target's that were built, or `None` if any

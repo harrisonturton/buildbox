@@ -16,6 +16,7 @@ mod attrs;
 mod build_ctx;
 pub mod cc;
 mod condition;
+pub mod conflicts;
 mod configured;
 mod coverage;
 mod dep_checks;
