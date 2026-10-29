@@ -33,6 +33,7 @@ const COMMON_OPTIONS: &[(&str, OptionKind)] = &[
     ("override_module", OptionKind::Multi),
     ("inject_repository", OptionKind::Multi),
     ("ignore_dev_dependency", OptionKind::Bool),
+    ("lockfile_mode", OptionKind::Value),
     ("module_mirrors", OptionKind::Multi),
     ("check_direct_dependencies", OptionKind::Value),
     ("check_bazel_compatibility", OptionKind::Value),

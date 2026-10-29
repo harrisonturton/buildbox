@@ -157,8 +157,9 @@ and Bazel's summaries work as in Bazel. Missing:
 
 ## 8. Bzlmod and repositories
 
-- **Lockfile.** `MODULE.bazel.lock` is neither read nor written, and
-  `--lockfile_mode` other than `update` is an error. `extension_metadata`
+- **Lockfile.** `MODULE.bazel.lock` is neither read nor written:
+  `--lockfile_mode=off` and `update` are taken, `refresh` and `error` are
+  errors. `extension_metadata`
   and `repo_metadata(reproducible = ...)` are accepted and ignored, so
   there are no `use_repo` fix-up warnings.
 - **Credential helpers** (`--credential_helper`) aren't implemented;

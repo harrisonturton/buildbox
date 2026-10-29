@@ -92,6 +92,7 @@ pub fn build_spec() -> OptionSpec {
         ("override_module", Multi),
         ("inject_repository", Multi),
         ("ignore_dev_dependency", Bool),
+        ("lockfile_mode", Value),
         ("module_mirrors", Multi),
         ("workspace_status_command", Value),
         ("embed_label", Value),

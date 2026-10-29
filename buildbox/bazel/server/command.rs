@@ -38,6 +38,7 @@ pub fn repo_environment(context: &CommandContext<'_>, options: &ParsedOptions) -
 /// repositories and modules, and the files that changed. Returns the error
 /// for an override the options give wrongly.
 pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Workspace, options: &ParsedOptions) -> Result<(), String> {
+    check_lockfile_mode(options)?;
     let overrides = command_overrides(context, options)?;
     workspace.refresh(repo_environment(context, options)).await;
     let urls = |name: &str| options.all(name).into_iter().map(|url| url.trim_end_matches('/').to_string()).collect();
@@ -50,6 +51,18 @@ pub async fn refresh(context: &CommandContext<'_>, workspace: &workspace::Worksp
     workspace.set_overrides(overrides).await;
     workspace.set_autoloads(autoload_settings(context, options)).await;
     Ok(())
+}
+
+/// Check `--lockfile_mode`. bb neither reads nor writes `MODULE.bazel.lock`,
+/// which is what `off` asks for, and what `update` comes to without a
+/// lockfile to keep; `refresh` and `error` it can't do.
+fn check_lockfile_mode(options: &ParsedOptions) -> Result<(), String> {
+    let mode = options.get("lockfile_mode").unwrap_or("update");
+    match mode.to_ascii_lowercase().as_str() {
+        "off" | "update" => Ok(()),
+        "refresh" | "error" => Err(format!("--lockfile_mode={mode} :: bb doesn't support --lockfile_mode={mode} yet")),
+        _ => Err(format!("While parsing option --lockfile_mode={mode}: Not a valid Lockfile mode: '{mode}' (should be off, update, refresh or error)")),
+    }
 }
 
 /// The overrides of repositories and modules the options give.
