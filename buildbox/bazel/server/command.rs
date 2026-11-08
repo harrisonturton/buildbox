@@ -11,7 +11,7 @@ use bazel_fetch::CredentialHelpers;
 use bazel_bzlmod::registry::Registries;
 use bazel_bzlmod::repo_env::RepoEnvironment;
 use bazel_loading::autoload::AutoloadSettings;
-use bazel_options::{ParsedOptions, RcFile};
+use bazel_options::{ParsedOptions, RcFile, UnsupportedOptions};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,19 @@ pub struct Invocation {
     pub args: Vec<String>,
     pub working_directory: PathBuf,
     pub env: HashMap<String, String>,
+}
+
+/// The client environment variable that, when set and not empty, makes
+/// commands skip options bb doesn't implement rather than reject them.
+pub const IGNORE_UNSUPPORTED_OPTIONS_ENV: &str = "BB_IGNORE_UNSUPPORTED_OPTIONS";
+
+/// What a command does with options bb doesn't implement, as the client's
+/// environment says.
+pub fn unsupported_options(context: &CommandContext<'_>) -> UnsupportedOptions {
+    match context.env.get(IGNORE_UNSUPPORTED_OPTIONS_ENV) {
+        Some(value) if !value.is_empty() => UnsupportedOptions::Ignore,
+        _ => UnsupportedOptions::Reject,
+    }
 }
 
 /// The environment repository rules see in a command: the client's, with

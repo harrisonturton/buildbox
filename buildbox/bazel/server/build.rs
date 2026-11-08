@@ -2,7 +2,7 @@
 //! and write those files to the output tree.
 
 use crate::build_events::TargetAttrs;
-use crate::command::{CommandContext, exit, working_package};
+use crate::command::{CommandContext, exit, unsupported_options, working_package};
 use crate::output::Output;
 use crate::top_level::{RunfilesTree, TopLevel, TopLevelKey, output_groups};
 use crate::workspace::Workspace;
@@ -377,7 +377,7 @@ pub async fn completed(failed_tests: usize, out: &Output) {
 /// Parse a build command's options.
 pub async fn parse(context: &CommandContext<'_>, command: &str, args: &[String], out: &Output) -> Result<ParsedOptions, i32> {
     let all_args = bazel_options::command_args(&context.rc, command, args);
-    match bazel_options::parse(&all_args, &command_spec(command), &context.rc, command) {
+    match bazel_options::parse_with(&all_args, &command_spec(command), &context.rc, command, unsupported_options(context)) {
         Ok(options) => {
             if let Err(message) = parse_test_filter(&options) {
                 out.error(&message).await;

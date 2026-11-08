@@ -2,7 +2,7 @@
 //! `aquery` over the configured graph.
 
 use crate::build::{self, Built, Purpose};
-use crate::command::{CommandContext, exit, working_package};
+use crate::command::{CommandContext, exit, unsupported_options, working_package};
 use crate::output::Output;
 use bazel_cquery::{AqueryFormat, AqueryOutput, ConfiguredGraph, ConfiguredNode, ConfiguredOptions, CqueryFormat, CqueryOutput, Formatter, Language, Printed};
 use bazel_analysis::ConfiguredTargetKey;
@@ -154,7 +154,7 @@ pub async fn query(context: &CommandContext<'_>, args: &[String], out: &Output) 
 /// does.
 pub(crate) async fn parse_options(context: &CommandContext<'_>, command: &str, args: &[String], spec: &OptionSpec, out: &Output) -> Result<ParsedOptions, i32> {
     let all_args = bazel_options::command_args(&context.rc, command, args);
-    let options = match bazel_options::parse(&all_args, spec, &context.rc, command) {
+    let options = match bazel_options::parse_with(&all_args, spec, &context.rc, command, unsupported_options(context)) {
         Ok(options) => options,
         Err(error) => {
             out.error(&error.to_string()).await;

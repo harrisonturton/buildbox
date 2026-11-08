@@ -174,6 +174,15 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
+/// What to do with uses of options Bazel takes but bb doesn't implement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedOptions {
+    /// Reject them, unless they're given their default values.
+    Reject,
+    /// Skip them, as if they weren't given.
+    Ignore,
+}
+
 /// Parse `args` against `spec`, the options bb implements for `command`.
 /// `--config=name` is expanded with `rc`'s definitions for `command`.
 ///
@@ -182,9 +191,18 @@ fn parse_bool(value: &str) -> Option<bool> {
 /// they're given their default values, so that nothing bb can't do is
 /// silently skipped.
 pub fn parse(args: &[Arg], spec: &OptionSpec, rc: &RcFile, command: &str) -> Result<ParsedOptions, OptionsError> {
+    parse_with(args, spec, rc, command, UnsupportedOptions::Reject)
+}
+
+/// [`parse`], doing with options bb doesn't implement what `unsupported`
+/// says.
+pub fn parse_with(args: &[Arg], spec: &OptionSpec, rc: &RcFile, command: &str, unsupported: UnsupportedOptions) -> Result<ParsedOptions, OptionsError> {
     let mut parsed = ParsedOptions::default();
     let mut expanding = Vec::new();
     parse_into(args, spec, rc, command, &mut parsed, &mut expanding)?;
+    if unsupported == UnsupportedOptions::Ignore {
+        return Ok(parsed);
+    }
     if let Some(error) = unsupported_error(&parsed.unsupported) {
         return Err(error);
     }

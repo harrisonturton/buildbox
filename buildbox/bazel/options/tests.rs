@@ -92,6 +92,16 @@ fn options_bb_lacks_are_errors_unless_given_their_defaults() {
 }
 
 #[test]
+fn options_bb_lacks_can_be_ignored() {
+    let rc = RcFile::default();
+    let parsed = parse_with(&args("--disk_cache=/tmp/cache --jobs=2 //foo"), &spec(), &rc, "build", UnsupportedOptions::Ignore).unwrap();
+    assert_eq!(parsed.get("jobs"), Some("2"));
+    assert_eq!(parsed.residue, words("//foo"));
+    let error = parse_with(&args("--no_such_option //foo"), &spec(), &rc, "build", UnsupportedOptions::Ignore).unwrap_err();
+    assert_eq!(error, OptionsError::Unrecognized("--no_such_option".into()));
+}
+
+#[test]
 fn only_the_last_use_of_an_unsupported_option_counts() {
     let rc = rc::parse_for_test("build --disk_cache=/cache --remote_header=a=b\n");
     let reset = command_args(&rc, "build", &words("--disk_cache= --remote_header="));

@@ -88,6 +88,14 @@ Every other command line is run as Bazel would run it, `bb build //...` say,
 starting a server in the background if none is running. A server that's a
 different build from the client finishes its commands and is replaced.
 
+Options Bazel takes that bb doesn't implement yet are errors, so nothing
+bb can't do is silently skipped. To skip them instead, such as ones in a
+`~/.bazelrc` shared with Bazel, set `BB_IGNORE_UNSUPPORTED_OPTIONS`:
+
+```
+$ BB_IGNORE_UNSUPPORTED_OPTIONS=1 bb build //...
+```
+
 ### Several servers
 
 Servers can run side by side, each isolated from the others, such as one
