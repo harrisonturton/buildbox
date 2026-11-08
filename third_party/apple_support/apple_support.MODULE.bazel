@@ -1,3 +1,15 @@
-"""Apple toolchain support, for building on macOS hosts."""
+"""Apple toolchain support, for building on macOS hosts.
+
+On macOS, C/C++ compiling and linking use Xcode's toolchain rather than the
+hermetic LLVM one: that links against the host's SDK either way, and only
+Apple's linker is sure to read the SDK's library stubs. Registering it here,
+before the LLVM toolchain, gives it priority on macOS; it matches no other
+platform.
+"""
 
 bazel_dep(name = "apple_support", version = "2.5.2")
+
+apple_cc_configure = use_extension("@apple_support//crosstool:setup.bzl", "apple_cc_configure_extension")
+use_repo(apple_cc_configure, "local_config_apple_cc_toolchains")
+
+register_toolchains("@local_config_apple_cc_toolchains//:all")
