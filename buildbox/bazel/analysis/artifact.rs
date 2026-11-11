@@ -2,7 +2,7 @@
 
 use bazel_config::{BuildConfiguration, ConfigId};
 use bazel_label::{Label, PackageId, RepoName};
-use intern::PathId;
+use intern::{PathId, Symbol};
 use skycodec::{Decode, Encode};
 use std::fmt;
 
@@ -89,28 +89,41 @@ impl Artifact {
     /// `File.short_path` gives it: `pkg/file`, or `../repo/pkg/file` for
     /// another repository's files.
     pub fn short_path(&self) -> String {
-        let repo = self.owner.package.repo;
-        if repo.is_main() {
-            return self.repo_relative().to_string();
+        match self.runfiles_location() {
+            (Some(repo), path) => format!("../{repo}/{path}"),
+            (None, path) => path.to_string(),
         }
-        format!("../{repo}/{}", self.repo_relative())
     }
 
     /// The path in a runfiles tree, relative to its root: `_main/pkg/file`
     /// or `repo/pkg/file`.
     pub fn runfiles_path(&self) -> String {
-        format!("{}/{}", runfiles_repo_name(self.owner.package.repo), self.repo_relative())
+        match self.runfiles_location() {
+            (Some(repo), path) => format!("{repo}/{path}"),
+            (None, path) => format!("{}/{path}", runfiles_repo_name(RepoName::MAIN)),
+        }
     }
 
-    /// The path relative to the directory of the owner's repository: in the
-    /// source tree, or in the output directory.
-    fn repo_relative(&self) -> PathId {
-        let repo = repo_dir(self.owner.package.repo);
-        let base = match self.config {
-            Some(config) => parse(&config.get().bin_dir()).join_path(repo),
-            None => repo,
+    /// The repository whose directory of a runfiles tree holds the
+    /// artifact, `None` for the main one, and its path in that directory.
+    /// As in Bazel's `Artifact.getRunfilesPath`, the path decides, not the
+    /// owner: a file under `external/<repo>/` is that repository's, and any
+    /// other is the main repository's, even one another repository's rule
+    /// makes at the output directory's root, such as a shared library's link
+    /// in `_solib_k8`.
+    fn runfiles_location(&self) -> (Option<Symbol>, PathId) {
+        let path = match self.config {
+            Some(_) => self.output_dir_relative(),
+            None => self.exec_path,
         };
-        self.exec_path.strip_prefix(base).unwrap_or(self.exec_path)
+        let Some(in_external) = path.strip_prefix(parse("external")) else {
+            return (None, path);
+        };
+        let Some(&repo) = in_external.segments().first() else {
+            return (None, path);
+        };
+        let in_repo = in_external.strip_prefix(PathId::ROOT.join(repo)).unwrap_or(in_external);
+        (Some(repo), in_repo)
     }
 }
 
@@ -147,4 +160,42 @@ pub fn name_path(label: Label) -> PathId {
 /// Parse a path that is known to be valid.
 pub fn parse(path: &str) -> PathId {
     PathId::parse(path).unwrap_or(PathId::ROOT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn label(text: &str) -> Label {
+        Label::parse_canonical(text).unwrap()
+    }
+
+    fn derived(owner: &str, name: &str) -> Artifact {
+        Artifact::derived(label(owner), &bazel_config::no_config().get(), parse(name), false)
+    }
+
+    #[test]
+    fn source_files_are_in_their_repositorys_directory() {
+        let main = Artifact::source(label("@@//pkg:file.txt"));
+        assert_eq!(main.short_path(), "pkg/file.txt");
+        assert_eq!(main.runfiles_path(), "_main/pkg/file.txt");
+        let external = Artifact::source(label("@@zlib+//src:zlib.h"));
+        assert_eq!(external.short_path(), "../zlib+/src/zlib.h");
+        assert_eq!(external.runfiles_path(), "zlib+/src/zlib.h");
+    }
+
+    #[test]
+    fn generated_files_are_in_their_repositorys_directory() {
+        assert_eq!(derived("@@//pkg:gen", "out.txt").runfiles_path(), "_main/pkg/out.txt");
+        assert_eq!(derived("@@zlib+//src:gen", "out.txt").short_path(), "../zlib+/src/out.txt");
+        assert_eq!(derived("@@zlib+//src:gen", "out.txt").runfiles_path(), "zlib+/src/out.txt");
+    }
+
+    #[test]
+    fn files_generated_at_the_root_are_the_main_repositorys() {
+        let config = bazel_config::no_config().get();
+        let solib = Artifact::derived_at_root(label("@@zlib+//:zlib"), &config, parse("_solib_k8/libexternal_Szlib+_Slibzlib.so"), false);
+        assert_eq!(solib.short_path(), "_solib_k8/libexternal_Szlib+_Slibzlib.so");
+        assert_eq!(solib.runfiles_path(), "_main/_solib_k8/libexternal_Szlib+_Slibzlib.so");
+    }
 }
