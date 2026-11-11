@@ -237,7 +237,11 @@ impl ValueStore {
     pub fn insert_live(&self, kind: Kind, fingerprint: Fingerprint, value: LiveValue, size: usize) -> ValueRef {
         let mut shard = self.lock(shard_of(&fingerprint));
         if let Some(existing) = shard.retain_existing(&fingerprint) {
-            shard.fill_absent(existing, value, size);
+            let unused = shard.fill_absent(existing, value, size);
+            // Dropping a live object can release the values it holds, which
+            // locks their shards, so it's dropped once this one is unlocked.
+            drop(shard);
+            drop(unused);
             return existing;
         }
         shard.insert_live(kind, fingerprint, value, size)
@@ -429,11 +433,14 @@ impl Shard {
         self.entry(value).is_some_and(|entry| matches!(entry.slot, Slot::Absent))
     }
 
-    /// Give an absent entry the live object it stood for.
-    fn fill_absent(&mut self, value: ValueRef, live: LiveValue, size: usize) {
-        if self.is_absent_at(value) {
-            self.entries[value.index()].slot = self.push_live(live, size);
+    /// Give an absent entry the live object it stood for. Returns `live`
+    /// if the entry wasn't absent, for the caller to drop outside the lock.
+    fn fill_absent(&mut self, value: ValueRef, live: LiveValue, size: usize) -> Option<LiveValue> {
+        if !self.is_absent_at(value) {
+            return Some(live);
         }
+        self.entries[value.index()].slot = self.push_live(live, size);
+        None
     }
 
     /// Give an absent entry the bytes it stood for.

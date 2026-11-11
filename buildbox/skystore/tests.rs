@@ -173,6 +173,26 @@ fn a_freed_value_can_release_values_in_its_own_shard() {
 }
 
 #[test]
+fn a_duplicate_live_value_can_release_values_in_its_own_shard() {
+    let store = Arc::new(ValueStore::new());
+    let held = insert(&store, b"held");
+    let fingerprint = (0u32..)
+        .map(|i| Fingerprint::of(&i.to_le_bytes()))
+        .find(|fingerprint| shard_of(fingerprint) == held.shard())
+        .unwrap();
+    let first = store.insert_live(KIND, fingerprint, Arc::new(5u32), 8);
+    let duplicate = ReleasesOnDrop { store: store.clone(), held };
+    let (done, finished) = std::sync::mpsc::channel();
+    let inserting = store.clone();
+    std::thread::spawn(move || {
+        let _ = done.send(inserting.insert_live(KIND, fingerprint, Arc::new(duplicate), 8));
+    });
+    let inserted = finished.recv_timeout(std::time::Duration::from_secs(10));
+    assert_eq!(inserted.ok(), Some(first), "inserting the duplicate deadlocked");
+    assert!(store.read(held).is_err());
+}
+
+#[test]
 fn release_and_take_returns_the_freed_value() {
     let store = ValueStore::new();
     let value = insert(&store, &target(7));
