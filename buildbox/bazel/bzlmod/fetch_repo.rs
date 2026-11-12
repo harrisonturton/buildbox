@@ -117,14 +117,12 @@ pub fn fetch_recording(
         }
         let _ = std::fs::remove_file(&marker);
     }
-    if dest.exists() {
-        let _ = std::fs::remove_dir_all(dest);
-    }
+    remove_tree(dest).map_err(|error| SkyError::transient(format!("failed to remove {}: {error}", dest.display())))?;
     std::fs::create_dir_all(dest).map_err(|error| SkyError::transient(format!("failed to create {}: {error}", dest.display())))?;
     let recorded = match fetch(dest) {
         Ok(recorded) => recorded,
         Err(message) => {
-            let _ = std::fs::remove_dir_all(dest);
+            let _ = remove_tree(dest);
             return Err(SkyError::transient(message));
         }
     };
@@ -135,6 +133,36 @@ pub fn fetch_recording(
     std::fs::write(&marker, recorded).map_err(|error| SkyError::transient(format!("failed to write {}: {error}", marker.display())))?;
     link_external(dest);
     Ok(())
+}
+
+/// Remove what an earlier fetch left at `dest`, if anything. Archives can
+/// make directories read-only, and the files in a read-only directory can't
+/// be removed, so each directory is made writable first; a fetch that was
+/// cut short would otherwise leave files that every later fetch trips on.
+fn remove_tree(dest: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = match dest.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() {
+        return std::fs::remove_file(dest);
+    }
+    let mut directories = vec![dest.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let mode = directory.symlink_metadata()?.permissions().mode();
+        if mode & 0o700 != 0o700 {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(mode | 0o700))?;
+        }
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                directories.push(entry.path());
+            }
+        }
+    }
+    std::fs::remove_dir_all(dest)
 }
 
 /// Hold the lock of a repository's directory, waiting for another fetch
@@ -433,5 +461,32 @@ pub fn host_os() -> &'static str {
         "windows" => "windows",
         "freebsd" => "freebsd",
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn fetches_again_over_read_only_files_a_cut_short_fetch_left() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("repo");
+        let lib = dest.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("left.tcl"), b"old").unwrap();
+        std::fs::set_permissions(lib.join("left.tcl"), std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&lib, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        fetch_into(&dest, |dir| {
+            std::fs::create_dir_all(dir.join("lib")).map_err(|error| error.to_string())?;
+            std::fs::write(dir.join("lib/new.tcl"), b"new").map_err(|error| error.to_string())
+        })
+        .unwrap();
+
+        assert!(!lib.join("left.tcl").exists());
+        assert_eq!(std::fs::read(lib.join("new.tcl")).unwrap(), b"new");
+        assert!(complete_marker(&dest).exists());
     }
 }
