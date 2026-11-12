@@ -39,11 +39,14 @@ pub enum AqueryFormat {
     StreamedProto,
     TextProto,
     JsonProto,
+    /// One line of JSON per C++ compile, for editors. Not one of Bazel's
+    /// formats.
+    CompileCommands,
 }
 
 impl AqueryFormat {
     /// The formats `aquery --output` takes, as Bazel lists them.
-    pub const NAMES: &'static [&'static str] = &["text", "summary", "commands", "proto", "streamed_proto", "textproto", "jsonproto"];
+    pub const NAMES: &'static [&'static str] = &["text", "summary", "commands", "proto", "streamed_proto", "textproto", "jsonproto", "compile_commands"];
 
     pub fn parse(name: &str) -> Option<AqueryFormat> {
         Some(match name {
@@ -54,6 +57,7 @@ impl AqueryFormat {
             "streamed_proto" => AqueryFormat::StreamedProto,
             "textproto" => AqueryFormat::TextProto,
             "jsonproto" => AqueryFormat::JsonProto,
+            "compile_commands" => AqueryFormat::CompileCommands,
             _ => return None,
         })
     }
@@ -337,6 +341,7 @@ pub async fn format<C: Compute>(graph: &ConfiguredGraph<C>, result: &NodeSet<Con
         AqueryFormat::StreamedProto => crate::action_proto::streamed(&owned, &mut printer),
         AqueryFormat::TextProto => crate::action_proto::text(&owned, &mut printer).into_bytes(),
         AqueryFormat::JsonProto => format!("{}\n", crate::action_proto::container(&owned, &mut printer).to_json(false)).into_bytes(),
+        AqueryFormat::CompileCommands => compile_commands(&owned, &output.exec_root, mapping).into_bytes(),
     })
 }
 
@@ -496,6 +501,131 @@ fn command(owned: &Owned) -> Option<String> {
     Some(format!("{}\n", escaped.join(" ")))
 }
 
+/// The C++ compiles among the actions, as `--output=compile_commands` prints
+/// them: lines of JSON, first the directory the arguments are relative to,
+/// then each distinct set of flags once, and a short line per compile that
+/// names its flag set and fills in what is its own.
+fn compile_commands(owned: &[Owned], exec_root: &std::path::Path, mapping: &RepoMappingTable) -> String {
+    let compiles = owned.iter().filter(|Owned { action, .. }| action.mnemonic.as_str() == "CppCompile" && matches!(action.kind, ActionKind::Spawn(_)));
+    let labelled: Vec<(String, &[String])> = compiles.map(|Owned { target, arguments, .. }| (display_label(target.label, mapping).to_string(), arguments.as_slice())).collect();
+    compile_command_lines(&exec_root.to_string_lossy(), &labelled)
+}
+
+/// What a compile command reads and writes, found from its flags.
+struct CompileFiles<'a> {
+    source: &'a str,
+    output: Option<&'a str>,
+    depfile: Option<&'a str>,
+}
+
+impl<'a> CompileFiles<'a> {
+    /// The files of a command that compiles one source with "-c"; nothing
+    /// for any other command.
+    fn of(arguments: &'a [String]) -> Option<CompileFiles<'a>> {
+        let after = |flag: &str| {
+            let index = arguments.iter().position(|argument| argument == flag)?;
+            arguments.get(index + 1).map(String::as_str)
+        };
+        Some(CompileFiles { source: after("-c")?, output: after("-o"), depfile: after("-MF") })
+    }
+
+    /// Whether `argument` names one of these files, alone or within a
+    /// flag such as -frandom-seed=<output>.
+    fn named_in(&self, argument: &str) -> bool {
+        let own = [Some(self.source), self.output, self.depfile];
+        own.into_iter().flatten().any(|file| !file.is_empty() && argument.contains(file))
+    }
+}
+
+/// A command's flags with the arguments that name its own files left
+/// empty, and the positions of those arguments: what compiles in one
+/// target and configuration share.
+#[derive(PartialEq, Eq, Hash)]
+struct FlagSet {
+    arguments: Vec<String>,
+    slots: Vec<usize>,
+}
+
+fn flag_set(arguments: &[String], files: &CompileFiles<'_>) -> FlagSet {
+    let mut shared = Vec::with_capacity(arguments.len());
+    let mut slots = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if files.named_in(argument) {
+            slots.push(index);
+            shared.push(String::new());
+        } else {
+            shared.push(argument.clone());
+        }
+    }
+    FlagSet { arguments: shared, slots }
+}
+
+/// The lines `--output=compile_commands` prints for `compiles`, each a
+/// target's label and a command's arguments.
+fn compile_command_lines(directory: &str, compiles: &[(String, &[String])]) -> String {
+    let mut out = format!("{{\"directory\":{}}}\n", json_string(directory));
+    let mut flag_sets: HashMap<FlagSet, usize> = HashMap::new();
+    for (label, arguments) in compiles {
+        let Some(files) = CompileFiles::of(arguments) else {
+            continue;
+        };
+        let flags = flag_set(arguments, &files);
+        let values: Vec<&str> = flags.slots.iter().map(|&slot| arguments[slot].as_str()).collect();
+        let next = flag_sets.len();
+        let id = match flag_sets.get(&flags) {
+            Some(&id) => id,
+            None => {
+                out.push_str(&flag_set_line(next, &flags));
+                flag_sets.insert(flags, next);
+                next
+            }
+        };
+        out.push_str(&compile_line(label, id, &values, &files));
+    }
+    out
+}
+
+fn flag_set_line(id: usize, flags: &FlagSet) -> String {
+    let arguments: Vec<String> = flags.arguments.iter().map(|argument| json_string(argument)).collect();
+    let slots: Vec<String> = flags.slots.iter().map(usize::to_string).collect();
+    format!("{{\"flags\":{id},\"arguments\":[{}],\"slots\":[{}]}}\n", arguments.join(","), slots.join(","))
+}
+
+fn compile_line(label: &str, flags: usize, values: &[&str], files: &CompileFiles<'_>) -> String {
+    let values: Vec<String> = values.iter().map(|value| json_string(value)).collect();
+    let mut line = format!(
+        "{{\"source\":{},\"label\":{},\"flags\":{flags},\"values\":[{}]",
+        json_string(files.source),
+        json_string(label),
+        values.join(",")
+    );
+    if let Some(depfile) = files.depfile {
+        line.push_str(&format!(",\"depfile\":{}", json_string(depfile)));
+    }
+    line.push_str("}\n");
+    line
+}
+
+/// `text` as a JSON string, with quotes, backslashes and control
+/// characters escaped.
+fn json_string(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\r' => quoted.push_str("\\r"),
+            control if u32::from(control) < 0x20 => quoted.push_str(&format!("\\u{:04x}", u32::from(control))),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Text as `aquery` prints it, as Bazel does: characters other than
 /// printable ASCII escaped, as `\uXXXX`, or `\UXXXXXXXX` beyond the
 /// Basic Multilingual Plane.
@@ -593,6 +723,43 @@ mod tests {
     fn escapes_what_isnt_printable_ascii_as_bazel_does() {
         assert_eq!(escaped_unicode("plain text"), "plain text");
         assert_eq!(escaped_unicode("a\nb\u{e9}\u{1F600}"), "a\\u000Ab\\u00E9\\U0001F600");
+    }
+
+    fn strings(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    #[test]
+    fn prints_each_flag_set_once() {
+        let a = strings(&["clang", "-MD", "-MF", "out/a.d", "-DNAME=\"x\"", "-frandom-seed=out/a.o", "-c", "pkg/a.cpp", "-o", "out/a.o"]);
+        let b = strings(&["clang", "-MD", "-MF", "out/b.d", "-DNAME=\"x\"", "-frandom-seed=out/b.o", "-c", "pkg/b.cpp", "-o", "out/b.o"]);
+        let c = strings(&["clang", "-O2", "-c", "pkg/c.cpp"]);
+        let compiles = [("//pkg:a".to_string(), a.as_slice()), ("//pkg:a".to_string(), b.as_slice()), ("//pkg:c".to_string(), c.as_slice())];
+        let printed = compile_command_lines("/exec root", &compiles);
+        let lines: Vec<&str> = printed.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "{\"directory\":\"/exec root\"}",
+                "{\"flags\":0,\"arguments\":[\"clang\",\"-MD\",\"-MF\",\"\",\"-DNAME=\\\"x\\\"\",\"\",\"-c\",\"\",\"-o\",\"\"],\"slots\":[3,5,7,9]}",
+                "{\"source\":\"pkg/a.cpp\",\"label\":\"//pkg:a\",\"flags\":0,\"values\":[\"out/a.d\",\"-frandom-seed=out/a.o\",\"pkg/a.cpp\",\"out/a.o\"],\"depfile\":\"out/a.d\"}",
+                "{\"source\":\"pkg/b.cpp\",\"label\":\"//pkg:a\",\"flags\":0,\"values\":[\"out/b.d\",\"-frandom-seed=out/b.o\",\"pkg/b.cpp\",\"out/b.o\"],\"depfile\":\"out/b.d\"}",
+                "{\"flags\":1,\"arguments\":[\"clang\",\"-O2\",\"-c\",\"\"],\"slots\":[3]}",
+                "{\"source\":\"pkg/c.cpp\",\"label\":\"//pkg:c\",\"flags\":1,\"values\":[\"pkg/c.cpp\"]}",
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_commands_that_compile_nothing() {
+        let version = strings(&["clang", "--version"]);
+        let printed = compile_command_lines("/", &[("//pkg:a".to_string(), version.as_slice())]);
+        assert_eq!(printed, "{\"directory\":\"/\"}\n");
+    }
+
+    #[test]
+    fn escapes_json_strings() {
+        assert_eq!(json_string("a\"b\\c\nd\u{1}"), "\"a\\\"b\\\\c\\nd\\u0001\"");
     }
 
     #[test]
