@@ -1,5 +1,5 @@
 {
-  "checksum": "0e45d0293f57aad14395f8cdce47363b93153dcf433c660af0c23fef7d5b70ae",
+  "checksum": "538273c45a82f6c6f82f7a77359ca8fe9023d0459f72c2277c12228edb0b5749",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -12131,7 +12131,8 @@
             "-p1"
           ],
           "patches": [
-            "@@//third_party/starlark:patches/starlark_syntax/0011-Add-parse_all_errors-going-on-past-syntax-and-lexer-.patch"
+            "@@//third_party/starlark:patches/starlark_syntax/0011-Add-parse_all_errors-going-on-past-syntax-and-lexer-.patch",
+            "@@//third_party/starlark:patches/starlark_syntax/0019-Keep-the-backslash-before-a-quote-in-raw-strings-as-.patch"
           ],
           "sha256": "7492c571c531e68099c911cfd909d32659f1cc0910cf3adee9fce66e39d21f14",
           "url": "https://static.crates.io/crates/starlark_syntax/0.14.2/download"

@@ -34,5 +34,6 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = [
         "//third_party/starlark:patches/starlark_syntax/0011-Add-parse_all_errors-going-on-past-syntax-and-lexer-.patch",
+        "//third_party/starlark:patches/starlark_syntax/0019-Keep-the-backslash-before-a-quote-in-raw-strings-as-.patch",
     ],
 )
