@@ -59,4 +59,5 @@ rust_library(
 rust_test(
     name = "bzlmod_test",
     crate = ":bzlmod",
+    deps = ["@crates//:tempfile"],
 )
