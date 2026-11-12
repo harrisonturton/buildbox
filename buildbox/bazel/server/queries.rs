@@ -321,6 +321,11 @@ async fn configured_query(context: &CommandContext<'_>, args: &[String], languag
             for error in &printed.errors {
                 out.error(error).await;
             }
+            if let ConfiguredOutput::Aquery(aquery) = &output {
+                if aquery.format == AqueryFormat::CompileCommands {
+                    plant_exec_root(context, &session, &aquery.exec_root, &printed.output, out).await;
+                }
+            }
             out.stdout_bytes(&printed.output).await;
         }
         Err(error) => {
@@ -331,6 +336,28 @@ async fn configured_query(context: &CommandContext<'_>, args: &[String], languag
     build::report_stats(started, out).await;
     build::completed(0, out).await;
     exit::SUCCESS
+}
+
+/// Link the workspace and the repositories that compile commands name into
+/// the execution root, so the commands work there outside a sandbox, as
+/// they do in Bazel's.
+async fn plant_exec_root(context: &CommandContext<'_>, session: &Session, exec_root: &std::path::Path, printed: &[u8], out: &Output) {
+    let names = crate::exec_root::mentioned_repos(&String::from_utf8_lossy(printed));
+    let keys: Vec<bazel_bzlmod::fetch_repo::RepoFetchKey> = names.iter().map(|name| bazel_bzlmod::fetch_repo::RepoFetchKey(bazel_label::RepoName::new(name))).collect();
+    let mut repos = Vec::new();
+    for (name, fetched) in names.iter().zip(session.evaluate_many(&keys).await) {
+        if let Ok(fetched) = fetched {
+            repos.push((name.clone(), fetched.path()));
+        }
+    }
+    let exec_root = exec_root.to_path_buf();
+    let workspace_root = context.workspace_root.clone();
+    let planted = tokio::task::spawn_blocking(move || crate::exec_root::plant(&exec_root, &workspace_root, &repos)).await;
+    match planted {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => out.warning(&format!("couldn't link the workspace into the execution root: {error}")).await,
+        Err(error) => out.warning(&format!("couldn't link the workspace into the execution root: {error}")).await,
+    }
 }
 
 /// Analyze a configured query's universe: the targets `--universe_scope`
