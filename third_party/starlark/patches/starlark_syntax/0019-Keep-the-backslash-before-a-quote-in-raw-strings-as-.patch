@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Harrison Turton <harrisonturton@gmail.com>
+Date: Thu, 12 Nov 2026 02:34:55 -0500
+Subject: [PATCH] Keep the backslash before a quote in raw strings, as Bazel
+ does
+
+r'\"' is two characters in Python and in Bazel's Starlark, a backslash and a
+quote; starlark-rust dropped the backslash. Bazel projects write defines such
+as r'VERSION=\"1.2.3\"', which then lost their quotes.
+---
+ src/lexer.rs                    | 13 +++++++------
+ src/lexer_tests.rs              |  5 +++--
+ src/lexer_tests/f_string.golden |  4 ++--
+ 3 files changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/src/lexer.rs b/src/lexer.rs
+index c015286c8..56d68e88a 100644
+--- a/src/lexer.rs
++++ b/src/lexer.rs
+@@ -419,9 +419,11 @@ impl<'a> Lexer<'a> {
+                     if raw {
+                         match it.next() {
+                             Some(c) => {
+-                                if c != '\'' && c != '"' {
+-                                    res.push('\\');
+-                                }
++                                // A raw string keeps its backslashes, even one
++                                // that stops a quote from ending the string:
++                                // r'\"' is two characters, as in Python and
++                                // Bazel.
++                                res.push('\\');
+                                 res.push(c);
+                             }
+                             _ => break, // Out of chars
+@@ -581,9 +583,8 @@ impl<'a> Lexer<'a> {
+                     if raw {
+                         match it.next() {
+                             Some(c) => {
+-                                if c != '\'' && c != '"' {
+-                                    res.push(b'\\');
+-                                }
++                                // As for strings: the backslash stays.
++                                res.push(b'\\');
+                                 let mut buf = [0u8; 4];
+                                 res.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                             }
+diff --git a/src/lexer_tests.rs b/src/lexer_tests.rs
+index ee5255ca5..285fce5b9 100644
+--- a/src/lexer_tests.rs
++++ b/src/lexer_tests.rs
+@@ -242,10 +242,11 @@ fn test_string_lit() {
+         lex("'''''' '''\\n''' '''\n''' \"\"\"\"\"\" \"\"\"\\n\"\"\" \"\"\"\n\"\"\""),
+         "\"\" \"\\n\" \"\\n\" \"\" \"\\n\" \"\\n\" \n"
+     );
+-    // Raw string
++    // Raw string: backslashes stay, even before a quote, as in Python and
++    // Bazel.
+     assert_eq!(
+         lex("r'' r\"\" r'\\'' r\"\\\"\" r'\"' r\"'\" r'\\n'"),
+-        "\"\" \"\" \"\'\" \"\\\"\" \"\\\"\" \"\'\" \"\\\\n\" \n"
++        "\"\" \"\" \"\\\\'\" \"\\\\\\\"\" \"\\\"\" \"\'\" \"\\\\n\" \n"
+     );
+ }
+ 
+diff --git a/src/lexer_tests/f_string.golden b/src/lexer_tests/f_string.golden
+index 0a035b325..8a702da6c 100644
+--- a/src/lexer_tests/f_string.golden
++++ b/src/lexer_tests/f_string.golden
+@@ -35,10 +35,10 @@ f-string end                   # '
+ f-string start                 # fr"
+ f-string end                   # "
+ f-string start                 # fr'
+-f-string text "'"              # \'
++f-string text "\\'"            # \'
+ f-string end                   # '
+ f-string start                 # fr"
+-f-string text "\""             # \"
++f-string text "\\\""           # \"
+ f-string end                   # "
+ f-string start                 # fr'
+ f-string text "\""             # "

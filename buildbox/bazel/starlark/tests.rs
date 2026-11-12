@@ -138,6 +138,18 @@ fn evaluate_build(source: &str) -> Package {
 }
 
 #[test]
+fn raw_strings_keep_backslashes_before_quotes() {
+    // Bazel projects pass string defines this way, and C++ code then sees
+    // VERSION as the string "1.2.3"; LLVM's Bazel overlay does.
+    let package = evaluate_build("filegroup(name = 'a', tags = [r'VERSION=\\\"1.2.3\\\"', r\"\\'\", r'a\\\\b'])\n");
+    let Some(Target::Rule(rule)) = package.target(Symbol::intern("a")) else {
+        panic!("a is a rule");
+    };
+    let expected = AttrValue::StringList(vec![r#"VERSION=\"1.2.3\""#.into(), r"\'".into(), r"a\\b".into()]);
+    assert_eq!(rule.attr(Symbol::intern("tags")), Some(&expected));
+}
+
+#[test]
 fn invalid_rules_are_errors_at_their_call() {
     let package = evaluate_build("filegroup(name = 'ok')\nfilegroup(name = 'bad', nope = 1)\nfilegroup(name = 'after')\n");
     assert!(package.target(Symbol::intern("ok")).is_some());
