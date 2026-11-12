@@ -12,6 +12,7 @@ mod build_events;
 mod build_id;
 mod command;
 mod commands;
+mod exec_root;
 mod fetch;
 mod mod_graph;
 mod modcmd;
