@@ -295,4 +295,29 @@ ext = module_extension(_ext_impl)
         assert_eq!(rendered(&from_rule), r#"{"made":"lib++ext+made","mine":"+repo+mine","":"","app":"","lib":"lib+","bazel_tools":"bazel_tools"}"#);
         assert_eq!(missing, None);
     }
+
+    /// Labels in an extension's repository resolve as the mapping
+    /// `dump_repo_mapping` prints says, the extension's own names first.
+    #[tokio::test]
+    async fn extension_repos_resolve_names_as_their_mappings_say() {
+        use bazel_label::RepoMapping;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        write(&root.join("MODULE.bazel"), ROOT_MODULE);
+        write(&root.join("lib/MODULE.bazel"), LIB_MODULE);
+        write(&root.join("lib/BUILD.bazel"), "");
+        write(&root.join("lib/ext.bzl"), EXTENSION);
+        let workspaces = workspaces(&dir.path().join("cache"));
+        let workspace = workspaces.get(&root);
+        let session = workspace.graph.session().await;
+        let graph = session.evaluate(&DepGraphKey).await.unwrap();
+        let made = RepoName::new("lib++ext+made");
+
+        let dumped = ordered_mapping(&session, &graph, made).await.unwrap().unwrap();
+        let resolving = session.evaluate(&bazel_loading::RepoMappingKey(made)).await.unwrap();
+
+        for (name, repo) in &dumped {
+            assert_eq!(resolving.0.resolve(name), Some(*repo), "@{name}");
+        }
+    }
 }
