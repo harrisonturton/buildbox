@@ -450,6 +450,22 @@ async fn transient_results_are_kept_until_invalidated() {
     assert_eq!(graph.invalidate_transient().await, 1);
 }
 
+#[tokio::test]
+async fn invalidating_transient_results_verifies_only_their_dependents() {
+    let engine = Engine::default();
+    let counts = Arc::new(Counts::default());
+    let (graph, _disk) = workspace(&engine, &counts);
+    assert_eq!(total(&graph).await, 5);
+    graph.session().await.evaluate(&Flaky("x".into())).await.unwrap_err();
+    let verified = |kind: &str| engine.stats().kinds.iter().find(|row| row.name == kind).map_or(0, |row| row.verified);
+    let (totals_before, lines_before) = (verified("TOTAL"), verified("LINES"));
+
+    assert_eq!(graph.invalidate_transient().await, 1);
+    assert_eq!(total(&graph).await, 5);
+    assert_eq!(verified("TOTAL"), totals_before, "Total, which the transient error doesn't reach, isn't verified again");
+    assert_eq!(verified("LINES"), lines_before);
+}
+
 fn gated_workspace(engine: &Engine, counts: &Arc<Counts>) -> (Graph, Arc<Gate>) {
     let gate = Arc::new(Gate(tokio::sync::Semaphore::new(0)));
     let globals = Globals::new().with(counts.clone()).with(gate.clone());

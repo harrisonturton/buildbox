@@ -223,22 +223,25 @@ impl Graph {
 
     /// Mark every key whose result was transient, such as a failure that
     /// may not recur, as needing to be computed again, starting a new
-    /// revision if there are any. Waits for open sessions to finish.
+    /// revision if there are any. As with [`Graph::invalidate`], only what
+    /// they reach is verified again. Waits for open sessions to finish.
     /// Returns how many keys were marked.
     pub async fn invalidate_transient(&self) -> usize {
         let _guard = self.0.sessions.write().await;
         let mut state = self.0.lock();
-        let mut marked = 0;
-        for node in state.nodes.values_mut() {
+        let mut dirtied = Vec::new();
+        for (&id, node) in state.nodes.iter_mut() {
             if node.flags & TRANSIENT != 0 {
                 node.flags |= DIRTY;
-                marked += 1;
+                dirtied.push(id);
             }
         }
-        if marked > 0 {
-            self.0.revision.fetch_add(1, Ordering::AcqRel);
+        if dirtied.is_empty() {
+            return 0;
         }
-        marked
+        let previous = self.0.revision.fetch_add(1, Ordering::AcqRel);
+        state.keep_unreached(&dirtied, previous, previous + 1);
+        dirtied.len()
     }
 
     /// Every key of type `K` with a result in this graph, for finding which
