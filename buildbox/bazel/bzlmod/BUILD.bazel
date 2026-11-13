@@ -19,6 +19,7 @@ rust_library(
         "module_ctx.rs",
         "module_file.rs",
         "path_value.rs",
+        "raw_text.rs",
         "registry.rs",
         "repo_ctx.rs",
         "repo_env.rs",

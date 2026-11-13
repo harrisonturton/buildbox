@@ -511,7 +511,8 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         if path.is_dir() {
             anyhow::bail!("attempting to read() a directory: {}", path.display());
         }
-        std::fs::read_to_string(&path).map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))
+        let bytes = std::fs::read(&path).map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;
+        Ok(crate::raw_text::decode(bytes))
     }
 
     fn file<'v>(
@@ -523,7 +524,7 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let _ = legacy_utf8;
         let path = io_of(this)?.path(path)?;
-        write_file(&path, content.as_bytes(), executable)?;
+        write_file(&path, &crate::raw_text::encode(content), executable)?;
         Ok(NoneType)
     }
 

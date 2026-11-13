@@ -20,6 +20,7 @@ pub mod lockfile;
 pub mod module_ctx;
 pub mod module_file;
 pub mod path_value;
+pub mod raw_text;
 pub mod registry;
 pub mod repo_ctx;
 pub mod repo_env;
