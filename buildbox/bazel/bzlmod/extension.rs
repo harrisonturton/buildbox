@@ -7,10 +7,10 @@ use crate::lockfile::{LockfileKey, LockfileMode, LockfileModeKey};
 use crate::io::IoState;
 use crate::module_ctx::{ModuleCtx, Tag};
 use crate::repo_spec::RepoRuleSpec;
-use crate::resolve::{DepGraph, DepGraphKey};
+use crate::resolve::{DepGraph, DepGraphKey, ExtensionInfo};
 use bazel_label::{RepoMappingTable, RepoName};
 use bazel_loading::{BzlLoadKey, RepoMappingKey};
-use bazel_starlark::repo_api::{ModuleExtension, TagClass};
+use bazel_starlark::repo_api::{ModuleExtension, RepoDefinition, TagClass};
 use bazel_starlark::{EvalContext, FileKind};
 use intern::Symbol;
 use skycodec::{Decode, Encode, Fingerprint};
@@ -117,7 +117,6 @@ fn run_extension(
     mappings: HashMap<RepoName, Arc<RepoMappingTable>>,
 ) -> anyhow::Result<(Vec<(String, RepoRuleSpec)>, bool)> {
     let info = &graph.extensions[index];
-    let owner = info.bzl.repo();
     let mut context = EvalContext::new(FileKind::Bzl, info.bzl);
     context.mappings = mappings;
     context.repos = Some(RefCell::new(Vec::new()));
@@ -155,17 +154,25 @@ fn run_extension(
     let repos = definitions
         .into_iter()
         .map(|definition| {
-            let spec = RepoRuleSpec {
-                bzl: definition.rule.0,
-                rule: definition.rule.1,
-                attrs: definition.attrs.iter().map(|(name, value)| (name.clone(), from_recorded(value))).collect(),
-                base_repo: owner,
-                original_name: definition.name.clone(),
-            };
+            let spec = generated_spec(info, &definition);
             (definition.name, spec)
         })
         .collect();
     Ok((repos, reproducible))
+}
+
+/// The spec of a repository an extension generated. As in Bazel, labels in
+/// its attributes are relative to the module defining the extension, but
+/// may also name the extension's other repositories.
+pub(crate) fn generated_spec(info: &ExtensionInfo, definition: &RepoDefinition) -> RepoRuleSpec {
+    RepoRuleSpec {
+        bzl: definition.rule.0,
+        rule: definition.rule.1.clone(),
+        attrs: definition.attrs.iter().map(|(name, value)| (name.clone(), from_recorded(value))).collect(),
+        base_repo: info.bzl.repo(),
+        mapping_repo: info.repo(&definition.name),
+        original_name: definition.name.clone(),
+    }
 }
 
 /// `module_ctx.modules`: each module using the extension, with its tags.
@@ -244,7 +251,7 @@ pub async fn extension_mapping(ctx: &Ctx, graph: &DepGraph, extension: usize, re
     let result = ctx.compute(&ExtensionKey(extension as u32)).await?;
     let mut entries = base.entries.clone();
     for (name, _) in &result.repos {
-        entries.push((Symbol::intern(name), RepoName::new(&format!("{}+{name}", info.prefix))));
+        entries.push((Symbol::intern(name), info.repo(name)));
     }
     for (name, overriding) in graph.repo_overrides(extension) {
         let name = Symbol::intern(&name);
@@ -260,4 +267,52 @@ fn extension_environ(module: &bazel_loading::BzlModule, name: &str) -> Vec<Strin
         return Vec::new();
     };
     ModuleExtension::from_value(value.value()).map(|extension| extension.environ.clone()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo_ctx::given_context;
+    use crate::star_value::StarValue;
+    use bazel_label::Label;
+    use bazel_packages::AttrType;
+
+    fn resolve(context: &AttrContext<'_>, text: &str) -> String {
+        match context.convert(AttrType::Label, &StarValue::String(text.to_string())).unwrap() {
+            StarValue::Label(label) => label.canonical_form(),
+            other => panic!("expected a label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generated_repo_attrs_name_sibling_repos_relative_to_the_owner() {
+        let owner = RepoName::new("dep+");
+        let info = ExtensionInfo {
+            bzl: Label::parse_canonical("@@dep+//:ext.bzl").unwrap(),
+            name: "ext".to_string(),
+            prefix: "dep++ext".to_string(),
+            users: Vec::new(),
+            isolated: false,
+        };
+        let definition = RepoDefinition {
+            name: "thing".to_string(),
+            rule: (info.bzl, "thing_repo".to_string()),
+            attrs: Vec::new(),
+        };
+        let spec = generated_spec(&info, &definition);
+
+        let owner_mapping = RepoMappingTable::new(owner, vec![(Symbol::intern("dep"), owner)]);
+        let mut generated_entries = owner_mapping.entries.clone();
+        generated_entries.push((Symbol::intern("thing_data"), info.repo("thing_data")));
+        let generated_mapping = RepoMappingTable::new(info.repo("thing"), generated_entries);
+        let mappings = HashMap::from([
+            (owner, Arc::new(owner_mapping)),
+            (info.repo("thing"), Arc::new(generated_mapping)),
+        ]);
+        let empty = RepoMappingTable::new(owner, Vec::new());
+        let given = given_context(&spec, &mappings, &empty);
+
+        assert_eq!(resolve(&given, "@thing_data//:data.txt"), "@@dep++ext+thing_data//:data.txt");
+        assert_eq!(resolve(&given, "//pkg:file.txt"), "@@dep+//pkg:file.txt");
+    }
 }

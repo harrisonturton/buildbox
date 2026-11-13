@@ -75,6 +75,7 @@ impl Key for RepoSpecKey {
                 rule: call.rule.clone(),
                 attrs: call.attrs.clone(),
                 base_repo: module.repo,
+                mapping_repo: module.repo,
                 original_name: call.name.clone(),
             }));
         }

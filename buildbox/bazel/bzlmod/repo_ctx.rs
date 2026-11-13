@@ -13,7 +13,7 @@ use crate::star_value::StarValue;
 use crate::typecheck::SchemaAttr;
 use allocative::Allocative;
 use bazel_fs::{FileContentKey, Root, RootedPath};
-use bazel_label::{Label, LabelContext, PackageId, RepoMappingTable, RepoName};
+use bazel_label::{Label, LabelContext, RepoMappingTable, RepoName};
 use bazel_loading::{BzlLoadKey, BzlModule, RepoMappingKey};
 use bazel_starlark::attr_module::Attribute;
 use bazel_starlark::repo_api::RepositoryRule;
@@ -130,7 +130,7 @@ fn repo_methods(builder: &mut MethodsBuilder) {
 /// Fetch a repository by running its repository rule.
 pub async fn fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec) -> Result<FetchedRepo, SkyError> {
     let module = ctx.compute(&BzlLoadKey::for_bzlmod(spec.bzl)).await?;
-    let mappings = mappings(ctx, &module, spec.base_repo).await?;
+    let mappings = mappings(ctx, &module, spec.mapping_repo).await?;
     let definer = defining_repo_dir(ctx, spec).await?;
     let loaded = LoadedRule { module, mappings, identity: definer };
     run_fetch(ctx, repo, spec, loaded).await
@@ -225,9 +225,21 @@ async fn run_fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec, loaded: Loade
     })
 }
 
+/// How labels given in a spec's attributes resolve: relative to the root of
+/// its `base_repo`, naming other repositories as its `mapping_repo` does.
+/// `empty` stands in for a mapping `mappings` lacks.
+pub(crate) fn given_context<'a>(
+    spec: &RepoRuleSpec,
+    mappings: &'a HashMap<RepoName, Arc<RepoMappingTable>>,
+    empty: &'a RepoMappingTable,
+) -> AttrContext<'a> {
+    let mapping = mappings.get(&spec.mapping_repo).map(|mapping| &**mapping).unwrap_or(empty);
+    AttrContext::repo_root(spec.base_repo, mapping)
+}
+
 /// The mappings a rule's code needs: its own repository's, the
-/// repositories its module loads from, and the one its attributes are
-/// relative to.
+/// repositories its module loads from, and the one that resolves its
+/// attributes' labels.
 async fn mappings(ctx: &Ctx, module: &BzlModule, base: RepoName) -> Result<HashMap<RepoName, Arc<RepoMappingTable>>, SkyError> {
     let mut repos = module.repos.clone();
     repos.push(base);
@@ -282,10 +294,11 @@ async fn defining_repo_dir(ctx: &Ctx, spec: &RepoRuleSpec) -> Result<String, Sky
 /// name, such as a `build_file`. Repositories are shared between
 /// workspaces, so these must be part of what identifies the repository.
 async fn main_repo_inputs(ctx: &Ctx, spec: &RepoRuleSpec, mappings: &HashMap<RepoName, Arc<RepoMappingTable>>) -> Result<Vec<u8>, SkyError> {
-    let empty = RepoMappingTable::new(spec.base_repo, Vec::new());
+    let empty = RepoMappingTable::new(spec.mapping_repo, Vec::new());
+    let given = given_context(spec, mappings, &empty);
     let base = LabelContext {
-        package: PackageId::new(spec.base_repo, PathId::ROOT),
-        mapping: mappings.get(&spec.base_repo).map(|mapping| &**mapping).unwrap_or(&empty),
+        package: given.package,
+        mapping: given.mapping,
         lenient: false,
     };
     let mut labels = Vec::new();
@@ -339,14 +352,13 @@ fn run_rule(
     io: IoState,
     mappings: HashMap<RepoName, Arc<RepoMappingTable>>,
 ) -> anyhow::Result<()> {
-    let empty = Arc::new(RepoMappingTable::new(spec.base_repo, Vec::new()));
-    let base_mapping = mappings.get(&spec.base_repo).cloned().unwrap_or_else(|| empty.clone());
-    let rule_mapping = mappings.get(&spec.bzl.repo()).cloned().unwrap_or(empty);
-    let given = AttrContext::repo_root(spec.base_repo, &*base_mapping);
+    let empty = RepoMappingTable::new(spec.mapping_repo, Vec::new());
+    let given = given_context(spec, &mappings, &empty);
+    let rule_mapping = mappings.get(&spec.bzl.repo()).map(|mapping| &**mapping).unwrap_or(&empty);
     // Defaults are relative to the file defining the rule.
     let defaults = AttrContext {
         package: spec.bzl.package,
-        mapping: &*rule_mapping,
+        mapping: rule_mapping,
     };
     let what = format!("{}%{}", spec.bzl, spec.rule);
     let mut context = EvalContext::new(FileKind::Bzl, spec.bzl);

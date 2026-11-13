@@ -76,8 +76,14 @@ pub struct RepoRuleSpec {
     pub bzl: Label,
     pub rule: String,
     pub attrs: Vec<(String, StarValue)>,
-    /// The repository whose mapping resolves labels in `attrs`.
+    /// The repository whose root labels in `attrs`, such as `//pkg:file`,
+    /// are relative to.
     pub base_repo: RepoName,
+    /// The repository whose mapping resolves the repository names in
+    /// `attrs`, such as `@name//:file`: usually `base_repo`, but for a
+    /// repository a module extension generated, that repository itself, so
+    /// its attributes can name the extension's other repositories.
+    pub mapping_repo: RepoName,
     /// The name the rule was called with, which `repository_ctx.original_name`
     /// gives.
     pub original_name: String,
