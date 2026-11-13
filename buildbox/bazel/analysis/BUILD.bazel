@@ -61,6 +61,7 @@ rust_library(
         "toolchains.rs",
         "transition.rs",
         "workspace_status.rs",
+        "xcode.rs",
     ],
     crate_name = "bazel_analysis",
     crate_root = "analysis.rs",

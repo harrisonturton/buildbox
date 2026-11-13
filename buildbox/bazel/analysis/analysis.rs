@@ -48,6 +48,7 @@ mod target_value;
 mod toolchains;
 pub mod transition;
 pub mod workspace_status;
+mod xcode;
 
 pub use action::{Action, ActionKind, ParamFile, RunfilesTree, Spawn, StoredAction, environment};
 pub use args::{param_file_arguments, param_file_contents};

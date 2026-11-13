@@ -23,7 +23,7 @@ use bazel_label::{Label, PackageId, RepoMappingTable, RepoName};
 use bazel_packages::{AttrSchema, AttrType, AttrValue, Cfg, RuleClass};
 use bazel_starlark::attr_module::Attribute;
 use bazel_starlark::label_value::LabelValue;
-use bazel_starlark::opaque::{Analyzing, Opaque};
+use bazel_starlark::opaque::Analyzing;
 use bazel_starlark::{EvalContext, FileKind};
 use intern::Symbol;
 use skycodec::Fingerprinter;
@@ -783,14 +783,10 @@ pub fn register() {
     bazel_starlark::subrule::set_attr_value_fn(subrule_attr_value);
 }
 
-/// Late-bound attributes for Apple platforms, which rules read
-/// unconditionally but only use when building for them. Lenient opaque
-/// values stand in for the targets, which bb doesn't analyze yet.
-const APPLE_LATE_BOUND_ATTRS: &[&str] = &["_xcode_config"];
-
 fn attr_value<'v>(input: &RuleInput, prepared: &Prepared<'v>, schema: &AttrSchema, value: &AttrValue, heap: Heap<'v>) -> Value<'v> {
-    if APPLE_LATE_BOUND_ATTRS.contains(&schema.name.as_str()) && matches!(value, AttrValue::None) {
-        return heap.alloc(Opaque::lenient(schema.name.as_str()));
+    // The Xcode configuration's target, which bb doesn't analyze yet.
+    if schema.name.as_str() == "_xcode_config" && matches!(value, AttrValue::None) {
+        return heap.alloc(crate::xcode::XcodeConfig::new(&input.config.options));
     }
     if schema.is_dependency && schema.cfg == Cfg::Transition && schema.ty.has_labels() && !schema.ty.is_output() {
         return transitioned_value(input, prepared, schema, heap);
