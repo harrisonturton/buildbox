@@ -142,6 +142,14 @@ pub struct ExtensionInfo {
     pub isolated: bool,
 }
 
+impl ExtensionInfo {
+    /// The canonical name of the repository the extension generates as
+    /// `name`.
+    pub fn repo(&self, name: &str) -> RepoName {
+        RepoName::new(&format!("{}+{name}", self.prefix))
+    }
+}
+
 /// The resolved dependency graph. The root module is first.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub struct DepGraph {
@@ -296,7 +304,7 @@ impl DepGraph {
     fn imported_repo(&self, extension: usize, exported: &str, overrides: &[(String, RepoName)]) -> RepoName {
         match overrides.iter().find(|(name, _)| name == exported) {
             Some((_, repo)) => *repo,
-            None => RepoName::new(&format!("{}+{}", self.extensions[extension].prefix, exported)),
+            None => self.extensions[extension].repo(exported),
         }
     }
 }
@@ -884,6 +892,7 @@ async fn override_spec(ctx: &Ctx, root: &ModuleFile, name: &str, rule: OverrideR
             rule: rule.name.to_string(),
             attrs: attrs.to_vec(),
             base_repo: RepoName::MAIN,
+            mapping_repo: RepoName::MAIN,
             original_name: name.to_string(),
         },
         root_repo_name: root.own_repo_name().to_string(),
