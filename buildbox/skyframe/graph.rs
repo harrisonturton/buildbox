@@ -293,6 +293,30 @@ impl Session {
         let requests = keys.iter().map(|key| self.evaluate(key));
         futures::future::join_all(requests).await
     }
+
+    /// Every key of type `K` whose value is already known at this
+    /// session's revision, with its value, evaluating nothing. Keys that
+    /// failed, or that an invalidation may have changed, are left out.
+    pub fn evaluated<K: Key>(&self) -> Vec<(K, Arc<K::Value>)> {
+        let kind = kinds::kind_of::<K>();
+        let engine = &self.graph.engine.0;
+        let current: Vec<(u32, ValueRef)> = {
+            let state = self.graph.lock();
+            let nodes = state.nodes.iter().filter(|(_, node)| node.verified_at == self.revision && node.flags & (DIRTY | ERROR) == 0);
+            nodes.filter(|(&id, _)| engine.keys.kind(KeyId(id)) == kind).map(|(&id, node)| (id, node.value)).collect()
+        };
+        let mut evaluated = Vec::with_capacity(current.len());
+        for (id, value) in current {
+            let Ok(key) = skycodec::from_bytes::<K>(engine.keys.encoding(KeyId(id))) else {
+                continue;
+            };
+            let Ok(value) = engine.read_value::<K>(value) else {
+                continue;
+            };
+            evaluated.push((key, value));
+        }
+        evaluated
+    }
 }
 
 impl GraphInner {

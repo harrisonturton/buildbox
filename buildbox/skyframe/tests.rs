@@ -329,6 +329,33 @@ async fn invalidating_keys_the_graph_lacks_keeps_its_revision() {
     assert_eq!(graph.stats().revision, revision + 1);
 }
 
+/// The `Lines` keys a session already knows the values of, by file.
+fn evaluated_lines(session: &skyframe::Session) -> Vec<(String, u64)> {
+    let mut lines: Vec<(String, u64)> = session.evaluated::<Lines>().into_iter().map(|(key, value)| (key.0, value.0)).collect();
+    lines.sort();
+    lines
+}
+
+#[tokio::test]
+async fn sessions_list_what_is_evaluated_without_evaluating_more() {
+    let engine = Engine::default();
+    let counts = Arc::new(Counts::default());
+    let (graph, disk) = workspace(&engine, &counts);
+    assert!(evaluated_lines(&graph.session().await).is_empty());
+    assert_eq!(total(&graph).await, 5);
+    assert_eq!(evaluated_lines(&graph.session().await), [("a".to_string(), 3), ("b".to_string(), 2)]);
+
+    disk.write("a", "1\n2\n3\n4");
+    graph.invalidate(&[File("a".into())]).await;
+    assert_eq!(evaluated_lines(&graph.session().await), [("b".to_string(), 2)], "a's lines may have changed");
+    assert_eq!(counts.get(), (3, 2, 1));
+
+    assert_eq!(total(&graph).await, 6);
+    assert_eq!(evaluated_lines(&graph.session().await), [("a".to_string(), 4), ("b".to_string(), 2)]);
+    let _ = graph.session().await.evaluate(&Fails("x".into())).await;
+    assert!(graph.session().await.evaluated::<Fails>().is_empty(), "failures are left out");
+}
+
 #[tokio::test]
 async fn invalidating_a_file_verifies_only_its_dependents() {
     let engine = Engine::default();
