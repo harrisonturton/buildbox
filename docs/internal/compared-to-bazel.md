@@ -65,6 +65,10 @@ computation rather than starting another.
 External repositories are fetched once per machine, into a directory named
 by what defines them (`bazel/bzlmod/fetch_repo.rs`), and downloads are
 cached by SHA-256, so a second worktree doesn't fetch or extract anything.
+Each workspace's output base still has Bazel's `external/<canonical name>`
+for tools that look there: after each command that resolves repositories,
+links to the trees that workspace's graph fetched
+(`bazel/server/external.rs`).
 
 ### 2. A large JVM heap
 

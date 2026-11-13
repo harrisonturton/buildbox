@@ -28,6 +28,7 @@ rust_library(
         "build_id.rs",
         "command.rs",
         "commands.rs",
+        "external.rs",
         "fetch.rs",
         "mod_graph.rs",
         "modcmd.rs",

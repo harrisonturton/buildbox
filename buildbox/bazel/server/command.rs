@@ -66,7 +66,8 @@ fn lockfile_mode(options: &ParsedOptions) -> Result<LockfileMode, String> {
 }
 
 /// The commands that resolve the module graph, after which the lockfile
-/// is updated, as Bazel updates it after commands that load packages.
+/// is updated, as Bazel updates it after commands that load packages, and
+/// the repositories fetched are linked in the output base.
 const RESOLVING_COMMANDS: &[&str] = &["build", "test", "run", "query", "cquery", "aquery", "fetch", "mod"];
 
 /// Write the lockfile a command's resolution makes, if its mode writes the
@@ -99,6 +100,16 @@ async fn update_lockfile(context: &CommandContext<'_>, command: &str) {
     if let Ok(Err(error)) = written {
         tracing::warn!("failed to write {}: {error}", bazel_bzlmod::lockfile::LOCKFILE);
     }
+}
+
+/// Link the repositories a command's graph has fetched in the output
+/// base's `external` directory, where Bazel keeps them.
+async fn link_external(context: &CommandContext<'_>, command: &str) {
+    if !RESOLVING_COMMANDS.contains(&command) {
+        return;
+    }
+    let workspace = context.server.workspaces().get(&context.workspace_root);
+    crate::external::link_fetched(&workspace.graph, &crate::commands::output_base(context)).await;
 }
 
 /// The credential helpers `--credential_helper` configures, as Bazel finds
@@ -479,6 +490,7 @@ async fn run_in_span(server: &BazelServer, invocation: Invocation, out: &Output)
         other => unsupported(other, out).await,
     };
     update_lockfile(&context, &command).await;
+    link_external(&context, &command).await;
     crate::build_events::finish(code, out).await
 }
 
