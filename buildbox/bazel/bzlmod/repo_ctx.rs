@@ -173,6 +173,12 @@ pub async fn check_override(ctx: &Ctx, spec: &OverrideSpec) -> Result<(), SkyErr
     Err(SkyError::new(bazel_loading::with_reported(&format!("<builtin>: {error}"), &error)))
 }
 
+/// Changed when what a repository rule makes depends on bb in a way that
+/// its spec and inputs don't show, so that repositories made before are
+/// made again: "2" since paths through `external` resolve to the
+/// workspace's own repositories (`IoState::resolved`).
+const RULE_OUTPUT_VERSION: &[u8] = b"2";
+
 /// A repository rule's loaded `.bzl` file, the mappings it runs with, and
 /// what identifies the rule's definition besides the spec.
 struct LoadedRule {
@@ -191,7 +197,23 @@ async fn run_fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec, loaded: Loade
     let environment = ctx.global::<ClientEnv>()?.current();
     let stable_spec = format!("{spec:?}");
     let local = local_inputs(&module, spec);
-    let dest = repo_dir(&config, repo, &[stable_spec.as_bytes(), identity.as_bytes(), &inputs, env_inputs.as_bytes(), local.as_bytes()].concat());
+    let mut identifying = [RULE_OUTPUT_VERSION, stable_spec.as_bytes(), identity.as_bytes(), &inputs, env_inputs.as_bytes(), local.as_bytes()].concat();
+    // A rule that reached other repositories by a path through `external`
+    // made something that depends on which of them this workspace has, so
+    // their directories identify it too: workspaces with different
+    // versions of them get directories of their own.
+    let reaches_file = reaches_beside(&repo_dir(&config, repo, &identifying));
+    let reaches = read_reaches(&reaches_file);
+    for name in &reaches {
+        let dir = match ctx.compute(&RepoFetchKey(RepoName::new(name))).await {
+            Ok(fetched) => fetched.path().display().to_string(),
+            Err(_) => String::new(),
+        };
+        identifying.extend_from_slice(format!("\0{name}={dir}").as_bytes());
+    }
+    let dest = repo_dir(&config, repo, &identifying);
+    let reached = Arc::new(Mutex::new(Vec::new()));
+    let reached_by_fetch = reached.clone();
     let access = GraphAccess::new(ctx.clone());
     let downloads = config.downloads_for(ctx)?;
     let spec = spec.clone();
@@ -214,15 +236,51 @@ async fn run_fetch(ctx: &Ctx, repo: RepoName, spec: &RepoRuleSpec, loaded: Loade
                 recorded: recorded.clone(),
             };
             run_rule(&module, &spec, repo, io, mappings).map_err(|error| format!("fetching @@{repo}: {error}"))?;
-            let recorded = recorded.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).encode();
-            Ok(recorded)
+            let recorded = recorded.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *reached_by_fetch.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                recorded.repos.iter().map(|(name, _)| name.clone()).collect::<Vec<String>>();
+            Ok(recorded.encode())
         })
     })
     .await;
     result.map_err(|error| SkyError::transient(error.to_string()))??;
+    let mut reached = std::mem::take(&mut *reached.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+    reached.sort();
+    reached.dedup();
+    let mut known = reaches;
+    let before = known.len();
+    for name in reached {
+        if !known.contains(&name) {
+            known.push(name);
+        }
+    }
+    if known.len() != before {
+        known.sort();
+        // Only a hint: without it, the next fetch is in the directory this
+        // one used, which its marker keeps from being reused wrongly.
+        let _ = std::fs::write(&reaches_file, known.join("\n"));
+    }
     Ok(FetchedRepo {
         dir: Symbol::intern(&dest.display().to_string()),
     })
+}
+
+/// The file beside the directory a rule's spec alone names, listing the
+/// repositories the rule reached by paths through `external` when it ran.
+fn reaches_beside(dir: &std::path::Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}.reaches", dir.display()))
+}
+
+/// The names in a `reaches` file, sorted; none if it isn't there. Bounded,
+/// since it's only a hint and anything could have written there.
+fn read_reaches(path: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = text.lines().filter(|line| !line.is_empty() && line.len() < 256).take(64).map(str::to_string).collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// How labels given in a spec's attributes resolve: relative to the root of
@@ -388,4 +446,19 @@ fn run_rule(
     });
     graph.report_printed(&context.printed.take());
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reaches_file_is_read_as_sorted_unique_names_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.reaches");
+        assert!(read_reaches(&path).is_empty());
+        let long = "n".repeat(300);
+        std::fs::write(&path, format!("b\na\n\nb\n{long}\n")).unwrap();
+        assert_eq!(read_reaches(&path), vec!["a".to_string(), "b".to_string()]);
+    }
 }

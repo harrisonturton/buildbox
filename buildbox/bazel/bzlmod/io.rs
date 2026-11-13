@@ -6,6 +6,7 @@ use crate::graph_access::GraphAccess;
 use crate::path_value::PathValue;
 use allocative::Allocative;
 use bazel_fetch::{ArchiveType, DownloadCache, Integrity, RequestHeaders};
+use bazel_label::RepoName;
 use bazel_starlark::label_value::LabelValue;
 use starlark::collections::SmallMap;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
@@ -51,6 +52,9 @@ pub struct RecordedInputs {
     pub files: Vec<(String, Option<String>)>,
     /// Directory trees, by absolute path, with their digests.
     pub trees: Vec<(String, String)>,
+    /// Other repositories reached by a path through `external`, by
+    /// canonical name, with the directory each resolved to.
+    pub repos: Vec<(String, String)>,
 }
 
 impl RecordedInputs {
@@ -70,7 +74,8 @@ impl RecordedInputs {
         let env = self.env.iter().all(|(name, value)| graph.env_var(name).is_ok_and(|now| now == *value));
         let files = self.files.iter().all(|(path, digest)| graph.file_digest(Path::new(path)).is_ok_and(|now| now == *digest));
         let trees = self.trees.iter().all(|(path, digest)| graph.tree_digest(Path::new(path)).is_ok_and(|now| now == *digest));
-        env && files && trees
+        let repos = self.repos.iter().all(|(name, dir)| graph.repo_dir(RepoName::new(name)).is_ok_and(|now| now.display().to_string() == *dir));
+        env && files && trees && repos
     }
 }
 
@@ -189,7 +194,32 @@ impl IoState {
         };
         let path = Path::new(text);
         let joined = if path.is_absolute() { path.to_path_buf() } else { self.base_dir.join(path) };
-        Ok(normalize(&joined))
+        Ok(self.resolved(normalize(&joined)))
+    }
+
+    /// `path`, or, if it reaches another repository through the
+    /// `external` directory beside the fetched repositories, the same file
+    /// in the copy of that repository this workspace resolved. In Bazel,
+    /// `external` is the workspace's own, so a rule that finds a sibling
+    /// repository by a path such as `../../external/<name>` gets the
+    /// workspace's version of it. bb's `external` holds one link per name
+    /// for every workspace, which the last fetch of that name points
+    /// anywhere, so following it would give another workspace's version.
+    fn resolved(&self, path: PathBuf) -> PathBuf {
+        let Some(external) = self.repos_dir.parent().map(|base| base.join("external")) else {
+            return path;
+        };
+        let Some((name, rest)) = through_external(&path, &external) else {
+            return path;
+        };
+        let Ok(dir) = self.graph.repo_dir(RepoName::new(&name)) else {
+            return path;
+        };
+        let mut recorded = self.recorded();
+        if !recorded.repos.iter().any(|(recorded_name, _)| *recorded_name == name) {
+            recorded.repos.push((name, dir.display().to_string()));
+        }
+        if rest.as_os_str().is_empty() { dir } else { dir.join(rest) }
     }
 
     fn which(&self, program: &str) -> Option<PathBuf> {
@@ -218,6 +248,15 @@ fn remove_existing(path: &Path) -> anyhow::Result<()> {
 
 /// A path with `.` and `..` resolved lexically, as Bazel resolves the
 /// paths repository rules give.
+/// The repository's name and the path inside it, if `path` is inside
+/// `external`'s link for a repository.
+fn through_external(path: &Path, external: &Path) -> Option<(String, PathBuf)> {
+    let inside = path.strip_prefix(external).ok()?;
+    let mut components = inside.components();
+    let name = components.next()?.as_os_str().to_str()?.to_string();
+    Some((name, components.as_path().to_path_buf()))
+}
+
 fn normalize(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
@@ -782,5 +821,25 @@ pub fn io_methods(builder: &mut MethodsBuilder) {
         let io = io_of(this)?;
         io.watch_tree(&io.path(path)?)?;
         Ok(NoneType)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_through_external_names_its_repository() {
+        let external = Path::new("/cache/bazel/external");
+        assert_eq!(
+            through_external(Path::new("/cache/bazel/external/llvm_toolchain_llvm/bin/ld.lld"), external),
+            Some(("llvm_toolchain_llvm".to_string(), PathBuf::from("bin/ld.lld")))
+        );
+        assert_eq!(
+            through_external(Path::new("/cache/bazel/external/llvm_toolchain_llvm"), external),
+            Some(("llvm_toolchain_llvm".to_string(), PathBuf::new()))
+        );
+        assert_eq!(through_external(Path::new("/cache/bazel/repos/llvm-0123/bin"), external), None);
+        assert_eq!(through_external(external, external), None);
     }
 }
