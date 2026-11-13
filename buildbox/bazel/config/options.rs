@@ -309,6 +309,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("incompatible_exclude_starlark_flags_from_exec_config", Bool, Text("false")),
         option("incompatible_filegroup_runfiles_for_data", Bool, Text("true")),
         option("incompatible_limit_platforms_in_output_dir_to", Labels, Text("")),
+        option("incompatible_macos_set_install_name", Bool, Text("true")),
         option("incompatible_make_thinlto_command_lines_standalone", Bool, Text("true")),
         option("incompatible_merge_genfiles_directory", Bool, Text("true")),
         option("incompatible_modify_execution_info_additive", Bool, Text("true")),

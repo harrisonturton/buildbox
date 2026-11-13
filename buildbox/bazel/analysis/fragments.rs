@@ -80,6 +80,7 @@ impl<'v> StarlarkValue<'v> for Fragment {
             ("cpp", "custom_malloc" | "_fdo_prefetch_hints_label") => Value::new_none(),
             ("cpp", "apple_generate_dsym" | "objc_generate_linkmap" | "objc_should_strip_binary") => Value::new_bool(false),
             ("cpp", "_dont_enable_host_nonhost") => Value::new_bool(true),
+            ("cpp", "do_not_use_macos_set_install_name") => Value::new_bool(self.options.bool("incompatible_macos_set_install_name")),
             ("proto", "experimental_protoc_opts") => words("protocopt"),
             ("proto", "cc_proto_library_header_suffixes") => heap.alloc(AllocList([".pb.h"])),
             ("proto", "cc_proto_library_source_suffixes") => heap.alloc(AllocList([".pb.cc"])),
