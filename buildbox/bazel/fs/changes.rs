@@ -51,10 +51,20 @@ fn signature(path: &Path) -> Signature {
 /// File keys record a path's signature before reading it, so a change made
 /// while it's read is still seen as a change later. [`FileChanges::changed`]
 /// stats every recorded path again, in parallel, and returns those that
-/// differ.
+/// differ; [`FileChanges::settle`] then takes the new signatures as
+/// recorded, so that a change is found once even if no key reads the path
+/// again.
 #[derive(Default)]
 pub struct FileChanges {
     seen: Mutex<HashMap<RootedPath, (PathBuf, Signature)>>,
+}
+
+/// A recorded path whose signature has changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub path: RootedPath,
+    recorded: Signature,
+    found: Signature,
 }
 
 impl FileChanges {
@@ -78,7 +88,7 @@ impl FileChanges {
     }
 
     /// The recorded paths that have changed since they were recorded.
-    pub async fn changed(&self) -> Vec<RootedPath> {
+    pub async fn changed(&self) -> Vec<Change> {
         let entries: Vec<(RootedPath, PathBuf, Signature)> = self
             .lock()
             .iter()
@@ -87,25 +97,44 @@ impl FileChanges {
         let mut tasks = Vec::new();
         for chunk in entries.chunks(STATS_PER_TASK) {
             let chunk = chunk.to_vec();
-            tasks.push(tokio::task::spawn_blocking(move || {
-                chunk
-                    .into_iter()
-                    .filter(|(_, absolute, signature)| self::signature(absolute) != *signature)
-                    .map(|(path, _, _)| path)
-                    .collect::<Vec<_>>()
-            }));
+            tasks.push(tokio::task::spawn_blocking(move || chunk.into_iter().filter_map(compare).collect::<Vec<_>>()));
         }
         let mut changed = Vec::new();
         for task in tasks {
             match task.await {
-                Ok(paths) => changed.extend(paths),
+                Ok(changes) => changed.extend(changes),
                 Err(error) => tracing::warn!("failed to check files for changes: {error}"),
             }
         }
         changed
     }
 
+    /// Take the signatures `changes` found as the recorded ones. Call once
+    /// what read the paths has been invalidated, so a change is found only
+    /// once. A path recorded again since keeps what was recorded then.
+    pub fn settle(&self, changes: &[Change]) {
+        let mut seen = self.lock();
+        for change in changes {
+            let Some((_, signature)) = seen.get_mut(&change.path) else {
+                continue;
+            };
+            if *signature == change.recorded {
+                *signature = change.found;
+            }
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, HashMap<RootedPath, (PathBuf, Signature)>> {
         self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// The change to a recorded path, if it has changed.
+fn compare((path, absolute, recorded): (RootedPath, PathBuf, Signature)) -> Option<Change> {
+    let found = signature(&absolute);
+    if found == recorded {
+        return None;
+    }
+    tracing::debug!(path = %absolute.display(), "changed");
+    Some(Change { path, recorded, found })
 }

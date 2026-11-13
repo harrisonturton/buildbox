@@ -129,7 +129,40 @@ async fn changes_are_found_by_statting_again() {
 
     std::fs::write(dir.path().join("pkg/BUILD"), "changed and longer").unwrap();
     std::fs::write(dir.path().join("pkg/new.cc"), "").unwrap();
-    let mut changed = changes.changed().await;
+    let mut changed: Vec<RootedPath> = changes.changed().await.into_iter().map(|change| change.path).collect();
     changed.sort_by_key(|p| p.path.to_string());
     assert_eq!(changed, [listing, build]);
+}
+
+#[tokio::test]
+async fn a_settled_change_is_found_once() {
+    let dir = tree();
+    let changes = FileChanges::new();
+    let build = RootedPath::new(Root::Workspace, path("pkg/BUILD"));
+    changes.record(build, &dir.path().join("pkg/BUILD"));
+
+    std::fs::write(dir.path().join("pkg/BUILD"), "changed and longer").unwrap();
+    let found = changes.changed().await;
+    assert_eq!(found.iter().map(|change| change.path).collect::<Vec<_>>(), [build]);
+    assert_eq!(changes.changed().await, found, "unsettled, the change is found again");
+    changes.settle(&found);
+    assert!(changes.changed().await.is_empty(), "settled, it isn't, though nothing read the file again");
+
+    std::fs::write(dir.path().join("pkg/BUILD"), "changed again, and longer still").unwrap();
+    assert_eq!(changes.changed().await.len(), 1);
+}
+
+#[tokio::test]
+async fn settling_keeps_what_was_recorded_since() {
+    let dir = tree();
+    let changes = FileChanges::new();
+    let build = RootedPath::new(Root::Workspace, path("pkg/BUILD"));
+    changes.record(build, &dir.path().join("pkg/BUILD"));
+
+    std::fs::write(dir.path().join("pkg/BUILD"), "changed and longer").unwrap();
+    let found = changes.changed().await;
+    std::fs::write(dir.path().join("pkg/BUILD"), "changed again, and longer still").unwrap();
+    changes.record(build, &dir.path().join("pkg/BUILD"));
+    changes.settle(&found);
+    assert!(changes.changed().await.is_empty(), "the path keeps the signature recorded after the change was found");
 }

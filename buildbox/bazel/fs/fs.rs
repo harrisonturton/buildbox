@@ -9,7 +9,7 @@
 mod changes;
 mod glob;
 
-pub use changes::FileChanges;
+pub use changes::{Change, FileChanges};
 
 pub use glob::{Glob, GlobError, GlobPattern, GlobResult};
 

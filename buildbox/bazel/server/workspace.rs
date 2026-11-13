@@ -8,7 +8,7 @@ use bazel_bzlmod::lockfile::{CommandLockfileMode, LockfileMode, LockfileModeKey}
 use bazel_bzlmod::registry::{CommandRegistries, Registries, RegistriesKey};
 use bazel_bzlmod::repo_env::{ClientEnv, RepoEnvKey, RepoEnvVarKey, RepoEnvironment};
 use bazel_execution::{Jobs, SourceDigestKey, TestKey};
-use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey};
+use bazel_fs::{DirListingKey, FileChanges, FileContentKey, FileStateKey, RootedPath};
 use bazel_loading::autoload::{AutoloadSettings, AutoloadSettingsKey, CommandAutoloads};
 use bazel_progress::Progress;
 use skyframe::{Engine, Globals, Graph};
@@ -103,11 +103,12 @@ impl Workspace {
         if env_changes.overrides {
             self.graph.invalidate(&[RepoEnvKey]).await;
         }
-        let changed = self.changes.changed().await;
-        if changed.is_empty() {
+        let changes = self.changes.changed().await;
+        if changes.is_empty() {
             return 0;
         }
-        tracing::info!(files = changed.len(), "invalidating changed files");
+        tracing::info!(files = changes.len(), "invalidating changed files");
+        let changed: Vec<RootedPath> = changes.iter().map(|change| change.path).collect();
         let states: Vec<FileStateKey> = changed.iter().map(|path| FileStateKey(*path)).collect();
         let listings: Vec<DirListingKey> = changed.iter().map(|path| DirListingKey(*path)).collect();
         let contents: Vec<FileContentKey> = changed.iter().map(|path| FileContentKey(*path)).collect();
@@ -116,6 +117,7 @@ impl Workspace {
         self.graph.invalidate(&listings).await;
         self.graph.invalidate(&contents).await;
         self.graph.invalidate(&digests).await;
+        self.changes.settle(&changes);
         changed.len()
     }
 
