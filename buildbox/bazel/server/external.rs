@@ -7,8 +7,11 @@
 //! resolved, made again after each command, since another workspace may
 //! have fetched them.
 
-use bazel_bzlmod::fetch_repo::RepoFetchKey;
-use skyframe::Graph;
+use bazel_bzlmod::fetch_repo::{FetchSpecKey, RepoFetchKey};
+use bazel_bzlmod::resolve::DepGraphKey;
+use bazel_label::RepoName;
+use skyframe::{Graph, Session};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,14 +22,34 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub async fn link_fetched(graph: &Graph, output_base: &Path) {
     let fetched = {
         let session = graph.session().await;
-        session.evaluated::<RepoFetchKey>()
+        fetched(&session)
     };
-    let links: Vec<(String, PathBuf)> = fetched.into_iter().map(|(key, repo)| (key.0.as_str().to_string(), repo.path())).collect();
+    let links: Vec<(String, PathBuf)> = fetched.into_iter().map(|(repo, dir)| (repo.as_str().to_string(), dir)).collect();
     let external = output_base.join("external");
     let linked = tokio::task::spawn_blocking(move || link_all(&external, &links)).await;
     if let Err(error) = linked {
         tracing::warn!("failed to link external repositories: {error}");
     }
+}
+
+/// The directory of each repository the session's graph has fetched: those
+/// fetched by name, and the modules resolution fetched to read their
+/// `MODULE.bazel`, such as overridden ones, with the specs the module graph
+/// gives them now.
+fn fetched(session: &Session) -> HashMap<RepoName, PathBuf> {
+    let mut fetched = HashMap::new();
+    if let Some((_, graph)) = session.evaluated::<DepGraphKey>().pop() {
+        let specs: HashMap<RepoName, _> = graph.modules.iter().filter_map(|module| Some((module.repo, module.spec.as_ref()?))).collect();
+        for (key, repo) in session.evaluated::<FetchSpecKey>() {
+            if specs.get(&key.repo) == Some(&&key.spec) {
+                fetched.insert(key.repo, repo.path());
+            }
+        }
+    }
+    for (key, repo) in session.evaluated::<RepoFetchKey>() {
+        fetched.insert(key.0, repo.path());
+    }
+    fetched
 }
 
 /// Make `external/<name>` a link to each repository's directory.
@@ -76,7 +99,6 @@ mod tests {
     use super::*;
     use crate::testing::{workspaces, write};
     use bazel_fs::{FileContentKey, Root, RootedPath};
-    use bazel_label::RepoName;
     use intern::PathId;
 
     /// A workspace depending on module `lib` at `lib_dir` through a
@@ -127,6 +149,23 @@ mod tests {
         first.graph.invalidate(&[module_file]).await;
         fetch_lib(&first.graph, &first_base).await;
         assert_eq!(std::fs::read_link(first_base.join("external/lib+")).unwrap(), second_lib, "relinked to the version resolved now");
+    }
+
+    #[tokio::test]
+    async fn modules_resolution_fetched_are_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        module_lib(&lib);
+        let root = dir.path().join("app");
+        workspace_using(&root, &lib);
+        let workspaces = workspaces(&dir.path().join("cache"));
+        let workspace = workspaces.get(&root);
+        let output_base = dir.path().join("base");
+
+        workspace.graph.session().await.evaluate(&DepGraphKey).await.unwrap();
+        link_fetched(&workspace.graph, &output_base).await;
+
+        assert_eq!(std::fs::read_link(output_base.join("external/lib+")).unwrap(), lib);
     }
 
     #[tokio::test]
