@@ -45,6 +45,7 @@ rust_library(
         "service.rs",
         "test.rs",
         "test_options.rs",
+        "testing.rs",
         "top_level.rs",
         "workspace.rs",
         "written.rs",

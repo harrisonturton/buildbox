@@ -28,6 +28,8 @@ mod running;
 mod service;
 mod test;
 mod test_options;
+#[cfg(test)]
+mod testing;
 mod top_level;
 mod workspace;
 mod written;

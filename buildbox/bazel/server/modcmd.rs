@@ -5,11 +5,13 @@ use crate::build;
 use crate::command::{CommandContext, exit};
 use crate::output::Output;
 use crate::mod_graph::{GraphModule, GraphOptions};
+use bazel_bzlmod::extension::ExtensionKey;
 use bazel_bzlmod::repo_spec::RepoSpec;
 use bazel_bzlmod::resolve::{DepGraph, DepGraphKey};
 use bazel_options::{OptionKind, ParsedOptions};
 use bazel_label::RepoName;
 use bazel_options::OptionSpec;
+use skyframe::{Session, SkyError};
 
 /// Bazel's `mod` subcommands.
 const SUBCOMMANDS: &str = "deps, graph, all_paths, path, explain, show_repo, show_extension, dump_repo_mapping, tidy";
@@ -69,9 +71,13 @@ pub async fn mod_command(context: &CommandContext<'_>, args: &[String], out: &Ou
     let mut mappings = Vec::with_capacity(arguments.len());
     let mut missing = Vec::new();
     for name in arguments {
-        match graph.module(RepoName::new(name)) {
-            Some((index, _)) => mappings.push(graph.ordered_module_mapping(index)),
-            None => missing.push(name.as_str()),
+        match ordered_mapping(&session, &graph, RepoName::new(name)).await {
+            Ok(Some(mapping)) => mappings.push(mapping),
+            Ok(None) => missing.push(name.as_str()),
+            Err(error) => {
+                out.error(error.message()).await;
+                return exit::EXTERNAL_DEPS_ERROR;
+            }
         }
     }
     if !missing.is_empty() {
@@ -81,6 +87,25 @@ pub async fn mod_command(context: &CommandContext<'_>, args: &[String], out: &Ou
     let text: String = mappings.iter().map(|mapping| format!("{}\n", json_object(mapping))).collect();
     out.stdout(&text).await;
     exit::SUCCESS
+}
+
+/// How a repository sees others, in the order Bazel lists them, or `None`
+/// if the graph has no such repository: a module's, a `use_repo_rule`'s,
+/// which sees as its module does, or one a module extension generates,
+/// which evaluates the extension.
+async fn ordered_mapping(session: &Session, graph: &DepGraph, repo: RepoName) -> Result<Option<Vec<(String, RepoName)>>, SkyError> {
+    if let Some((index, _)) = graph.module(repo) {
+        return Ok(Some(graph.ordered_module_mapping(index)));
+    }
+    if let Some((module, _)) = graph.repo_rule_of(repo) {
+        return Ok(Some(graph.ordered_module_mapping(module)));
+    }
+    let Some((extension, _)) = graph.extension_of(repo) else {
+        return Ok(None);
+    };
+    let result = session.evaluate(&ExtensionKey(extension as u32)).await?;
+    let generated: Vec<String> = result.repos.iter().map(|(name, _)| name.clone()).collect();
+    Ok(graph.ordered_extension_mapping(extension, &generated))
 }
 
 /// `mod graph` or `mod deps`: the tree of modules from the root, or from
@@ -201,4 +226,73 @@ fn json_object(mapping: &[(String, RepoName)]) -> String {
 
 fn json_string(text: &str) -> String {
     serde_json::Value::String(text.to_string()).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{workspaces, write};
+
+    const ROOT_MODULE: &str = r#"
+module(name = "app")
+bazel_dep(name = "lib")
+local_path_override(module_name = "lib", path = "lib")
+ext = use_extension("@lib//:ext.bzl", "ext")
+use_repo(ext, "made")
+r = use_repo_rule("@lib//:ext.bzl", "repo")
+r(name = "mine")
+override_repo(ext, zed = "mine")
+"#;
+
+    const LIB_MODULE: &str = r#"
+module(name = "lib")
+ext = use_extension("//:ext.bzl", "ext")
+use_repo(ext, "made", lib_also = "also")
+"#;
+
+    const EXTENSION: &str = r#"
+def _repo_impl(rctx):
+    rctx.file("BUILD.bazel", "")
+
+repo = repository_rule(_repo_impl)
+
+def _ext_impl(mctx):
+    repo(name = "zed")
+    repo(name = "made")
+    repo(name = "also")
+    repo(name = "bazel_tools")
+
+ext = module_extension(_ext_impl)
+"#;
+
+    fn rendered(mapping: &[(String, RepoName)]) -> String {
+        json_object(mapping)
+    }
+
+    /// As Bazel 9.3.1's `mod dump_repo_mapping` prints them.
+    #[tokio::test]
+    async fn repositories_from_extensions_and_repo_rules_have_mappings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        write(&root.join("MODULE.bazel"), ROOT_MODULE);
+        write(&root.join("lib/MODULE.bazel"), LIB_MODULE);
+        write(&root.join("lib/BUILD.bazel"), "");
+        write(&root.join("lib/ext.bzl"), EXTENSION);
+        let workspaces = workspaces(&dir.path().join("cache"));
+        let workspace = workspaces.get(&root);
+        let session = workspace.graph.session().await;
+        let graph = session.evaluate(&DepGraphKey).await.unwrap();
+        let mapping = |repo: &str| ordered_mapping(&session, &graph, RepoName::new(repo));
+
+        let generated = mapping("lib++ext+made").await.unwrap().unwrap();
+        let from_rule = mapping("+repo+mine").await.unwrap().unwrap();
+        let missing = mapping("nothing").await.unwrap();
+
+        assert_eq!(
+            rendered(&generated),
+            r#"{"made":"lib++ext+made","lib_also":"lib++ext+also","lib":"lib+","bazel_tools":"lib++ext+bazel_tools","zed":"+repo+mine","also":"lib++ext+also"}"#
+        );
+        assert_eq!(rendered(&from_rule), r#"{"made":"lib++ext+made","mine":"+repo+mine","":"","app":"","lib":"lib+","bazel_tools":"bazel_tools"}"#);
+        assert_eq!(missing, None);
+    }
 }

@@ -74,19 +74,10 @@ fn temporary_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bazel_bzlmod::config::BzlmodConfig;
-    use bazel_bzlmod::resolver::BzlmodRepositories;
+    use crate::testing::{workspaces, write};
     use bazel_fs::{FileContentKey, Root, RootedPath};
     use bazel_label::RepoName;
-    use bazel_loading::{BuiltinsDir, Repositories};
     use intern::PathId;
-    use skyframe::{Engine, Globals};
-    use std::sync::Arc;
-
-    fn write(path: &Path, contents: &str) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, contents).unwrap();
-    }
 
     /// A workspace depending on module `lib` at `lib_dir` through a
     /// `local_path_override`.
@@ -101,18 +92,6 @@ mod tests {
     fn module_lib(dir: &Path) {
         write(&dir.join("MODULE.bazel"), "module(name = 'lib')\n");
         write(&dir.join("BUILD.bazel"), "");
-    }
-
-    /// The server's services, fetching into `cache` with a `@bazel_tools`
-    /// of its own.
-    fn services(cache: &Path) -> Globals {
-        let tools = cache.join("bazel_tools");
-        write(&tools.join("MODULE.bazel"), "module(name = 'bazel_tools')\n");
-        let config = BzlmodConfig::new(cache.to_path_buf(), cache.join("repository_cache"), Some(tools));
-        Globals::new()
-            .with(Arc::new(Repositories(Arc::new(BzlmodRepositories))))
-            .with(Arc::new(config))
-            .with(Arc::new(BuiltinsDir(None)))
     }
 
     /// Fetch `@@lib+` in the workspace's graph, as a command would, then
@@ -133,7 +112,7 @@ mod tests {
         let (first_root, second_root) = (dir.path().join("first"), dir.path().join("second"));
         workspace_using(&first_root, &first_lib);
         workspace_using(&second_root, &second_lib);
-        let workspaces = crate::workspace::Workspaces::new(Engine::default(), services(&dir.path().join("cache")));
+        let workspaces = workspaces(&dir.path().join("cache"));
         let (first, second) = (workspaces.get(&first_root), workspaces.get(&second_root));
         let (first_base, second_base) = (dir.path().join("base1"), dir.path().join("base2"));
 
@@ -157,7 +136,7 @@ mod tests {
         module_lib(&lib);
         let root = dir.path().join("app");
         workspace_using(&root, &lib);
-        let workspaces = crate::workspace::Workspaces::new(Engine::default(), services(&dir.path().join("cache")));
+        let workspaces = workspaces(&dir.path().join("cache"));
         let workspace = workspaces.get(&root);
         let output_base = dir.path().join("base");
         fetch_lib(&workspace.graph, &output_base).await;

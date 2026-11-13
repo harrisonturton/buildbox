@@ -208,10 +208,7 @@ impl DepGraph {
     pub fn ordered_module_mapping(&self, index: usize) -> Vec<(String, RepoName)> {
         let module = &self.modules[index];
         let mut entries: Vec<(String, RepoName)> = Vec::new();
-        let mut put = |name: &str, repo: RepoName| match entries.iter_mut().find(|(existing, _)| existing == name) {
-            Some(entry) => entry.1 = repo,
-            None => entries.push((name.to_string(), repo)),
-        };
+        let mut put = |name: &str, repo: RepoName| put_entry(&mut entries, name, repo);
         for (usage_index, usage) in module.file.extension_usages.iter().enumerate() {
             let user = (index as u32, usage_index as u32);
             let Some(extension) = self.extensions.iter().position(|extension| extension.users.contains(&user)) else {
@@ -233,6 +230,26 @@ impl DepGraph {
             put(apparent, *repo);
         }
         entries
+    }
+
+    /// How a repository an extension generated sees others, in the order
+    /// Bazel lists them: as the module defining the extension does, then
+    /// the repositories the extension generated, `generated` by the names
+    /// it gave them in the order it made them, which take the place of the
+    /// module's of the same name, then those the root module overrides
+    /// or injects. `None` if no module defines the extension.
+    pub fn ordered_extension_mapping(&self, extension: usize, generated: &[String]) -> Option<Vec<(String, RepoName)>> {
+        let info = &self.extensions[extension];
+        let (owner, _) = self.module(info.bzl.repo())?;
+        let mut entries = self.ordered_module_mapping(owner);
+        let mut put = |name: &str, repo: RepoName| put_entry(&mut entries, name, repo);
+        for name in generated {
+            put(name, RepoName::new(&format!("{}+{name}", info.prefix)));
+        }
+        for (name, overriding) in self.repo_overrides(extension) {
+            put(&name, overriding);
+        }
+        Some(entries)
     }
 
     /// How a module's repository sees others.
@@ -298,6 +315,16 @@ impl DepGraph {
             Some((_, repo)) => *repo,
             None => RepoName::new(&format!("{}+{}", self.extensions[extension].prefix, exported)),
         }
+    }
+}
+
+/// Map `name` to `repo` in an ordered mapping: in the place of an entry of
+/// that name, or after the others, as Bazel's mappings keep the first
+/// place and the last value of a name.
+fn put_entry(entries: &mut Vec<(String, RepoName)>, name: &str, repo: RepoName) {
+    match entries.iter_mut().find(|(existing, _)| existing == name) {
+        Some(entry) => entry.1 = repo,
+        None => entries.push((name.to_string(), repo)),
     }
 }
 
@@ -1029,5 +1056,56 @@ use_repo(crate, "crates")
         assert_eq!(app_crates.as_str(), "rules_rust++crate+app_crates");
         assert_eq!(graph.module_mapping(1).resolve("crates"), Some(app_crates));
         assert_eq!(graph.ordered_module_mapping(1)[0], ("crates".to_string(), app_crates));
+    }
+
+    /// As Bazel 9.3.1's `mod dump_repo_mapping lib++ext+made` prints it.
+    #[test]
+    fn extension_repos_see_their_own_repos_before_their_modules() {
+        let mut modules = vec![
+            module(
+                "app",
+                RepoName::MAIN,
+                &["lib"],
+                r#"
+ext = use_extension("@lib//:ext.bzl", "ext")
+use_repo(ext, "made")
+r = use_repo_rule("@lib//:ext.bzl", "repo")
+r(name = "mine")
+override_repo(ext, zed = "mine")
+"#,
+            ),
+            module(
+                "lib",
+                canonical_name("lib", "", false),
+                &[],
+                r#"
+ext = use_extension("//:ext.bzl", "ext")
+use_repo(ext, "made", lib_also = "also")
+"#,
+            ),
+        ];
+        modules[1].deps.push(("bazel_tools".to_string(), RepoName::new("bazel_tools")));
+        let extensions = extensions(&modules).unwrap();
+        let graph = DepGraph {
+            modules,
+            extensions,
+            direct_dep_mismatches: Vec::new(),
+            yanked: Vec::new(),
+            registry_file_hashes: Vec::new(),
+        };
+        let generated = ["zed", "made", "also", "bazel_tools"].map(String::from);
+
+        let mapping = graph.ordered_extension_mapping(0, &generated).unwrap();
+
+        let mapping: Vec<(&str, &str)> = mapping.iter().map(|(name, repo)| (name.as_str(), repo.as_str())).collect();
+        let expected = [
+            ("made", "lib++ext+made"),
+            ("lib_also", "lib++ext+also"),
+            ("lib", "lib+"),
+            ("bazel_tools", "lib++ext+bazel_tools"),
+            ("zed", "+repo+mine"),
+            ("also", "lib++ext+also"),
+        ];
+        assert_eq!(mapping, expected);
     }
 }
