@@ -97,8 +97,6 @@ rather than misbehaving. Still missing:
 - `cquery` names configurations by bb's own hash, not Bazel's checksum,
   and there are no test-trimmed configurations: where Bazel analyzes
   non-test targets without test options, bb uses the same configuration.
-- `--per_file_copt` and `--host_per_file_copt` are accepted but ignored:
-  `per_file_copts` in `analysis/cc/internal.rs` returns none.
 
 ## 4. Actions and artifacts
 

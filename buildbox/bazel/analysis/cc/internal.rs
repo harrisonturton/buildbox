@@ -21,9 +21,13 @@ use crate::file_value::FileValue;
 use crate::inputs::{InputSet, InputSets};
 use bazel_starlark::depset::Depset;
 use bazel_starlark::label_value::LabelValue;
+use crate::fragments::Fragment;
 use crate::state::RuleState;
+use bazel_config::PerLabelOptions;
+use bazel_label::Label;
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// `_builtins.internal.cc_internal`.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
@@ -432,8 +436,8 @@ fn cc_internal_methods(builder: &mut MethodsBuilder) {
         Ok(crate::args::Args::from_state(args))
     }
 
-    /// The `--per_file_copt`s for a source file, which bb doesn't take:
-    /// none.
+    /// The options of each `--per_file_copt` whose filter takes the source
+    /// file's label or its path, in the order they were given.
     fn per_file_copts<'v>(
         this: Value<'v>,
         #[starlark(require = pos)] cpp_configuration: Value<'v>,
@@ -441,8 +445,15 @@ fn cc_internal_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = pos)] label: Value<'v>,
         heap: Heap<'v>,
     ) -> anyhow::Result<Value<'v>> {
-        let _ = (this, cpp_configuration, source_file, label);
-        Ok(heap.alloc(AllocList::EMPTY))
+        let _ = this;
+        let cpp = cpp_configuration
+            .downcast_ref::<Fragment>()
+            .filter(|fragment| fragment.name == "cpp")
+            .ok_or_else(|| anyhow::anyhow!("per_file_copts: cpp_configuration must be the cpp fragment"))?;
+        let source = FileValue::artifact(source_file).ok_or_else(|| anyhow::anyhow!("per_file_copts: source_file must be a File"))?;
+        let label = label.downcast_ref::<LabelValue>().map(|label| label.0);
+        let copts = copts_for_file(cpp.options.strings("per_file_copt"), label, &source.exec_path.to_string())?;
+        Ok(heap.alloc(AllocList(copts)))
     }
 
     /// The `--per_file_lto_backend_opt`s for an object file: none.
@@ -509,6 +520,40 @@ fn cc_internal_methods(builder: &mut MethodsBuilder) {
         let empty = || heap.alloc(AllocList::EMPTY);
         Ok(self::header_info(fields, deps.unwrap_or_else(empty), merged_deps.unwrap_or_else(empty), heap))
     }
+}
+
+/// The options of each of `values`, `--per_file_copt`s, that apply to the
+/// source file with `label` at `exec_path`.
+fn copts_for_file(values: &[String], label: Option<Label>, exec_path: &str) -> anyhow::Result<Vec<String>> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut copts = Vec::new();
+    for value in parsed_per_file_copts(values)?.iter() {
+        if value.applies_to(label, exec_path)? {
+            copts.extend(value.options.iter().cloned());
+        }
+    }
+    Ok(copts)
+}
+
+/// Each list of `--per_file_copt`s a configuration has, parsed, so that
+/// their regular expressions are compiled once rather than for each file.
+static PARSED_PER_FILE_COPTS: LazyLock<Mutex<HashMap<Vec<String>, Arc<Vec<PerLabelOptions>>>>> = LazyLock::new(Mutex::default);
+
+fn parsed_per_file_copts(values: &[String]) -> anyhow::Result<Arc<Vec<PerLabelOptions>>> {
+    let mut parsed = PARSED_PER_FILE_COPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(found) = parsed.get(values) {
+        return Ok(found.clone());
+    }
+    let mut list = Vec::new();
+    for value in values {
+        let options = PerLabelOptions::parse(value).map_err(|error| anyhow::anyhow!("--per_file_copt={value}: {error}"))?;
+        list.push(options);
+    }
+    let list = Arc::new(list);
+    parsed.insert(values.to_vec(), list.clone());
+    Ok(list)
 }
 
 /// What a `header_info` holds besides its dependencies'.
@@ -754,4 +799,30 @@ pub fn register_builtins_internal(builder: &mut GlobalsBuilder) {
     builder.set("cc_common", cc_common);
     let cc_internal = builder.alloc(CcInternal);
     builder.set("cc_internal", cc_internal);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IDE_WARNINGS: &str = r".*,-^external/.*,-^\x40.*@-Wall,-Wextra,-Werror";
+
+    fn copts(values: &[&str], label: &str, exec_path: &str) -> Vec<String> {
+        let values: Vec<String> = values.iter().map(|value| value.to_string()).collect();
+        copts_for_file(&values, Some(Label::parse_canonical(label).unwrap()), exec_path).unwrap()
+    }
+
+    #[test]
+    fn files_get_the_options_of_each_filter_that_takes_them_in_order() {
+        let values = [IDE_WARNINGS, r"Buffer\.cpp$@-DFIRST", "-Buffer@-DNOT_BUFFER", "@-DLAST"];
+        assert_eq!(copts(&values, "@@//Editor/Document:Buffer.cpp", "Editor/Document/Buffer.cpp"), ["-Wall", "-Wextra", "-Werror", "-DFIRST", "-DLAST"]);
+    }
+
+    #[test]
+    fn external_files_are_left_out_by_their_label_and_their_path() {
+        let llvm_label = "@@+llvm_project+llvm-project//llvm:lib/Demangle/Demangle.cpp";
+        let llvm_path = "external/+llvm_project+llvm-project/llvm/lib/Demangle/Demangle.cpp";
+        assert!(copts(&[IDE_WARNINGS], llvm_label, llvm_path).is_empty());
+        assert_eq!(copts(&[r".*,-^external/.*@-Wall"], llvm_label, llvm_path), ["-Wall"]);
+    }
 }
