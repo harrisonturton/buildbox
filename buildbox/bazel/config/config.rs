@@ -630,6 +630,16 @@ mod tests {
     }
 
     #[test]
+    fn per_file_options_are_checked_and_kept_as_given() {
+        let mut options = options();
+        options.apply("per_file_copt", r".*,-^\x40.*@-Wall,-Werror", &parse_label).unwrap();
+        options.apply("per_file_copt", "a@-DX", &parse_label).unwrap();
+        assert_eq!(options.strings("per_file_copt"), [r".*,-^\x40.*@-Wall,-Werror", "a@-DX"]);
+        let error = options.apply("host_per_file_copt", "[@-DX", &parse_label).unwrap_err();
+        assert!(error.to_string().starts_with("While parsing option --host_per_file_copt=[@-DX: Failed to build valid regular expression: "), "{error}");
+    }
+
+    #[test]
     fn config_settings_match_as_bazels_do() {
         let mut options = options();
         options.apply("copt", "-O2", &parse_label).unwrap();

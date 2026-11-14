@@ -29,6 +29,9 @@ pub enum OptionType {
     Labels,
     /// `name=value` pairs, such as `--define`'s.
     Assignments,
+    /// A list of `filter@option,option` values, such as `--per_file_copt`'s:
+    /// strings, which must parse as [`crate::PerLabelOptions`].
+    PerLabelOptions,
 }
 
 /// What an option is when the command line doesn't give it.
@@ -286,7 +289,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         multiple("host_jvmopt", Strings),
         multiple("host_linkopt", Strings),
         option("host_macos_minimum_os", String, Null),
-        multiple("host_per_file_copt", Strings),
+        multiple("host_per_file_copt", PerLabelOptions),
         option("host_platform", Label, Text("@@platforms//host:host")),
         option("include_config_fragments_provider", String, Text("off")),
         option("incompatible_always_include_files_in_data", Bool, Text("true")),
@@ -350,7 +353,7 @@ pub static NATIVE_OPTIONS: &[NativeOption] = {
         option("non_incremental_per_target_dexopts", CommaStrings, Text("--positions")),
         option("objc_use_dotd_pruning", Bool, Text("true")),
         option("one_version_enforcement_on_java_tests", Bool, Text("true")),
-        multiple("per_file_copt", Strings),
+        multiple("per_file_copt", PerLabelOptions),
         option("platform_mappings", String, Text("")),
         option("platforms", Labels, Text("")),
         multiple("plugin", Labels),
@@ -423,7 +426,7 @@ fn default_value(option: &NativeOption) -> OptionValue {
 /// empty list, since Bazel's lists start empty.
 fn null_value(ty: OptionType) -> OptionValue {
     match ty {
-        OptionType::Strings | OptionType::CommaStrings => OptionValue::Strings(Vec::new()),
+        OptionType::Strings | OptionType::CommaStrings | OptionType::PerLabelOptions => OptionValue::Strings(Vec::new()),
         OptionType::Labels => OptionValue::Labels(Vec::new()),
         OptionType::Assignments => OptionValue::Assignments(Vec::new()),
         _ => OptionValue::Null,
@@ -450,7 +453,7 @@ impl NativeOption {
 
     /// Whether the option's value is a list.
     pub fn is_list(&self) -> bool {
-        matches!(self.ty, OptionType::Strings | OptionType::CommaStrings | OptionType::Labels | OptionType::Assignments)
+        matches!(self.ty, OptionType::Strings | OptionType::CommaStrings | OptionType::Labels | OptionType::Assignments | OptionType::PerLabelOptions)
     }
 
     /// The value one use of the option, `--name=text`, gives.
@@ -474,6 +477,10 @@ impl NativeOption {
             OptionType::CommaStrings => Ok(OptionValue::Strings(comma_separated(text).map(str::to_string).collect())),
             OptionType::Labels => parse_labels(text, parse_label),
             OptionType::Assignments => parse_assignment(text).map(|pair| OptionValue::Assignments(vec![pair])),
+            OptionType::PerLabelOptions => match crate::PerLabelOptions::parse(text) {
+                Ok(_) => Ok(OptionValue::Strings(vec![text.to_string()])),
+                Err(error) => Err(error.to_string()),
+            },
         }
     }
 
