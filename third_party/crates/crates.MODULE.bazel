@@ -287,6 +287,13 @@ crate.spec(
     version = "1",
 )
 
+# Regular expressions with Java's lookaround and atomic groups, for options
+# Bazel matches with Java's, such as --per_file_copt.
+crate.spec(
+    package = "fancy-regex",
+    version = "0.16",
+)
+
 # Fetching external repositories: HTTP downloads and the archive formats
 # Bazel can extract.
 crate.spec(

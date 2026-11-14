@@ -771,6 +771,7 @@ dependencies = [
  "dashmap",
  "data-encoding",
  "dhat",
+ "fancy-regex",
  "flate2",
  "futures",
  "hashbrown 0.16.1",

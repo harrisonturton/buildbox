@@ -7,6 +7,7 @@ rust_library(
     srcs = [
         "config.rs",
         "options.rs",
+        "per_label_options.rs",
     ],
     crate_name = "bazel_config",
     crate_root = "config.rs",
@@ -15,6 +16,7 @@ rust_library(
         "//buildbox/bazel/label",
         "//buildbox/intern",
         "//buildbox/skycodec",
+        "@crates//:fancy-regex",
         "@crates//:ring",
         "@crates//:thiserror",
     ],

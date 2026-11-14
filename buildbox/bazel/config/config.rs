@@ -6,7 +6,9 @@
 //! to theirs by a 4-byte [`ConfigId`].
 
 mod options;
+mod per_label_options;
 
+pub use per_label_options::{FilterError, PerLabelOptions, RegexFilter};
 pub use options::{BuildOptions, FlagValue, LabelParser, NATIVE_OPTIONS, NativeOption, OptionDefault, OptionError, OptionType, OptionValue, command_line_options, native_option};
 
 use bazel_label::Label;

@@ -1,5 +1,5 @@
 {
-  "checksum": "538273c45a82f6c6f82f7a77359ca8fe9023d0459f72c2277c12228edb0b5749",
+  "checksum": "bdb224d0f4372e01acf25b381497e4d050cd3cc0323f5d2d2134e166c6b5c592",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -3686,6 +3686,10 @@
           {
             "id": "dhat 0.3.3",
             "target": "dhat"
+          },
+          {
+            "id": "fancy-regex 0.16.2",
+            "target": "fancy_regex"
           },
           {
             "id": "flate2 1.1.10",
@@ -16502,6 +16506,7 @@
     "dashmap 6.2.1",
     "data-encoding 2.11.1",
     "dhat 0.3.3",
+    "fancy-regex 0.16.2",
     "flate2 1.1.10",
     "futures 0.3.34",
     "hashbrown 0.16.1",
