@@ -173,6 +173,12 @@ fn rc_lines_are_split_like_a_shell() {
 }
 
 #[test]
+fn rc_lines_take_one_backslash_from_two() {
+    let rc = rc::parse_for_test("build --per_file_copt=.*,-^external/.*,-^\\\\x40.*@-Wall\n");
+    assert_eq!(rc.command_args("build"), ["--per_file_copt=.*,-^external/.*,-^\\x40.*@-Wall"]);
+}
+
+#[test]
 fn bazels_options_table_parses() {
     let jobs = bazel_option("jobs").unwrap();
     assert_eq!((jobs.kind, jobs.default), (BazelKind::Value, Some("auto")));
