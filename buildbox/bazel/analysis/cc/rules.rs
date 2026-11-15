@@ -94,7 +94,8 @@ pub fn cc_toolchain<'v>(input: &RuleInput, prepared: &Prepared<'v>, heap: Heap<'
     Ok(heap.alloc(AllocList([toolchain, toolchain_info, template_variables, default_info])))
 }
 
-/// The make variables a C++ toolchain gives genrules, such as `$(CC)`.
+/// The make variables a C++ toolchain gives the rules that resolve it, such
+/// as `$(CC)`.
 fn make_variables<'v>(config: &super::config::CcToolchainConfig, heap: Heap<'v>) -> Value<'v> {
     let tool = |name: &str| config.tool_path(name).unwrap_or_default().to_string();
     let mut variables = vec![
@@ -107,6 +108,9 @@ fn make_variables<'v>(config: &super::config::CcToolchainConfig, heap: Heap<'v>)
         ("GCOVTOOL".to_string(), tool("gcov")),
         ("C_COMPILER".to_string(), config.compiler.clone()),
         ("CC_FLAGS".to_string(), String::new()),
+        // For rules to lift limits on the size of stack frames, as LLVM's
+        // do; empty, as rules_cc's toolchains have it unless they set it.
+        ("STACK_FRAME_UNLIMITED".to_string(), String::new()),
     ];
     variables.extend(config.make_variables.iter().cloned());
     heap.alloc(AllocDict(variables))
