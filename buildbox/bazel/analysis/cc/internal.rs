@@ -25,6 +25,7 @@ use crate::fragments::Fragment;
 use crate::state::RuleState;
 use bazel_config::PerLabelOptions;
 use bazel_label::Label;
+use intern::PathId;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -249,8 +250,10 @@ fn cc_internal_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<FileValue> {
         let _ = (this, ctx, configuration);
         let label = label.downcast_ref::<LabelValue>().ok_or_else(|| anyhow::anyhow!("declare_compile_output_file: label must be a Label"))?.0;
-        let path = format!("{}/_objs/{}/{output_name}", crate::artifact::package_dir(label.package), label.name);
-        Ok(FileValue(RuleState::get(eval)?.declare_at_root(&path)?))
+        let objects = format!("_objs/{}/{output_name}", label.name);
+        let objects = PathId::parse(&objects).map_err(|error| anyhow::anyhow!("declare_compile_output_file: invalid file path '{objects}': {error}"))?;
+        let path = crate::artifact::package_dir(label.package).join_path(objects);
+        Ok(FileValue(RuleState::get(eval)?.declare_at_root(&path.to_string())?))
     }
 
     /// A file named `output_name` beside `object_file`.
