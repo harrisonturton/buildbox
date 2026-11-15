@@ -11,6 +11,7 @@ use crate::expand::LocationStyle;
 use crate::exec_groups::ExecGroups;
 use crate::failure::{AttributeErrors, ImplementationFailed};
 use crate::file_value::{FileRoot, FileValue};
+use crate::make_variables::MakeVariables;
 use crate::providers::{self, Defaults};
 use crate::rule_ctx::RuleCtx;
 use crate::runfiles::{FilesToRun, Runfiles};
@@ -36,7 +37,7 @@ use starlark::values::dict::{AllocDict, DictRef};
 use starlark::values::list::AllocList;
 use starlark::values::structs::AllocStruct;
 use starlark::values::{Heap, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// An analyzed dependency.
@@ -277,7 +278,7 @@ pub fn run<'v>(module: &Module<'v>, input: &RuleInput, printed: &mut Vec<Printed
         deps: dep_values(module, input)?,
         outputs: predeclare(input, &state)?,
     };
-    state.make_variables = crate::state::make_variables(&input.config, &input.target_cpu, template_variables(input, &prepared));
+    state.make_variables = MakeVariables::new(&input.config, &input.target_cpu, template_variables(input, &prepared));
     state.locations = locations(input, &prepared)?;
     let fields = ctx_fields(input, &state, &prepared, heap)?;
     let ctx = heap.alloc(RuleCtx {
@@ -531,26 +532,23 @@ fn substitute_template(template: &str, input: &RuleInput) -> String {
     out
 }
 
-/// The make variables a rule's toolchains define with
-/// `TemplateVariableInfo`: those of the targets in its `toolchains`
-/// attribute, then those of its resolved toolchains, the first definition
-/// of each winning, as Bazel looks them up.
-fn template_variables(input: &RuleInput, prepared: &Prepared<'_>) -> Vec<(String, String)> {
-    let mut variables = Vec::new();
+/// The variables of each `TemplateVariableInfo` a rule's toolchains
+/// give: those of the targets in its `toolchains` attribute, then those of
+/// its resolved toolchains, in the order Bazel looks them up.
+fn template_variables(input: &RuleInput, prepared: &Prepared<'_>) -> Vec<Vec<(String, String)>> {
+    let mut templates = Vec::new();
     for target in prepared.targets(input, "toolchains") {
         if let Some(info) = TargetValue::from_value(target).and_then(|target| target.provider(TEMPLATE_VARIABLE_INFO)) {
-            variables.extend(template_variable_info(info));
+            templates.push(template_variable_info(info));
         }
     }
     let resolved = input.toolchains.resolved.iter().filter_map(|(_, toolchain)| toolchain.as_ref()?.providers().ok());
     for providers in resolved {
         if let Some(info) = providers.get().and_then(|target| target.provider(TEMPLATE_VARIABLE_INFO)) {
-            variables.extend(template_variable_info(info));
+            templates.push(template_variable_info(info));
         }
     }
-    let mut seen = HashSet::new();
-    variables.retain(|(name, _)| seen.insert(name.clone()));
-    variables
+    templates
 }
 
 /// The provider toolchains define make variables with.
@@ -613,7 +611,7 @@ fn ctx_fields<'v>(input: &RuleInput, state: &RuleState, prepared: &Prepared<'v>,
     set("workspace_name", heap.alloc("_main"));
     let build_file_path = artifact::package_dir(input.label.package).join(input.build_file.name);
     set("build_file_path", heap.alloc(build_file_path.to_string()));
-    set("var", heap.alloc(AllocDict(state.make_variables.iter().map(|(name, value)| (name.as_str(), value.as_str())))));
+    set("var", heap.alloc(AllocDict(state.make_variables.all())));
     let options = config.options.clone();
     set("configuration", heap.alloc(crate::fragments::Configuration(options.clone())));
     set("features", heap.alloc(AllocList::EMPTY));

@@ -6,15 +6,16 @@ use crate::artifact::{self, Artifact};
 use crate::expand::LocationStyle;
 use crate::runfiles::Runfiles;
 use crate::inputs::{InputSet, InputSets};
+use crate::make_variables::MakeVariables;
 use crate::shared::Sharing;
-use bazel_config::{BuildConfiguration, OptionValue};
+use bazel_config::BuildConfiguration;
 use bazel_label::{Label, LabelContext, RepoMappingTable};
 use bazel_starlark::EvalContext;
 use intern::PathId;
 use starlark::eval::Evaluator;
 use starlark::values::Value;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 /// The state of analyzing one rule, which the builtins of rule
@@ -46,8 +47,8 @@ pub struct RuleState {
     resolve_command_scripts: Cell<u32>,
     /// The input sets of the depsets actions read.
     pub input_sets: RefCell<InputSets>,
-    /// Make variables, such as `$(BINDIR)`, by name.
-    pub make_variables: Vec<(String, String)>,
+    /// Make variables, such as `$(BINDIR)`.
+    pub make_variables: MakeVariables,
     /// The files `$(location)` expands each label to: those of the
     /// dependencies, and the rule's outputs.
     pub locations: Vec<(Label, Vec<Artifact>)>,
@@ -94,7 +95,7 @@ impl RuleState {
     }
 
     pub fn new(label: Label, kind: Symbol, config: Arc<BuildConfiguration>, mapping: Arc<RepoMappingTable>, main_mapping: Arc<RepoMappingTable>) -> RuleState {
-        let make_variables = make_variables(&config, &config.cpu, Vec::new());
+        let make_variables = MakeVariables::new(&config, &config.cpu, Vec::new());
         RuleState {
             label,
             kind,
@@ -306,7 +307,7 @@ impl RuleState {
     }
 
     pub fn make_variable(&self, name: &str) -> Option<&str> {
-        self.make_variables.iter().find(|(variable, _)| variable == name).map(|(_, value)| value.as_str())
+        self.make_variables.lookup(name)
     }
 }
 
@@ -375,22 +376,4 @@ pub fn action_execution_info(requirements: Vec<(String, String)>, tags: &[(Strin
     }
     info.sort();
     info
-}
-
-/// The make variables a rule sees, as Bazel's
-/// `ConfigurationMakeVariableContext` gives them: the configuration's, for
-/// a target CPU of `target_cpu`, then those of the rule's toolchains, then
-/// `--define`s, each taking precedence over those before.
-pub fn make_variables(config: &BuildConfiguration, target_cpu: &str, toolchains: Vec<(String, String)>) -> Vec<(String, String)> {
-    let bin_dir = config.bin_dir();
-    let mut variables: BTreeMap<String, String> = BTreeMap::new();
-    variables.insert("COMPILATION_MODE".to_string(), config.compilation_mode.clone());
-    variables.insert("BINDIR".to_string(), bin_dir.clone());
-    variables.insert("GENDIR".to_string(), bin_dir);
-    variables.insert("TARGET_CPU".to_string(), target_cpu.to_string());
-    variables.extend(toolchains);
-    if let Ok(OptionValue::Assignments(defines)) = config.options.get("define") {
-        variables.extend(defines.iter().cloned());
-    }
-    variables.into_iter().collect()
 }

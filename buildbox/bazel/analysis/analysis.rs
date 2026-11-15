@@ -29,6 +29,7 @@ mod fragments;
 mod inputs;
 mod java;
 mod late_bound;
+mod make_variables;
 mod native;
 mod package_spec;
 pub mod paging;

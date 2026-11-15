@@ -41,6 +41,7 @@ rust_library(
         "java/compile.rs",
         "java/toolchain.rs",
         "late_bound.rs",
+        "make_variables.rs",
         "fragments.rs",
         "native.rs",
         "package_spec.rs",
